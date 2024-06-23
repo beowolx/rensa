@@ -9,6 +9,7 @@ name = "rensa"
 crate-type = ["cdylib"]
 
 [dependencies]
+fxhash = "0.2.1"
 murmurhash3 = "0.0.5"
 pyo3 = "0.21.1"
 rand = "0.8.5"

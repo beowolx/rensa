@@ -70,4 +70,4 @@ def run_benchmark(num_docs=100000, duplicate_ratio=0.2, num_perm=128, threshold=
     print(f"Speed-up: {time_datasketch / time_cminhash:.2f}x")
 
 # Run the benchmark
-run_benchmark(num_docs=1000, duplicate_ratio=0.2, num_perm=128, threshold=0.5, num_bands=64)
+run_benchmark(num_docs=100000, duplicate_ratio=0.2, num_perm=128, threshold=0.5, num_bands=64)

@@ -61,11 +61,11 @@ def run_simple_benchmark():
     for doc in documents:
         print(f"- {doc}")
     print("\nCMinHash (rensa) results:")
-    evaluate_simple(simple_deduplicate, documents, CMinHash, num_perm=128, threshold=0.5)
+    evaluate_simple(simple_deduplicate, documents, CMinHash, num_perm=128, threshold=0.6)
 
     print("\nDatasketch MinHash results:")
     from datasketch import MinHash
-    evaluate_simple(simple_deduplicate, documents, MinHash, num_perm=128, threshold=0.5)
+    evaluate_simple(simple_deduplicate, documents, MinHash, num_perm=128, threshold=0.6)
 
 # Run the simple benchmark
 if __name__ == "__main__":
