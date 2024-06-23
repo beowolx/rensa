@@ -84,12 +84,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "murmurhash3"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2983372caf4480544083767bf2d27defafe32af49ab4df3a0b7fc90793a3664"
-
-[[package]]
 name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -255,7 +249,6 @@ name = "rensa"
 version = "0.1.0"
 dependencies = [
  "fxhash",
- "murmurhash3",
  "pyo3",
  "rand",
 ]

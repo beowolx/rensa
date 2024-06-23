@@ -2,14 +2,25 @@
 name = "rensa"
 version = "0.1.0"
 edition = "2021"
+authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
+description = "High-performance MinHash implementation in Rust with Python bindings for efficient similarity estimation and deduplication of large datasets"
+readme = "README.md"
+license-file = "LICENSE"
+repository = "https://github.com/beowolx/rensa"
+keywords = ["minhash", "lsh", "similarity", "deduplication", "data-mining"]
+categories = [
+  "algorithms",
+  "data-structures",
+  "science",
+  "text-processing",
+  "database-implementations",
+]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "rensa"
 crate-type = ["cdylib"]
 
 [dependencies]
 fxhash = "0.2.1"
-murmurhash3 = "0.0.5"
 pyo3 = "0.21.1"
 rand = "0.8.5"
