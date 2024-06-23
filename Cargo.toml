@@ -1,6 +1,6 @@
 [package]
 name = "rensa"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
 description = "High-performance MinHash implementation in Rust with Python bindings for efficient similarity estimation and deduplication of large datasets"
