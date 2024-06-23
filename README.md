@@ -42,7 +42,7 @@ These design choices result in a MinHash implementation that is fast, memory-eff
 
 ## Installation
 
-You can install Rensa using pip:
+You can install Rensa using `pip`. It's available in all platforms:
 
 ```bash
 pip install rensa
