@@ -54,31 +54,44 @@ Here's an example of how to use Rensa to deduplicate a dataset:
 
 ```python
 from datasets import load_dataset
-from rensa import RMinHash, RMinHashLSH
+from rensa import RMinHash
+from tqdm import tqdm
 
-# Load the dataset
-dataset = load_dataset("gretelai/synthetic_text_to_sql", split="train")
+def rensa_minhash(text, num_perm=128):
+    m = RMinHash(num_perm=num_perm, seed=42)
+    m.update(text.split())
+    return m
 
-# Initialize MinHash and LSH
-num_perm = 128
-threshold = 0.5
-minhash_lsh = RMinHashLSH(threshold=threshold, num_perm=num_perm, num_bands=16)
-
-# Deduplicate the dataset
-unique_indices = set()
-for idx, example in enumerate(dataset):
-    minhash = RMinHash(num_perm=num_perm, seed=42)
-    minhash.update(example["sql"].split())
+def deduplicate_dataset(dataset, num_perm=128):
+    unique_hashes = set()
+    deduplicated_indices = []
     
-    if not minhash_lsh.query(minhash):
-        minhash_lsh.insert(idx, minhash)
-        unique_indices.add(idx)
+    for idx, example in tqdm(enumerate(dataset), total=len(dataset), desc="Deduplicating"):
+        minhash = rensa_minhash(example["sql"], num_perm)
+        hash_tuple = tuple(minhash.digest())
+        
+        if hash_tuple not in unique_hashes:
+            unique_hashes.add(hash_tuple)
+            deduplicated_indices.append(idx)
+    
+    return deduplicated_indices
 
-# Create a new dataset with only unique items
-deduplicated_dataset = dataset.select(list(unique_indices))
-
-print(f"Original dataset size: {len(dataset)}")
-print(f"Deduplicated dataset size: {len(deduplicated_dataset)}")
+def main():
+    print("Loading dataset...")
+    sql_dataset = load_dataset("gretelai/synthetic_text_to_sql", split="train")
+    
+    print("Deduplicating dataset...")
+    deduplicated_indices = deduplicate_dataset(sql_dataset)
+    
+    deduplicated_dataset = sql_dataset.select(deduplicated_indices)
+    
+    print("\nDeduplication Results:")
+    print(f"Original dataset size: {len(sql_dataset)}")
+    print(f"Deduplicated dataset size: {len(deduplicated_dataset)}")
+    print(f"Rows removed: {len(sql_dataset) - len(deduplicated_dataset)}")
+    
+if __name__ == "__main__":
+    main()
 ```
 
 ## Benchmark Results
@@ -93,7 +106,7 @@ I've conducted extensive benchmarks comparing Rensa to the popular `datasketch` 
 
 4. **Accuracy**: Despite the simplified implementation, Rensa achieves the same deduplication results to `datasketch`, with a high Jaccard similarity between the deduplicated sets produced by both libraries.
 
-[INSERT GRAPH HERE]
+![Graph of benchmarks](https://raw.githubusercontent.com/beowolx/rensa/main/assets/bench.webp)
 
 These results demonstrate that Rensa offers significant performance benefits while maintaining accuracy, making it an excellent choice for large-scale similarity estimation and deduplication tasks.
 
