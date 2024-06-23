@@ -1,7 +1,7 @@
 import time
 from datasets import load_dataset
 from datasketch import MinHash
-from rensa import CMinHash
+from rensa import RMinHash
 from tqdm import tqdm
 
 def datasketch_minhash(text, num_perm=128):
@@ -11,7 +11,7 @@ def datasketch_minhash(text, num_perm=128):
     return m
 
 def rensa_minhash(text, num_perm=128):
-    m = CMinHash(num_perm=num_perm, seed=42)
+    m = RMinHash(num_perm=num_perm, seed=42)
     m.update(text.split())
     return m
 
@@ -26,7 +26,7 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processin
         
         if isinstance(minhash, MinHash):
             hash_tuple = tuple(minhash.digest())
-        else:  # CMinHash
+        else:  # RMinHash
             hash_tuple = tuple(minhash.digest())
         
         if hash_tuple not in unique_hashes:

@@ -4,17 +4,17 @@ use rand::prelude::*;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-/// CMinHash implements the MinHash algorithm for efficient similarity estimation.
+/// RMinHash implements the MinHash algorithm for efficient similarity estimation.
 #[pyclass]
-struct CMinHash {
+struct RMinHash {
   num_perm: usize,
   hash_values: Vec<u32>,
   permutations: Vec<(u64, u64)>,
 }
 
 #[pymethods]
-impl CMinHash {
-  /// Creates a new CMinHash instance.
+impl RMinHash {
+  /// Creates a new RMinHash instance.
   ///
   /// # Arguments
   ///
@@ -26,7 +26,7 @@ impl CMinHash {
     let permutations: Vec<(u64, u64)> =
       (0..num_perm).map(|_| (rng.gen(), rng.gen())).collect();
 
-    CMinHash {
+    RMinHash {
       num_perm,
       hash_values: vec![u32::MAX; num_perm],
       permutations,
@@ -61,12 +61,12 @@ impl CMinHash {
   ///
   /// # Arguments
   ///
-  /// * `other` - Another CMinHash instance to compare with.
+  /// * `other` - Another RMinHash instance to compare with.
   ///
   /// # Returns
   ///
   /// A float value representing the estimated Jaccard similarity.
-  fn jaccard(&self, other: &CMinHash) -> f64 {
+  fn jaccard(&self, other: &RMinHash) -> f64 {
     let equal_count = self
       .hash_values
       .iter()
@@ -77,9 +77,9 @@ impl CMinHash {
   }
 }
 
-/// CMinHashLSH implements Locality-Sensitive Hashing using MinHash for efficient similarity search.
+/// RMinHashLSH implements Locality-Sensitive Hashing using MinHash for efficient similarity search.
 #[pyclass]
-struct CMinHashLSH {
+struct RMinHashLSH {
   threshold: f64,
   num_perm: usize,
   num_bands: usize,
@@ -88,8 +88,8 @@ struct CMinHashLSH {
 }
 
 #[pymethods]
-impl CMinHashLSH {
-  /// Creates a new CMinHashLSH instance.
+impl RMinHashLSH {
+  /// Creates a new RMinHashLSH instance.
   ///
   /// # Arguments
   ///
@@ -98,7 +98,7 @@ impl CMinHashLSH {
   /// * `num_bands` - The number of bands for the LSH algorithm.
   #[new]
   fn new(threshold: f64, num_perm: usize, num_bands: usize) -> Self {
-    CMinHashLSH {
+    RMinHashLSH {
       threshold,
       num_perm,
       num_bands,
@@ -112,8 +112,8 @@ impl CMinHashLSH {
   /// # Arguments
   ///
   /// * `key` - A unique identifier for the MinHash.
-  /// * `minhash` - The CMinHash instance to be inserted.
-  fn insert(&mut self, key: usize, minhash: &CMinHash) {
+  /// * `minhash` - The RMinHash instance to be inserted.
+  fn insert(&mut self, key: usize, minhash: &RMinHash) {
     let digest = minhash.digest();
     for (i, table) in self.hash_tables.iter_mut().enumerate() {
       let start = i * self.band_size;
@@ -127,12 +127,12 @@ impl CMinHashLSH {
   ///
   /// # Arguments
   ///
-  /// * `minhash` - The CMinHash instance to query for.
+  /// * `minhash` - The RMinHash instance to query for.
   ///
   /// # Returns
   ///
   /// A vector of keys (usize) of potentially similar items.
-  fn query(&self, minhash: &CMinHash) -> Vec<usize> {
+  fn query(&self, minhash: &RMinHash) -> Vec<usize> {
     let digest = minhash.digest();
     let mut candidates = Vec::new();
     for (i, table) in self.hash_tables.iter().enumerate() {
@@ -152,13 +152,13 @@ impl CMinHashLSH {
   ///
   /// # Arguments
   ///
-  /// * `minhash1` - The first CMinHash instance.
-  /// * `minhash2` - The second CMinHash instance.
+  /// * `minhash1` - The first RMinHash instance.
+  /// * `minhash2` - The second RMinHash instance.
   ///
   /// # Returns
   ///
   /// A boolean indicating whether the MinHashes are considered similar.
-  fn is_similar(&self, minhash1: &CMinHash, minhash2: &CMinHash) -> bool {
+  fn is_similar(&self, minhash1: &RMinHash, minhash2: &RMinHash) -> bool {
     minhash1.jaccard(minhash2) >= self.threshold
   }
 
@@ -199,7 +199,7 @@ fn calculate_band_hash(band: &[u32]) -> u64 {
 
 #[pymodule]
 fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
-  m.add_class::<CMinHash>()?;
-  m.add_class::<CMinHashLSH>()?;
+  m.add_class::<RMinHash>()?;
+  m.add_class::<RMinHashLSH>()?;
   Ok(())
 }

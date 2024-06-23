@@ -2,7 +2,7 @@ import time
 import statistics
 from datasets import load_dataset
 from datasketch import MinHash
-from rensa import CMinHash
+from rensa import RMinHash
 import memory_profiler
 import cProfile
 import pstats
@@ -15,7 +15,7 @@ def datasketch_minhash(text, num_perm=128):
     return m
 
 def rensa_minhash(text, num_perm=128):
-    m = CMinHash(num_perm=num_perm, seed=42)
+    m = RMinHash(num_perm=num_perm, seed=42)
     m.update(text.split())
     return m
 
@@ -28,7 +28,7 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128):
         
         if isinstance(minhash, MinHash):
             hash_tuple = tuple(minhash.digest())
-        else:  # CMinHash
+        else:  # RMinHash
             hash_tuple = tuple(minhash.digest())
         
         if hash_tuple not in unique_hashes:
