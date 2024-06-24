@@ -30,7 +30,7 @@ Key aspects of Rensa's implementation include:
 
 3. **Trade-off between memory and variance reduction**: Rensa's approach trades some of the variance reduction benefits of full C-MinHash for improved memory efficiency and simplicity. While it may not achieve the same level of variance reduction as C-MinHash, it still offers better performance than traditional MinHash in many scenarios.
 
-4. **Fast hash function**: Rensa uses the [fxhash](https://crates.io/crates/fxhash) crate which implements the FxHash algorithm, a fast, non-cryptographic hash function, to further optimize performance.
+4. **Fast hash function**: Rensa uses the [rustc-hash](https://github.com/rust-lang/rustc-hash) crate which implements the FxHash algorithm, a fast, non-cryptographic hash function, to further optimize performance.
 
 5. **Vectorized operations**: The R-MinHash computation is optimized using vector operations, allowing for efficient parallel processing of multiple hash values.
 
