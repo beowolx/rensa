@@ -26,7 +26,6 @@ pyarrow-hotfix==0.6
 python-dateutil==2.9.0.post0
 pytz==2024.1
 PyYAML==6.0.1
--e git+ssh://git@github.com/beowolx/rensa.git@ad061e2ad6bebe00c09b12bbed144ffda58f9243#egg=rensa
 requests==2.32.3
 scipy==1.13.1
 six==1.16.0
