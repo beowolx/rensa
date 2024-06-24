@@ -1,6 +1,6 @@
-use fxhash::FxHasher;
 use pyo3::prelude::*;
 use rand::prelude::*;
+use rustc_hash::FxHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 

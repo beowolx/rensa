@@ -1,6 +1,6 @@
 [package]
 name = "rensa"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
 description = "High-performance MinHash implementation in Rust with Python bindings for efficient similarity estimation and deduplication of large datasets"
@@ -21,6 +21,6 @@ name = "rensa"
 crate-type = ["cdylib"]
 
 [dependencies]
-fxhash = "0.2.1"
 pyo3 = "0.21.1"
 rand = "0.8.5"
+rustc-hash = "2.0.0"
