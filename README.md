@@ -120,17 +120,23 @@ To run the benchmarks yourself, follow these steps:
    cd rensa
    ```
 
-2. Install the required dependencies:
+2. Create a virtual environment:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Run the simple benchmark:
+4. Run the simple benchmark:
    ```bash
    python benchmarks/simple_benchmark.py
    ```
 
-4. Run the advanced benchmark:
+5. Run the advanced benchmark:
    ```bash
    python benchmarks/advanced_benchmark.py
    ```
