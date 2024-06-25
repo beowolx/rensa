@@ -66,7 +66,7 @@ def run_benchmark():
     
     print("\nComparison:")
     common_indices = datasketch_results['deduplicated_indices'].intersection(rensa_results['deduplicated_indices'])
-    print(f"Rows removed by both: {len(common_indices)}")
+    print(f"Rows remaining in both: {len(common_indices)}")
     print(f"Rows removed only by Datasketch: {len(datasketch_results['deduplicated_indices'] - rensa_results['deduplicated_indices'])}")
     print(f"Rows removed only by Rensa: {len(rensa_results['deduplicated_indices'] - datasketch_results['deduplicated_indices'])}")
     
