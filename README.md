@@ -1,4 +1,4 @@
-# Rensa: High-Performance MinHash Implementation in Rust
+# Rensa: A novel high-performance MinHash Implementation in Rust
 
 ## Introduction
 
@@ -96,19 +96,33 @@ if __name__ == "__main__":
 
 ## Benchmark Results
 
-I've conducted extensive benchmarks comparing Rensa to the popular `datasketch` library. Here are the key findings:
+![Graph with benchmark results that demonstrate that Rensa is 12x faster](https://github.com/beowolx/rensa/assets/61982523/c793ad0d-0cfd-4ec5-8d4b-4e1b02feda5a)
 
-1. **Speed**: Rensa consistently outperforms `datasketch` in terms of speed, with performance improvements of 2.5-3 times faster across different numbers of permutations.
+### Speed
 
-2. **Memory Usage**: Memory usage is comparable between Rensa and `datasketch`, with Rensa using slightly less memory for smaller numbers of permutations.
+Rensa significantly outperforms `datasketch` in terms of speed. The table below provides a detailed comparison of execution times for different numbers of permutations:
 
-3. **Scalability**: Both implementations show linear growth in time and memory usage as the number of permutations increases, but Rensa maintains its performance advantage across the scale.
+| Permutations | Datasketch Time (s) | Rensa Time (s) | Speedup      |
+|--------------|---------------------|----------------|--------------|
+| 64           | 34.48               | 4.89           | 7.05x faster |
+| 128          | 49.62               | 5.21           | 9.52x faster |
+| 256          | 84.76               | 6.39           | 13.26x faster|
 
-4. **Accuracy**: Despite the simplified implementation, Rensa achieves the same deduplication results to `datasketch`, with a high Jaccard similarity between the deduplicated sets produced by both libraries.
+### Memory Usage
 
-![Graph of benchmarks](https://raw.githubusercontent.com/beowolx/rensa/main/assets/bench.webp)
+Memory usage is comparable between Rensa and `datasketch`, with Rensa showing slightly better performance for smaller numbers of permutations. The table below provides the details:
 
-These results demonstrate that Rensa offers significant performance benefits while maintaining accuracy, making it an excellent choice for large-scale similarity estimation and deduplication tasks.
+| Permutations | Datasketch Memory (MB) | Rensa Memory (MB) | Difference (MB) |
+|--------------|-------------------------|-------------------|-----------------|
+| 64           | 265.75                  | 242.36            | 23.39 less      |
+| 128          | 487.02                  | 472.97            | 14.05 less      |
+| 256          | 811.64                  | 774.49            | 37.15 less      |
+
+
+### Accuracy
+
+Despite the simplified implementation, Rensa achieves the same deduplication results as `datasketch`. The Jaccard similarity between the deduplicated sets produced by both libraries is 1.0000, indicating identical results.
+
 
 ## Running the Benchmarks
 
