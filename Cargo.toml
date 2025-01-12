@@ -21,6 +21,6 @@ name = "rensa"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.21.1"
+pyo3 = "0.23.4"
 rand = "0.8.5"
 rustc-hash = "2.0.0"
