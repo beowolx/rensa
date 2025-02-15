@@ -1,13 +1,18 @@
+use bincode::{deserialize, serialize};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use rand::prelude::*;
 use rustc_hash::FxHasher;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// RMinHash implements the MinHash algorithm for efficient similarity estimation.
-#[pyclass]
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "rensa")]
 struct RMinHash {
   num_perm: usize,
+  seed: u64,
   hash_values: Vec<u32>,
   permutations: Vec<(u64, u64)>,
 }
@@ -28,6 +33,7 @@ impl RMinHash {
 
     RMinHash {
       num_perm,
+      seed,
       hash_values: vec![u32::MAX; num_perm],
       permutations,
     }
@@ -75,10 +81,27 @@ impl RMinHash {
       .count();
     equal_count as f64 / self.num_perm as f64
   }
+
+  fn __setstate__(&mut self, state: Bound<'_, PyBytes>) -> PyResult<()> {
+    *self = deserialize(state.as_bytes()).unwrap();
+    Ok(())
+  }
+
+  fn __getstate__<'py>(
+    &self,
+    py: Python<'py>,
+  ) -> PyResult<Bound<'py, PyBytes>> {
+    Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+  }
+
+  fn __getnewargs__(&self) -> PyResult<(usize, u64)> {
+    Ok((self.num_perm, self.seed))
+  }
 }
 
 /// RMinHashLSH implements Locality-Sensitive Hashing using MinHash for efficient similarity search.
-#[pyclass]
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "rensa")]
 struct RMinHashLSH {
   threshold: f64,
   num_perm: usize,
@@ -170,6 +193,22 @@ impl RMinHashLSH {
   /// Returns the number of bands used in the LSH index.
   fn get_num_bands(&self) -> usize {
     self.num_bands
+  }
+
+  fn __setstate__(&mut self, state: Bound<'_, PyBytes>) -> PyResult<()> {
+    *self = deserialize(state.as_bytes()).unwrap();
+    Ok(())
+  }
+
+  fn __getstate__<'py>(
+    &self,
+    py: Python<'py>,
+  ) -> PyResult<Bound<'py, PyBytes>> {
+    Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+  }
+
+  fn __getnewargs__(&self) -> PyResult<(f64, usize, usize)> {
+    Ok((self.threshold, self.num_perm, self.num_bands))
   }
 }
 
