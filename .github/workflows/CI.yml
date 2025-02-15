@@ -206,6 +206,18 @@ jobs:
             echo "Rensa is ${speedup}x faster than datasketch, >= 10x requirement — OK"
           fi
 
+          # Check Jaccard similarity
+          jaccard_line=$(grep "Jaccard similarity" benchmark_log.txt | tail -1)
+          jaccard=$(echo "$jaccard_line" | sed -n 's/.*similarity of deduplicated sets: \([0-9\.]*\)/\1/p')
+          echo "Jaccard similarity = $jaccard"
+
+          if (( $(echo "$jaccard < 1.0" | bc -l) )); then
+            echo "Jaccard similarity ${jaccard} is not 1.0 — FAIL"
+            exit 1
+          else
+            echo "Jaccard similarity is 1.0 — OK"
+          fi
+
   release:
     name: Release
     runs-on: ubuntu-latest
