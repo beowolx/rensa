@@ -1,3 +1,9 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![allow(clippy::unsafe_derive_deserialize)]
+#![allow(clippy::cast_precision_loss)]
+
 use bincode::{deserialize, serialize};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -32,7 +38,7 @@ impl RMinHash {
       .map(|_| (rng.random(), rng.random()))
       .collect();
 
-    RMinHash {
+    Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
@@ -73,36 +79,33 @@ impl RMinHash {
   /// # Returns
   ///
   /// A float value representing the estimated Jaccard similarity.
-  fn jaccard(&self, other: &RMinHash) -> f64 {
+  fn jaccard(&self, other: &Self) -> f64 {
     let equal_count = self
       .hash_values
       .iter()
       .zip(&other.hash_values)
       .filter(|&(&a, &b)| a == b)
       .count();
+    // Safe because self.num_perm is expected to be << 2^53.
     equal_count as f64 / self.num_perm as f64
   }
 
-  fn __setstate__(&mut self, state: Bound<'_, PyBytes>) -> PyResult<()> {
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
     *self = deserialize(state.as_bytes()).unwrap();
-    Ok(())
   }
 
-  fn __getstate__<'py>(
-    &self,
-    py: Python<'py>,
-  ) -> PyResult<Bound<'py, PyBytes>> {
-    Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    PyBytes::new(py, &serialize(&self).unwrap())
   }
 
-  fn __getnewargs__(&self) -> PyResult<(usize, u64)> {
-    Ok((self.num_perm, self.seed))
+  const fn __getnewargs__(&self) -> (usize, u64) {
+    (self.num_perm, self.seed)
   }
 
   fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
     Python::with_gil(|py| {
-      let type_obj = py.get_type::<RMinHash>().into();
-      let state = self.__getstate__(py)?.into();
+      let type_obj = py.get_type::<Self>().into();
+      let state = self.__getstate__(py).into();
       Ok((type_obj, (self.num_perm, self.seed), state))
     })
   }
@@ -130,7 +133,7 @@ impl RMinHashLSH {
   /// * `num_bands` - The number of bands for the LSH algorithm.
   #[new]
   fn new(threshold: f64, num_perm: usize, num_bands: usize) -> Self {
-    RMinHashLSH {
+    Self {
       threshold,
       num_perm,
       num_bands,
@@ -195,29 +198,25 @@ impl RMinHashLSH {
   }
 
   /// Returns the number of permutations used in the LSH index.
-  fn get_num_perm(&self) -> usize {
+  const fn get_num_perm(&self) -> usize {
     self.num_perm
   }
 
   /// Returns the number of bands used in the LSH index.
-  fn get_num_bands(&self) -> usize {
+  const fn get_num_bands(&self) -> usize {
     self.num_bands
   }
 
-  fn __setstate__(&mut self, state: Bound<'_, PyBytes>) -> PyResult<()> {
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
     *self = deserialize(state.as_bytes()).unwrap();
-    Ok(())
   }
 
-  fn __getstate__<'py>(
-    &self,
-    py: Python<'py>,
-  ) -> PyResult<Bound<'py, PyBytes>> {
-    Ok(PyBytes::new(py, &serialize(&self).unwrap()))
+  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    PyBytes::new(py, &serialize(&self).unwrap())
   }
 
-  fn __getnewargs__(&self) -> PyResult<(f64, usize, usize)> {
-    Ok((self.threshold, self.num_perm, self.num_bands))
+  const fn __getnewargs__(&self) -> (f64, usize, usize) {
+    (self.threshold, self.num_perm, self.num_bands)
   }
 }
 
@@ -231,11 +230,11 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 
 /// Applies a permutation to a hash value.
 #[inline]
-fn permute_hash(hash: u64, a: u64, b: u64) -> u32 {
+const fn permute_hash(hash: u64, a: u64, b: u64) -> u32 {
   ((a.wrapping_mul(hash).wrapping_add(b)) >> 32) as u32
 }
 
-/// Calculates a hash value for a band of MinHash values.
+/// Calculates a hash value for a band of `MinHash` values.
 #[inline]
 fn calculate_band_hash(band: &[u32]) -> u64 {
   let mut hasher = FxHasher::default();
@@ -245,8 +244,12 @@ fn calculate_band_hash(band: &[u32]) -> u64 {
   hasher.finish()
 }
 
+/// Python module for MinHash and LSH implementations
+///
+/// # Errors
+/// Returns an error if the module initialization fails or classes cannot be added
 #[pymodule]
-fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
   m.add_class::<RMinHashLSH>()?;
   Ok(())
