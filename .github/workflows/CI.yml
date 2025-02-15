@@ -177,7 +177,7 @@ jobs:
         shell: bash
         run: |
           source .venv/bin/activate
-          python benchmarks/simple_benchmark.py > benchmark_log.txt
+          python benchmarks/rminhash/simple_benchmark.py > benchmark_log.txt
           cat benchmark_log.txt
 
       - name: Enforce Performance (>= 10x)
