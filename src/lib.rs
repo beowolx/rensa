@@ -97,6 +97,14 @@ impl RMinHash {
   fn __getnewargs__(&self) -> PyResult<(usize, u64)> {
     Ok((self.num_perm, self.seed))
   }
+
+  fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
+    Python::with_gil(|py| {
+      let type_obj = py.get_type::<RMinHash>().into();
+      let state = self.__getstate__(py)?.into();
+      Ok((type_obj, (self.num_perm, self.seed), state))
+    })
+  }
 }
 
 /// RMinHashLSH implements Locality-Sensitive Hashing using MinHash for efficient similarity search.
