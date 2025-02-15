@@ -28,8 +28,9 @@ impl RMinHash {
   #[new]
   fn new(num_perm: usize, seed: u64) -> Self {
     let mut rng = StdRng::seed_from_u64(seed);
-    let permutations: Vec<(u64, u64)> =
-      (0..num_perm).map(|_| (rng.gen(), rng.gen())).collect();
+    let permutations: Vec<(u64, u64)> = (0..num_perm)
+      .map(|_| (rng.random(), rng.random()))
+      .collect();
 
     RMinHash {
       num_perm,
