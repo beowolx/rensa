@@ -42,10 +42,14 @@ These design choices result in a MinHash implementation that is fast, memory-eff
 
 ## Installation
 
-You can install Rensa using `pip`. It's available in all platforms:
+You can install Rensa using pip or uv:
 
 ```bash
+# Using pip
 pip install rensa
+
+# Using uv (recommended - faster installation)
+uv add rensa
 ```
 
 ## Usage Example
@@ -128,31 +132,26 @@ Despite the simplified implementation, Rensa achieves the same deduplication res
 
 To run the benchmarks yourself, follow these steps:
 
-1. Clone the repository:
+1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+2. Clone the repository:
    ```bash
    git clone https://github.com/beowolx/rensa.git
    cd rensa
    ```
 
-2. Create a virtual environment:
+3. Create a virtual environment and install the development dependencies:
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
+   uv sync
    ```
 
 4. Run the simple benchmark:
    ```bash
-   python benchmarks/simple_benchmark.py
+   uv run benchmarks/simple_benchmark.py
    ```
-
 5. Run the advanced benchmark:
    ```bash
-   python benchmarks/advanced_benchmark.py
+   uv run benchmarks/advanced_benchmark.py
    ```
 
 The `simple_benchmark.py` script provides a basic comparison of deduplication performance between Rensa and `datasketch`. The `advanced_benchmark.py` script offers a more comprehensive analysis, including multiple runs with different numbers of permutations, memory usage tracking, and detailed profiling information.

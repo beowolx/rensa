@@ -158,14 +158,16 @@ jobs:
         with:
           python-version: "3.9"
 
+      - name: Install uv
+        run: |
+          pip install uv
+
       - name: Prepare Python Environment
         shell: bash
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install --upgrade pip
-          pip install maturin
-          pip install -r requirements.txt
+          uv pip install -e ".[benchmark]"
 
       - name: Build & Install Rensa Locally
         shell: bash
@@ -177,7 +179,7 @@ jobs:
         shell: bash
         run: |
           source .venv/bin/activate
-          python benchmarks/simple_benchmark.py > benchmark_log.txt
+          uv run benchmarks/simple_benchmark.py > benchmark_log.txt
           cat benchmark_log.txt
 
       - name: Enforce Performance (>= 10x)
