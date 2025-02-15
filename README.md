@@ -143,6 +143,7 @@ To run the benchmarks yourself, follow these steps:
 3. Create a virtual environment and install the development dependencies:
    ```bash
    uv sync
+   uv pip install -e ".[benchmark]"
    ```
 
 4. Run the simple benchmark:

@@ -154,65 +154,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
+      # Replace pip-based environment setup with uv.
       - name: Install uv
-        run: |
-          pip install uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Prepare Python Environment
-        shell: bash
+      - name: Set up Python and install project dependencies
         run: |
-          python -m venv .venv
-          source .venv/bin/activate
+          uv python install
+          uv sync --all-extras --dev
           uv pip install -e ".[benchmark]"
 
       - name: Build & Install Rensa Locally
-        shell: bash
-        run: |
-          source .venv/bin/activate
-          maturin develop --release
+        run: uv run maturin develop --release
 
       - name: Run Benchmark
-        shell: bash
-        run: |
-          source .venv/bin/activate
-          uv run benchmarks/simple_benchmark.py > benchmark_log.txt
-          cat benchmark_log.txt
+        run: uv run python benchmarks/simple_benchmark.py > benchmark_log.txt
 
       - name: Enforce Performance (>= 10x)
         shell: bash
         run: |
-          source .venv/bin/activate
-          # Grab the final "X.x faster" line from the benchmark
           perf_line=$(grep "faster than" benchmark_log.txt | tail -1)
           echo "Detected line: $perf_line"
-
-          # If Datasketch is reported as faster, fail immediately
           if echo "$perf_line" | grep -iq "Datasketch is"; then
             echo "Datasketch is faster—FAIL"
             exit 1
           fi
-
-          # Otherwise, parse out the numeric speed multiplier
           speedup=$(echo "$perf_line" | sed -n 's/.* \([0-9\.]*\)x faster.*/\1/p')
           echo "Speedup = $speedup"
-
-          # Fail if the speedup is under 10.0
           if (( $(echo "$speedup < 10" | bc -l) )); then
             echo "Rensa is only ${speedup}x faster (< 10x) — FAIL"
             exit 1
           else
             echo "Rensa is ${speedup}x faster than datasketch, >= 10x requirement — OK"
           fi
-
-          # Check Jaccard similarity
           jaccard_line=$(grep "Jaccard similarity" benchmark_log.txt | tail -1)
           jaccard=$(echo "$jaccard_line" | sed -n 's/.*similarity of deduplicated sets: \([0-9\.]*\)/\1/p')
           echo "Jaccard similarity = $jaccard"
-
           if (( $(echo "$jaccard < 1.0" | bc -l) )); then
             echo "Jaccard similarity ${jaccard} is not 1.0 — FAIL"
             exit 1
