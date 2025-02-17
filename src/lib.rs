@@ -10,7 +10,7 @@ use pyo3::types::PyBytes;
 use rand::prelude::*;
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// RMinHash implements the MinHash algorithm for efficient similarity estimation.
@@ -162,25 +162,23 @@ impl RMinHashLSH {
   ///
   /// # Arguments
   ///
-  /// * `minhash` - The RMinHash instance to query for.
+  /// * `minhash` - The RMinHash instance to query.
   ///
   /// # Returns
   ///
   /// A vector of keys (usize) of potentially similar items.
   fn query(&self, minhash: &RMinHash) -> Vec<usize> {
     let digest = minhash.digest();
-    let mut candidates = Vec::new();
+    let mut candidates = HashSet::new();
     for (i, table) in self.hash_tables.iter().enumerate() {
       let start = i * self.band_size;
       let end = start + self.band_size;
       let band_hash = calculate_band_hash(&digest[start..end]);
       if let Some(keys) = table.get(&band_hash) {
-        candidates.extend(keys);
+        candidates.extend(keys.iter());
       }
     }
-    candidates.sort_unstable();
-    candidates.dedup();
-    candidates
+    candidates.into_iter().collect()
   }
 
   /// Checks if two MinHashes are similar based on the LSH threshold.
