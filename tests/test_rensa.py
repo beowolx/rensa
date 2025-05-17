@@ -1,4 +1,4 @@
-from rensa import RMinHash, RMinHashLSH
+from rensa import RMinHash, RMinHashLSH, CMinHash
 
 
 def test_rminhash_creation():
@@ -44,6 +44,48 @@ def test_rminhash_serialization_roundtrip():
     m2 = pickle.loads(data)
 
     assert m2.digest() == digest_before, "Deserialized RMinHash should have the same digest"
+
+# --------------------- CMinHash Tests ---------------------
+
+
+def test_cminhash_creation():
+    m = CMinHash(num_perm=16, seed=42)
+    assert len(m.digest()) == 16
+
+
+def test_cminhash_update_digest():
+    m = CMinHash(num_perm=4, seed=42)
+    initial_digest = m.digest()
+    assert all(x == 4294967295 for x in initial_digest)
+    m.update(["hello", "world"])
+    assert m.digest() != initial_digest
+
+
+def test_cminhash_jaccard():
+    m1 = CMinHash(num_perm=8, seed=100)
+    m2 = CMinHash(num_perm=8, seed=100)
+    m1.update(["apple", "banana", "cherry"])
+    m2.update(["apple", "banana", "cherry"])
+    sim = m1.jaccard(m2)
+    assert abs(sim - 1.0) < 1e-9
+
+
+def test_cminhash_jaccard_different():
+    m1 = CMinHash(num_perm=8, seed=999)
+    m2 = CMinHash(num_perm=8, seed=999)
+    m1.update(["foo"])
+    m2.update(["bar"])
+    assert m1.jaccard(m2) < 0.5
+
+
+def test_cminhash_serialization_roundtrip():
+    m = CMinHash(num_perm=5, seed=2023)
+    m.update(["serialize", "this"])
+    digest_before = m.digest()
+    import pickle
+    data = pickle.dumps(m)
+    m2 = pickle.loads(data)
+    assert m2.digest() == digest_before
 
 # --------------------- RMinHashLSH Tests ---------------------
 
