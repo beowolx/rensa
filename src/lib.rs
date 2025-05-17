@@ -35,9 +35,8 @@ impl RMinHash {
   fn new(num_perm: usize, seed: u64) -> Self {
     let mut rng = StdRng::seed_from_u64(seed);
     let permutations: Vec<(u64, u64)> = (0..num_perm)
-      .map(|_| (rng.random(), rng.random()))
+      .map(|_| (rng.random::<u64>() | 1, rng.random()))
       .collect();
-
     Self {
       num_perm,
       seed,
@@ -87,6 +86,143 @@ impl RMinHash {
       .filter(|&(&a, &b)| a == b)
       .count();
     // Safe because self.num_perm is expected to be << 2^53.
+    equal_count as f64 / self.num_perm as f64
+  }
+
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
+    *self = deserialize(state.as_bytes()).unwrap();
+  }
+
+  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    PyBytes::new(py, &serialize(&self).unwrap())
+  }
+
+  const fn __getnewargs__(&self) -> (usize, u64) {
+    (self.num_perm, self.seed)
+  }
+
+  fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
+    Python::with_gil(|py| {
+      let type_obj = py.get_type::<Self>().into();
+      let state = self.__getstate__(py).into();
+      Ok((type_obj, (self.num_perm, self.seed), state))
+    })
+  }
+}
+
+/// `CMinHash` implements the `CMinHash` algorithm for efficient similarity estimation.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+enum CMinHashMode {
+  /// Algorithm‑3 (π + k)
+  Circulant,
+  /// Algorithm‑2 (g + k·h)
+  DoubleHash,
+}
+
+impl From<Option<&str>> for CMinHashMode {
+  fn from(s: Option<&str>) -> Self {
+    match s.unwrap_or("double_hash").to_ascii_lowercase().as_str() {
+      "circulant" | "classic" => Self::Circulant,
+      _ => Self::DoubleHash,
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "rensa")]
+struct CMinHash {
+  num_perm: usize,
+  seed: u64,
+  mode: CMinHashMode,
+  hash_values: Vec<u32>,
+
+  // σ permutation parameters (always present)
+  a_sigma: u64,
+  b_sigma: u64,
+
+  // π parameters
+  a_pi: u64,
+  b_pi: u64,
+
+  // ρ parameters — only needed for DoubleHash mode
+  a_rho: u64,
+  b_rho: u64,
+}
+
+#[pymethods]
+impl CMinHash {
+  /// `mode`: "circulant" for Algorithm‑3 (π + k), "double_hash" for Algorithm‑2 (g + k·h)
+  #[new]
+  #[pyo3(signature=(num_perm, seed, mode=None))]
+  fn new(num_perm: usize, seed: u64, mode: Option<&str>) -> Self {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let a_sigma: u64 = rng.random::<u64>() | 1;
+    let b_sigma: u64 = rng.random();
+    let a_pi: u64 = rng.random::<u64>() | 1;
+    let b_pi: u64 = rng.random();
+    let a_rho: u64 = rng.random::<u64>() | 1;
+    let b_rho: u64 = rng.random();
+
+    Self {
+      num_perm,
+      seed,
+      mode: mode.into(),
+      hash_values: vec![u32::MAX; num_perm],
+      a_sigma,
+      b_sigma,
+      a_pi,
+      b_pi,
+      a_rho,
+      b_rho,
+    }
+  }
+
+  fn update(&mut self, items: Vec<String>) {
+    for item in items {
+      let h0 = calculate_hash(&item);
+      let h_sigma = permute_hash(h0, self.a_sigma, self.b_sigma);
+      let g = permute_hash(u64::from(h_sigma), self.a_pi, self.b_pi);
+      match self.mode {
+        CMinHashMode::Circulant => {
+          for (k, bucket) in self.hash_values.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let k32 = (k.min(u32::MAX as usize)) as u32;
+            let cand = g.wrapping_add(k32);
+            if cand < *bucket {
+              *bucket = cand;
+            }
+          }
+        }
+        CMinHashMode::DoubleHash => {
+          let mut h = permute_hash(u64::from(h_sigma), self.a_rho, self.b_rho);
+          if h == 0 {
+            h = 1;
+          }
+          for (k, bucket) in self.hash_values.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let k32 = (k.min(u32::MAX as usize)) as u32;
+            let cand = g.wrapping_add(k32.wrapping_mul(h));
+            if cand < *bucket {
+              *bucket = cand;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  fn digest(&self) -> Vec<u32> {
+    self.hash_values.clone()
+  }
+
+  /// Calculates the Jaccard similarity between this MinHash and another.
+  fn jaccard(&self, other: &Self) -> f64 {
+    let equal_count = self
+      .hash_values
+      .iter()
+      .zip(&other.hash_values)
+      .filter(|&(&a, &b)| a == b)
+      .count();
     equal_count as f64 / self.num_perm as f64
   }
 
@@ -210,11 +346,9 @@ impl RMinHashLSH {
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
     *self = deserialize(state.as_bytes()).unwrap();
   }
-
   fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-    PyBytes::new(py, &serialize(&self).unwrap())
+    PyBytes::new(py, &serialize(self).unwrap())
   }
-
   const fn __getnewargs__(&self) -> (f64, usize, usize) {
     (self.threshold, self.num_perm, self.num_bands)
   }
@@ -251,6 +385,7 @@ fn calculate_band_hash(band: &[u32]) -> u64 {
 #[pymodule]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
+  m.add_class::<CMinHash>()?;
   m.add_class::<RMinHashLSH>()?;
   Ok(())
 }
