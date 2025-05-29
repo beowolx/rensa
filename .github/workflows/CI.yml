@@ -180,43 +180,114 @@ jobs:
           python benchmarks/simple_benchmark.py > benchmark_log.txt
           cat benchmark_log.txt
 
-      - name: Enforce Performance (>= 10x)
+      - name: Enforce Performance and Jaccard Similarity
         shell: bash
         run: |
+          set -e
+          set -o pipefail
+
+          # Helper function to check performance
+          check_performance() {
+            local method_name="$1"
+            local reference_name="$2"
+            local min_speedup="$3"
+            local speedup
+
+            echo "Checking performance: ${method_name} vs ${reference_name} (min speedup: ${min_speedup}x)"
+
+            # Parse from the detailed performance table
+            local table_line
+            table_line=$(grep "^${method_name}[ ]*[0-9]*\.[0-9]*[ ]*[0-9]*\.[0-9]*[ ]*x" benchmark_log.txt | head -1 || true)
+            
+            if [ -z "$table_line" ]; then
+              echo "FAILURE: Could not find performance table line for ${method_name}."
+              exit 1
+            fi
+            
+            echo "Detected table line: $table_line"
+            # Extract speedup vs Datasketch from the table (third column)
+            speedup=$(echo "$table_line" | awk '{print $3}' | sed 's/x$//')
+            
+            if [ -z "$speedup" ]; then
+              echo "FAILURE: Could not parse speedup for ${method_name} from table line: $table_line"
+              exit 1
+            fi
+            echo "${method_name} speedup over ${reference_name} = $speedup"
+
+            if (( $(echo "$speedup < $min_speedup" | bc -l) )); then
+              echo "FAILURE: ${method_name} is only ${speedup}x faster than ${reference_name} (Requirement: >= ${min_speedup}x)."
+              exit 1
+            else
+              echo "SUCCESS: ${method_name} is ${speedup}x faster than ${reference_name} (Requirement: >= ${min_speedup}x)."
+            fi
+          }
+
+          # Helper function to check Jaccard similarity
+          check_jaccard() {
+            local method1_name="$1"
+            local method2_name="$2"
+            local min_expected_jaccard="$3"
+            local jaccard_line
+            local jaccard
+
+            echo "Checking Jaccard similarity: ${method1_name} vs ${method2_name} (min expected: ${min_expected_jaccard})"
+
+            jaccard_line=$(grep "Jaccard similarity between ${method1_name} and ${method2_name}:" benchmark_log.txt || true)
+            
+            if [ -z "$jaccard_line" ]; then
+                # Try reversed order if the benchmark might print it that way
+                jaccard_line=$(grep "Jaccard similarity between ${method2_name} and ${method1_name}:" benchmark_log.txt || true)
+            fi
+
+            if [ -z "$jaccard_line" ]; then
+                echo "FAILURE: Could not find Jaccard similarity line for ${method1_name} vs ${method2_name}."
+                exit 1
+            fi
+
+            echo "Detected Jaccard line: $jaccard_line"
+            jaccard=$(echo "$jaccard_line" | awk '{print $NF}')
+            
+            if [ -z "$jaccard" ]; then
+                echo "FAILURE: Could not parse Jaccard similarity for ${method1_name} vs ${method2_name} from line: $jaccard_line"
+                exit 1
+            fi
+            echo "Parsed Jaccard for ${method1_name} vs ${method2_name} = $jaccard"
+
+            if (( $(echo "$jaccard < $min_expected_jaccard" | bc -l) )); then
+              echo "FAILURE: Jaccard similarity for ${method1_name} vs ${method2_name} is ${jaccard}, expected >= ${min_expected_jaccard}."
+              exit 1
+            else
+              echo "SUCCESS: Jaccard similarity for ${method1_name} vs ${method2_name} is ${jaccard} (>= ${min_expected_jaccard})."
+            fi
+          }
+          
           source .venv/bin/activate
-          # Grab the final "X.x faster" line from the benchmark
-          perf_line=$(grep "faster than" benchmark_log.txt | tail -1)
-          echo "Detected line: $perf_line"
-
-          # If Datasketch is reported as faster, fail immediately
-          if echo "$perf_line" | grep -iq "Datasketch is"; then
-            echo "Datasketch is faster—FAIL"
+          
+          echo "--- Validating benchmark_log.txt content ---"
+          if [ ! -f benchmark_log.txt ]; then
+            echo "benchmark_log.txt not found!"
             exit 1
           fi
+          echo "benchmark_log.txt first 10 and last 20 lines:"
+          head -n 10 benchmark_log.txt
+          echo "..."
+          tail -n 30 benchmark_log.txt # Increased tail for more context on Jaccard/Perf sections
+          echo "--- End of benchmark_log.txt preview ---"
 
-          # Otherwise, parse out the numeric speed multiplier
-          speedup=$(echo "$perf_line" | sed -n 's/.* \([0-9\.]*\)x faster.*/\1/p')
-          echo "Speedup = $speedup"
+          # Performance checks (against Datasketch, >= 10.0x)
+          check_performance "R-MinHash" "Datasketch" 10.0
+          check_performance "C-MinHash" "Datasketch" 10.0
+          
+          # Jaccard similarity checks
+          echo "--- Checking Jaccard Similarities vs Datasketch ---"
+          check_jaccard "Datasketch" "R-MinHash" 1.0
+          check_jaccard "Datasketch" "C-MinHash" 0.9
+          
+          echo "--- Checking Jaccard Similarities Among Implemented Methods ---"
+          # Assuming R-MinHash vs C-MinHash should also be >= 0.9, adjust if necessary
+          check_jaccard "R-MinHash" "C-MinHash" 0.9 
 
-          # Fail if the speedup is under 10.0
-          if (( $(echo "$speedup < 10" | bc -l) )); then
-            echo "Rensa is only ${speedup}x faster (< 10x) — FAIL"
-            exit 1
-          else
-            echo "Rensa is ${speedup}x faster than datasketch, >= 10x requirement — OK"
-          fi
-
-          # Check Jaccard similarity
-          jaccard_line=$(grep "Jaccard similarity" benchmark_log.txt | tail -1)
-          jaccard=$(echo "$jaccard_line" | sed -n 's/.*similarity of deduplicated sets: \([0-9\.]*\)/\1/p')
-          echo "Jaccard similarity = $jaccard"
-
-          if (( $(echo "$jaccard < 1.0" | bc -l) )); then
-            echo "Jaccard similarity ${jaccard} is not 1.0 — FAIL"
-            exit 1
-          else
-            echo "Jaccard similarity is 1.0 — OK"
-          fi
+          echo "All performance and Jaccard similarity checks passed successfully!"
 
   test:
     name: Run Tests
