@@ -274,18 +274,22 @@ jobs:
           tail -n 30 benchmark_log.txt # Increased tail for more context on Jaccard/Perf sections
           echo "--- End of benchmark_log.txt preview ---"
 
-          # Performance checks (against Datasketch, >= 10.0x)
+          # Performance checks (against Datasketch, >= 10.0x for R-MinHash and C-MinHash, >= 9.0x for OptDens-MinHash)
           check_performance "R-MinHash" "Datasketch" 10.0
           check_performance "C-MinHash" "Datasketch" 10.0
+          check_performance "OptDens-MinHash" "Datasketch" 9.0
           
           # Jaccard similarity checks
           echo "--- Checking Jaccard Similarities vs Datasketch ---"
           check_jaccard "Datasketch" "R-MinHash" 1.0
           check_jaccard "Datasketch" "C-MinHash" 0.9
+          check_jaccard "Datasketch" "OptDens-MinHash" 0.9
           
           echo "--- Checking Jaccard Similarities Among Implemented Methods ---"
           # Assuming R-MinHash vs C-MinHash should also be >= 0.9, adjust if necessary
-          check_jaccard "R-MinHash" "C-MinHash" 0.9 
+          check_jaccard "R-MinHash" "C-MinHash" 0.9
+          check_jaccard "R-MinHash" "OptDens-MinHash" 0.9
+          check_jaccard "C-MinHash" "OptDens-MinHash" 0.9 
 
           echo "All performance and Jaccard similarity checks passed successfully!"
 
