@@ -21,6 +21,8 @@ use pyo3::types::PyBytes;
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use bumpalo::Bump;
+use bumpalo::collections::Vec as BumpVec;
 
 /// CMinHash implements an optimized version of C-MinHash with better memory access patterns
 /// and aggressive optimizations for maximum single-threaded performance.
@@ -83,7 +85,8 @@ impl CMinHash {
   pub fn update(&mut self, items: Vec<String>) {
     // Batch hash computation
     const BATCH_SIZE: usize = 32;
-    let mut hash_batch = Vec::with_capacity(BATCH_SIZE);
+    let bump = Bump::new();
+    let mut hash_batch = BumpVec::with_capacity_in(BATCH_SIZE, &bump);
 
     for chunk in items.chunks(BATCH_SIZE) {
       hash_batch.clear();
