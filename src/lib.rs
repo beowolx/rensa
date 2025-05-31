@@ -12,6 +12,8 @@ use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use rand::distr::Uniform;
+use rand::rngs::StdRng;
 
 /// RMinHash implements the MinHash algorithm for efficient similarity estimation.
 #[derive(Serialize, Deserialize)]
@@ -117,6 +119,138 @@ impl RMinHash {
       let state = self.__getstate__(py).into();
       Ok((type_obj, (self.num_perm, self.seed), state))
     })
+  }
+}
+
+/// OptDensMinHash implements a MinHash variant using optimal densification.
+#[derive(Serialize, Deserialize)]
+#[pyclass(module = "rensa")]
+struct OptDensMinHash {
+  num_perm: usize,
+  seed: u64,
+  hsketch: Vec<f64>,
+  values: Vec<u64>,
+  init: Vec<bool>,
+  nb_empty: i64,
+}
+
+#[pymethods]
+impl OptDensMinHash {
+  #[new]
+  fn new(num_perm: usize, seed: u64) -> Self {
+    Self {
+      num_perm,
+      seed,
+      hsketch: vec![f64::MAX; num_perm],
+      values: vec![u64::MAX; num_perm],
+      init: vec![false; num_perm],
+      nb_empty: num_perm as i64,
+    }
+  }
+
+  fn update(&mut self, items: Vec<String>) {
+    for item in items {
+      let h = calculate_hash(&item);
+      self.sketch_hash(h);
+    }
+  }
+
+  fn digest(&mut self) -> Vec<u32> {
+    self.end_sketch();
+    self
+      .values
+      .iter()
+      .map(|v| (calculate_hash(v) >> 32) as u32)
+      .collect()
+  }
+
+  fn digest_u64(&mut self) -> Vec<u64> {
+    self.end_sketch();
+    self.values.clone()
+  }
+
+  fn jaccard(&mut self, other: &mut Self) -> f64 {
+    self.end_sketch();
+    other.end_sketch();
+    let equal_count = self
+      .values
+      .iter()
+      .zip(other.values.iter())
+      .filter(|(&a, &b)| a == b)
+      .count();
+    equal_count as f64 / self.num_perm as f64
+  }
+
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
+    *self = bincode::serde::decode_from_slice(
+      state.as_bytes(),
+      bincode::config::standard(),
+    )
+    .unwrap()
+    .0;
+  }
+
+  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    PyBytes::new(
+      py,
+      &bincode::serde::encode_to_vec(&self, bincode::config::standard())
+        .unwrap(),
+    )
+  }
+
+  const fn __getnewargs__(&self) -> (usize, u64) {
+    (self.num_perm, self.seed)
+  }
+
+  fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
+    Python::with_gil(|py| {
+      let type_obj = py.get_type::<Self>().into();
+      let state = self.__getstate__(py).into();
+      Ok((type_obj, (self.num_perm, self.seed), state))
+    })
+  }
+}
+
+impl OptDensMinHash {
+  fn sketch_hash(&mut self, hash: u64) {
+    let m = self.num_perm;
+    let mut rng = StdRng::seed_from_u64(hash);
+    let r: f64 = rng.gen();
+    let k: usize = rng.gen_range(0..m);
+    if r <= self.hsketch[k] {
+      self.hsketch[k] = r;
+      self.values[k] = hash;
+      if !self.init[k] {
+        self.init[k] = true;
+        self.nb_empty -= 1;
+      }
+    }
+  }
+
+  fn end_sketch(&mut self) {
+    if self.nb_empty > 0 {
+      self.densify();
+    }
+  }
+
+  fn densify(&mut self) {
+    let m = self.num_perm;
+    let uniform = Uniform::new(0, m).unwrap();
+    for k in 0..m {
+      if !self.init[k] {
+        let mut rng = StdRng::seed_from_u64(k as u64 + 123_743);
+        loop {
+          let j: usize = uniform.sample(&mut rng);
+          if self.init[j] {
+            self.values[k] = self.values[j];
+            self.hsketch[k] = self.hsketch[j];
+            self.init[k] = true;
+            self.nb_empty -= 1;
+            break;
+          }
+        }
+      }
+    }
   }
 }
 
@@ -486,6 +620,7 @@ fn calculate_band_hash(band: &[u32]) -> u64 {
 #[pymodule]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
+  m.add_class::<OptDensMinHash>()?;
   m.add_class::<CMinHash>()?;
   m.add_class::<RMinHashLSH>()?;
   Ok(())
