@@ -5,13 +5,21 @@
   - [Technical Implementation](#technical-implementation)
     - [R-MinHash (Original Rensa Variant)](#r-minhash-original-rensa-variant)
     - [C-MinHash (Based on the C-MinHash Paper)](#c-minhash-based-on-the-c-minhash-paper)
+    - [OptDensMinHash (Based on Optimal Densification)](#optdensminhash-based-on-optimal-densification)
   - [Installation](#installation)
+  - [Core Concepts: Direct MinHash vs. LSH-based Deduplication](#core-concepts-direct-minhash-vs-lsh-based-deduplication)
+    - [Direct MinHash Deduplication](#direct-minhash-deduplication)
+    - [LSH-based Deduplication](#lsh-based-deduplication)
+    - [When to Use Which](#when-to-use-which)
   - [Usage Example](#usage-example)
+    - [Deduplicating with Direct MinHash](#deduplicating-with-direct-minhash)
     - [Using C-MinHash for Similarity](#using-c-minhash-for-similarity)
-  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-datasketch)
+    - [Deduplicating with RMinHashLSH](#deduplicating-with-rminhashlsh)
+  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-optdensminhash-vs-datasketch)
   - [Benchmark Results](#benchmark-results)
-    - [Speed](#speed)
-    - [Accuracy (Deduplication Results)](#accuracy-deduplication-results)
+    - [MinHash Implementations Speed](#minhash-implementations-speed)
+    - [MinHash Implementations Accuracy (Deduplication Results)](#minhash-implementations-accuracy-deduplication-results)
+    - [LSH Performance (RMinHashLSH vs. Datasketch MinHashLSH)](#lsh-performance-rminhashlsh-vs-datasketch-minhashlsh)
   - [Running the Benchmarks](#running-the-benchmarks)
   - [Limitations and Future Work](#limitations-and-future-work)
   - [Contributing](#contributing)
@@ -21,9 +29,9 @@
 
 ## Introduction
 
-Rensa (Swedish for "clean") is a high-performance MinHash implementation written in Rust with Python bindings. It's designed for efficient similarity estimation and deduplication of large datasets.
+Rensa (Swedish for "clean") is a high-performance MinHash suite written in Rust with Python bindings. It's designed for efficient similarity estimation and deduplication of large datasets.
 
-Rensa implements a variant of the MinHash algorithm that combines ideas from traditional MinHash and the C-MinHash algorithm proposed in the paper [C-MinHash: Rigorously Reducing K Permutations to Two](https://arxiv.org/abs/2109.03337) to create a novel MinHash implementation that I call `R-MinHash`.
+Rensa initially implemented a variant of the MinHash algorithm (`R-MinHash`) that combined ideas from traditional MinHash and the C-MinHash algorithm. It now also offers a more direct `C-MinHash` implementation and `OptDensMinHash` which uses optimal densification.
 
 Rensa is particularly useful in scenarios where you need to:
 
@@ -39,8 +47,8 @@ Use cases include:
 
 ## Technical Implementation
 
-Rensa offers two high-performance MinHash variants in Rust: `R-MinHash` (its original novel approach) and `C-MinHash` (an implementation more closely following the C-MinHash paper). Both are designed for efficient similarity estimation and leverage common strategies for speed and memory efficiency:
-- **Fast Hash Functions**: Rensa employs fast, non-cryptographic hash functions (based on FxHash) for processing input items.
+Rensa offers three high-performance MinHash variants in Rust: `R-MinHash` (its original novel approach), `C-MinHash` (an implementation closely following the C-MinHash paper), and `OptDensMinHash` (based on optimal densification techniques). All are designed for efficient similarity estimation and leverage common strategies for speed and memory efficiency:
+- **Fast Hash Functions**: Rensa employs fast, non-cryptographic hash functions (based on FxHash or Murmur3) for processing input items.
 - **Memory-Efficient Data Structures**: Implementations use compact data structures to minimize memory usage while maintaining fast access times.
 - **Optimized Routines**: Core operations are optimized using techniques like batch processing and vectorized operations where appropriate.
 
@@ -56,6 +64,8 @@ This variant was Rensa's initial novel approach. Key aspects of Rensa's `RMinHas
 
 3.  **Trade-off**: `RMinHash`'s approach trades some of the potential variance reduction benefits of more complex MinHash schemes (like full C-MinHash) for simplicity and good performance. It still offers better performance than traditional MinHash in many scenarios.
 
+Rensa's Locality-Sensitive Hashing (LSH) implementation, `RMinHashLSH`, currently utilizes the `RMinHash` variant for its index.
+
 ### C-MinHash (Based on the C-MinHash Paper)
 
 Rensa also includes `CMinHash`, an implementation more directly aligned with the principles of the C-MinHash algorithm from the paper "[C-MinHash: Rigorously Reducing K Permutations to Two](https://arxiv.org/abs/2109.03337)". Key aspects of this implementation are:
@@ -66,9 +76,17 @@ Rensa also includes `CMinHash`, an implementation more directly aligned with the
 2.  **Highly Optimized Routines**: The `update` and `jaccard` methods in `CMinHash` are heavily optimized. This includes batch processing of input items, structuring calculations to improve cache utilization, and using vectorized operations (e.g., processing data in fixed-size chunks like blocks of 16 or 8) for faster computations.
 3.  **Performance Focus**: This implementation is specifically engineered for maximum single-threaded performance through these aggressive optimizations and careful memory access patterns.
 
-Rensa's Locality-Sensitive Hashing (LSH) implementation, `RMinHashLSH`, currently utilizes the `RMinHash` variant for its index.
+### OptDensMinHash (Based on Optimal Densification)
 
-These design choices result in a MinHash implementation that is fast, memory-efficient, and suitable for large-scale similarity estimation and deduplication tasks. While Rensa may not provide the same theoretical guarantees as full C-MinHash, our benchmarks show that it offers significant performance improvements over traditional MinHash implementations like `datasketch`.
+Rensa also provides `OptDensMinHash`, which implements MinHash enhanced by an optimal densification strategy. This approach aims to improve accuracy, especially for sparse datasets or smaller numbers of permutations, by ensuring that MinHash signatures are always fully populated.
+
+1.  **Densification**: If, after processing all input items, some slots in the MinHash signature remain empty (i.e., no item hashed to them as the minimum), this algorithm fills these empty slots using values from other, non-empty slots in a principled manner. This "densification" ensures a complete signature.
+2.  **Theoretical Basis**: The core ideas are drawn from research on densified MinHash algorithms, such as:
+    - Shrivastava, A. (2017). Optimal Densification for Fast and Accurate Minwise Hashing. *PMLR*.
+    - Mai, T., et al. (2020). On densification for MinWise Hashing. *PMLR*.
+3.  **Usage**: `OptDensMinHash` is designed for unweighted data. The densification process is automatically triggered internally when the signature is requested (e.g., via `digest()` or `jaccard()`).
+
+These design choices result in a suite of MinHash implementations that are fast, memory-efficient, and suitable for large-scale similarity estimation and deduplication tasks. Benchmarks show that Rensa's implementations offer significant performance improvements over traditional MinHash libraries like `datasketch`.
 
 ## Installation
 
@@ -78,64 +96,111 @@ You can install Rensa using `pip`. It's available in all platforms:
 pip install rensa
 ```
 
+## Core Concepts: Direct MinHash vs. LSH-based Deduplication
+
+Rensa provides tools for both direct MinHash signature comparison and Locality Sensitive Hashing (LSH) for more scalable deduplication. Understanding the difference helps in choosing the right approach.
+
+### Direct MinHash Deduplication
+
+  * **How it works**:
+    1.  Generate a MinHash signature (e.g., using `RMinHash`, `CMinHash`, or `OptDensMinHash`) for every item in your dataset.
+    2.  To find exact duplicates (based on the MinHash signature), you can store the signatures (e.g., as tuples) in a set or dictionary and identify items that produce identical signatures.
+    3.  To find similar items, you would compute the Jaccard similarity between the MinHash signatures of pairs of items.
+  * **Pros**:
+      * Conceptually simple for finding items with identical MinHash signatures.
+      * Gives precise Jaccard similarity estimates between any two chosen MinHash signatures.
+  * **Cons**:
+      * Finding all similar pairs by computing Jaccard similarity between all MinHash signatures can be computationally expensive ($O(N^2)$ comparisons for $N$ items), making it unsuitable for very large datasets if broad similarity search is needed.
+  * **Example**: See the "Deduplicating with Direct MinHash" example below.
+
+### LSH-based Deduplication
+
+  * **How it works**:
+    1.  Generate MinHash signatures for all items (Rensa's `RMinHashLSH` uses `RMinHash`).
+    2.  Index these MinHash signatures into an LSH data structure (e.g., `RMinHashLSH`). LSH groups similar signatures into common "buckets" based on bands of their hash values.
+    3.  For each item, query the LSH index. The LSH index returns a small set of *candidate* items that are likely to be similar to the query item.
+    4.  Compute the true Jaccard similarity (using their MinHash signatures) only between the query item and its candidates. This significantly reduces the number of pairwise comparisons.
+  * **Pros**:
+      * Much faster for finding similar items in large datasets because it avoids most pairwise comparisons.
+      * Scales well for approximate nearest neighbor searches.
+  * **Cons**:
+      * Probabilistic: It might miss some similar pairs (false negatives) or identify some non-similar items as candidates (false positives for candidacy, which are then typically filtered by a final Jaccard check).
+      * Requires tuning parameters like the LSH similarity threshold, the number of bands, and the final Jaccard similarity threshold for verification.
+  * **Example**: See the "Deduplicating with RMinHashLSH" example below.
+
+### When to Use Which
+
+  * **Direct MinHash**:
+      * Smaller datasets where $O(N^2)$ comparisons (or a smarter selection of pairs) are feasible.
+      * When you need to find exact matches based on MinHash signatures.
+      * When you need to compute Jaccard similarity for specific, pre-selected pairs.
+  * **LSH-based Deduplication**:
+      * Large datasets where comparing all pairs is too slow.
+      * When you need to find approximately similar items efficiently (approximate nearest neighbor search).
+      * When performance and scalability for finding potential duplicates are critical.
+
 ## Usage Example
 
-Here's an example of how to use Rensa to deduplicate a dataset:
+### Deduplicating with Direct MinHash
+
+Here's an example of how to use Rensa's MinHash implementations (e.g., `RMinHash`, `CMinHash`) for direct deduplication:
 
 ```python
 from datasets import load_dataset
-from rensa import RMinHash, CMinHash
+from rensa import RMinHash, CMinHash # Or OptDensMinHash
 from tqdm import tqdm
 
-def rensa_r_minhash(text, num_perm=128):
-    m = RMinHash(num_perm=num_perm, seed=42)
+# Define a function to generate MinHash (works for RMinHash, CMinHash)
+def generate_minhash_signature(text, minhash_class, num_perm=128, seed=42):
+    m = minhash_class(num_perm=num_perm, seed=seed)
     m.update(text.split())
     return m
 
-def rensa_c_minhash(text, num_perm=128):
-    m = CMinHash(num_perm=num_perm, seed=42)
-    m.update(text.split())
-    return m
-
-def deduplicate_dataset(dataset, minhash_func, num_perm=128, desc="Deduplicating"):
+def deduplicate_dataset_direct(dataset, text_column="sql", minhash_class=RMinHash, num_perm=128, desc="Deduplicating"):
     unique_hashes = set()
     deduplicated_indices = []
-    
+   
     for idx, example in tqdm(enumerate(dataset), total=len(dataset), desc=desc):
-        minhash = minhash_func(example["sql"], num_perm)
-        hash_tuple = tuple(minhash.digest())
-        
+        minhash_obj = generate_minhash_signature(example[text_column], minhash_class, num_perm)
+        hash_tuple = tuple(minhash_obj.digest())
+       
         if hash_tuple not in unique_hashes:
             unique_hashes.add(hash_tuple)
             deduplicated_indices.append(idx)
-    
+           
     return deduplicated_indices
 
-def main():
+def main_direct_deduplication():
     print("Loading dataset...")
-    sql_dataset = load_dataset("gretelai/synthetic_text_to_sql", split="train")
-    
+    sql_dataset_dict = load_dataset("gretelai/synthetic_text_to_sql")
+    sql_dataset = sql_dataset_dict["train"]
+   
     print("Deduplicating dataset with R-MinHash...")
-    deduplicated_indices_r = deduplicate_dataset(sql_dataset, rensa_r_minhash, desc="R-MinHash Deduplication")
+    deduplicated_indices_r = deduplicate_dataset_direct(
+        sql_dataset,
+        text_column="sql",
+        minhash_class=RMinHash,
+        desc="R-MinHash Deduplication"
+    )
     deduplicated_dataset_r = sql_dataset.select(deduplicated_indices_r)
-    
-    print("Deduplicating dataset with C-MinHash...")
-    deduplicated_indices_c = deduplicate_dataset(sql_dataset, rensa_c_minhash, desc="C-MinHash Deduplication")
-    deduplicated_dataset_c = sql_dataset.select(deduplicated_indices_c)
-
-    print("--- R-MinHash Deduplication Results ---")
+   
     print(f"Original dataset size: {len(sql_dataset)}")
     print(f"Deduplicated dataset size (R-MinHash): {len(deduplicated_dataset_r)}")
     print(f"Rows removed (R-MinHash): {len(sql_dataset) - len(deduplicated_dataset_r)}")
 
-    print("--- C-MinHash Deduplication Results ---")
-    # Note: C-MinHash might yield different deduplication counts due to its hashing nature
-    print(f"Original dataset size: {len(sql_dataset)}")
-    print(f"Deduplicated dataset size (C-MinHash): {len(deduplicated_dataset_c)}")
-    print(f"Rows removed (C-MinHash): {len(sql_dataset) - len(deduplicated_dataset_c)}")
+    # Example with C-MinHash
+    # print("Deduplicating dataset with C-MinHash...")
+    # deduplicated_indices_c = deduplicate_dataset_direct(
+    #     sql_dataset,
+    #     text_column="sql",
+    #     minhash_class=CMinHash,
+    #     desc="C-MinHash Deduplication"
+    # )
+    # deduplicated_dataset_c = sql_dataset.select(deduplicated_indices_c)
+    # print(f"Deduplicated dataset size (C-MinHash): {len(deduplicated_dataset_c)}")
 
 if __name__ == "__main__":
-    main()
+    main_direct_deduplication()
 ```
 
 ### Using C-MinHash for Similarity
@@ -150,8 +215,8 @@ text1 = "This is an example sentence for CMinHash."
 text2 = "This is another example sentence, slightly different from the first."
 
 # Initialize CMinHash objects
-num_permutations = 128
-seed = 42
+num_permutations = 256
+seed = 12345
 c_minhash1 = CMinHash(num_perm=num_permutations, seed=seed)
 c_minhash2 = CMinHash(num_perm=num_permutations, seed=seed)
 
@@ -161,117 +226,155 @@ c_minhash2.update(text2.split())
 
 # Calculate Jaccard similarity
 similarity = c_minhash1.jaccard(c_minhash2)
-print(f"Jaccard similarity between the two texts using C-MinHash: {similarity:.4f}")
+print(f"Estimated Jaccard similarity (CMinHash, {num_permutations} perm): {similarity:.4f}")
 
 # Get signatures
 signature1 = c_minhash1.digest()
 # print(f"C-MinHash signature 1: {signature1}")
 ```
 
-## Algorithm Comparison: R-MinHash vs. C-MinHash vs. Datasketch
+### Deduplicating with RMinHashLSH
+Here's an example of how to use `RMinHashLSH` for deduplicating a dataset. This approach is more efficient for larger datasets. Key LSH parameters are set to example values within the function.
 
-Rensa offers two MinHash implementations, `RMinHash` and `CMinHash`, each with different trade-offs compared to each other and the popular `datasketch` library.
+```python
+from datasets import load_dataset
+from rensa import RMinHash, RMinHashLSH
+from tqdm import tqdm
 
-Based on the latest `advanced_benchmark.py` results (averaged over 5 runs on the `gretelai/synthetic_text_to_sql` dataset, 100,000 rows):
+def deduplicate_dataset_with_lsh_simple(dataset, text_column="sql"):
+    num_perm = 128
+    seed = 42
+    lsh_threshold = 0.8
+    num_bands = 16 
+    final_jaccard_threshold = 0.85
 
-*   **Speed**:
-    *   **`CMinHash`** is consistently the fastest. At 256 permutations, it achieves an average execution time of **6.95 seconds**.
-    *   **`RMinHash`** is also very fast. At 256 permutations, it averages **7.58 seconds**.
-    *   **`datasketch`** is considerably slower. At 256 permutations, it averages **96.87 seconds**.
-    This makes `CMinHash` up to approximately **13.94x faster** than `datasketch`, and `RMinHash` up to approximately **12.78x faster** than `datasketch` (both at 256 permutations).
+    if num_perm % num_bands != 0:
+        raise ValueError(f"num_bands ({num_bands}) must divide num_perm ({num_perm}).")
 
-*   **Accuracy (Jaccard Similarity of Deduplicated Sets, 128 permutations)**:
-    *   **`RMinHash`** produces deduplication results identical to `datasketch` (Jaccard similarity of **1.0000** between their output sets of unique items, with 99262 common items).
-    *   **`CMinHash`** yields slightly different deduplication results. The Jaccard similarity between its output set and those from `datasketch` or `RMinHash` is **0.9896** (with 98231 common items). This indicates that while highly effective for similarity estimation, its resulting signatures might differ slightly from traditional MinHash under certain conditions.
+    minhashes = {} 
+   
+    for idx, example in tqdm(enumerate(dataset), total=len(dataset), desc="1. Generating RMinHashes"):
+        text_content = str(example[text_column])
+        tokens = text_content.split()
+        m = RMinHash(num_perm=num_perm, seed=seed)
+        m.update(tokens)
+        minhashes[idx] = m
 
-*   **Recommendation**:
-    *   For most use cases, **`RMinHash`** provides an excellent balance of high speed (up to ~12.8x faster than `datasketch`) and accuracy (matching `datasketch`'s deduplication results).
-    *   If absolute maximum throughput is the primary concern, **`CMinHash`** offers the best performance (up to ~13.9x faster than `datasketch`), with a minor trade-off in exact deduplication results compared to `datasketch`/`RMinHash`.
-    *   If you require features beyond core MinHash generation or need to integrate with an existing `datasketch` ecosystem, `datasketch` remains a comprehensive option, albeit slower for MinHash operations.
+    lsh_index = RMinHashLSH(threshold=lsh_threshold, num_perm=num_perm, num_bands=num_bands)
+    for doc_id, rminhash_obj in tqdm(minhashes.items(), desc="2. Indexing into LSH"):
+        lsh_index.insert(doc_id, rminhash_obj)
+
+    to_remove = set()
+    sorted_doc_ids = sorted(minhashes.keys())
+
+    for doc_id in tqdm(sorted_doc_ids, desc="3. Querying LSH & Deduplicating"):
+        if doc_id in to_remove:
+            continue
+
+        query_minhash = minhashes[doc_id]
+        candidate_ids = lsh_index.query(query_minhash)
+
+        for candidate_id in candidate_ids:
+            if candidate_id == doc_id or candidate_id in to_remove:
+                continue
+            
+            candidate_minhash = minhashes[candidate_id]
+            actual_jaccard = query_minhash.jaccard(candidate_minhash)
+
+            if actual_jaccard >= final_jaccard_threshold:
+                # Keep the item with the smaller original index
+                if doc_id < candidate_id:
+                    to_remove.add(candidate_id)
+                else:
+                    to_remove.add(doc_id)
+                    break 
+   
+    deduplicated_indices = [idx for idx in sorted_doc_ids if idx not in to_remove]
+    return deduplicated_indices
+
+def main_lsh_deduplication_simple():
+    print("Loading dataset...")
+    try:
+        sql_dataset_dict = load_dataset("gretelai/synthetic_text_to_sql")
+        sql_dataset = sql_dataset_dict["train"]
+    except Exception as e:
+        print(f"Failed to load dataset: {e}. Ensure 'datasets' is installed or use a local dataset.")
+        return
+
+    print("Deduplicating dataset with RMinHashLSH...")
+   
+    deduplicated_indices_lsh = deduplicate_dataset_with_lsh_simple(
+        sql_dataset,
+        text_column="sql"
+    )
+    deduplicated_dataset_lsh = sql_dataset.select(deduplicated_indices_lsh)
+
+    print(f"Original dataset size (train split): {len(sql_dataset)}")
+    print(f"Deduplicated dataset size (RMinHashLSH): {len(deduplicated_dataset_lsh)}")
+    print(f"Rows removed (RMinHashLSH): {len(sql_dataset) - len(deduplicated_dataset_lsh)}")
+
+if __name__ == "__main__":
+    main_lsh_deduplication_simple()
+```
+
+## Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch
+
+Rensa offers three MinHash implementations (`RMinHash`, `CMinHash`, `OptDensMinHash`), each with different trade-offs compared to each other and the popular `datasketch` library.
+
+Based on the latest `advanced_benchmark.py` results (averaged over 5 runs on the `gretelai/synthetic_text_to_sql` dataset, 100,000 rows, in a Macbook Pro M2 32GB):
+
+  * **Speed (at 256 permutations)**:
+
+      * **`CMinHash`** is consistently the fastest. Average execution time: **5.47 seconds**.
+      * **`RMinHash`** is also very fast. Average execution time: **5.58 seconds**.
+      * **`OptDensMinHash`** is fast. Average execution time: **12.36 seconds**.
+      * **`datasketch`** is considerably slower. Average execution time: **92.45 seconds**.
+        This makes `CMinHash` up to approximately **16.90x faster** than `datasketch`, `RMinHash` up to approximately **16.57x faster**, and `OptDensMinHash` up to approximately **7.48x faster** than `datasketch` (all at 256 permutations).
+
+  * **Accuracy (Jaccard Similarity of Deduplicated Sets vs. Datasketch, 128 permutations)**:
+
+      * **`RMinHash`** produces deduplication results identical to `datasketch` (Jaccard similarity of **1.0000** between their output sets of unique items, with 99262 common items).
+      * **`OptDensMinHash`** yields results very close to `datasketch`. The Jaccard similarity is **0.9997** (with 99233 common items with Datasketch).
+      * **`CMinHash`** also yields results very close to `datasketch`. The Jaccard similarity is **0.9996** (with 99223 common items with Datasketch).
+        This indicates that while all Rensa variants are highly effective for similarity estimation, `RMinHash` perfectly matches `datasketch`'s deduplication output in this benchmark, while `CMinHash` and `OptDensMinHash` produce extremely similar results.
+
+  * **Recommendation**:
+
+      * For most use cases, **`RMinHash`** provides an excellent balance of high speed (up to ~16.6x faster than `datasketch`) and accuracy (matching `datasketch`'s deduplication results). **It remains the generally recommended algorithm.**
+      * If absolute maximum throughput is the primary concern, **`CMinHash`** offers the best performance (up to ~16.9x faster than `datasketch`), with a negligible difference in exact deduplication results compared to `datasketch`/`RMinHash`.
+      * **`OptDensMinHash`** offers a good balance of speed and high accuracy, and might be particularly beneficial for datasets with high sparsity or when using fewer permutations, due to its densification strategy.
+      * If you require features beyond core MinHash generation or need to integrate with an existing `datasketch` ecosystem, `datasketch` remains a comprehensive option, albeit slower for MinHash operations.
 
 ## Benchmark Results
 
 The results below are from the `advanced_benchmark.py` script, averaged over 5 runs on the `gretelai/synthetic_text_to_sql` dataset (100,000 rows).
 
-![Graph with benchmark results that demonstrate that Rensa is 12x faster](https://github.com/beowolx/rensa/assets/61982523/c793ad0d-0cfd-4ec5-8d4b-4e1b02feda5a)
+![Graph with benchmark results that demonstrate that Rensa is 12x faster](./assets/final_benchmark_comparison.png)
 
-### Speed
+
+### MinHash Implementations Speed
 
 Average execution time in seconds for deduplicating the dataset.
 
-| Permutations | Datasketch Time (s) | Rensa R-MinHash Time (s) | Rensa C-MinHash Time (s) | R-MinHash Speedup (vs DS) | C-MinHash Speedup (vs DS) |
-|--------------|---------------------|--------------------------|--------------------------|---------------------------|---------------------------|
-| 64           | 39.65               | 6.20                     | 6.07                     | 6.40x                     | 6.53x                     |
-| 128          | 57.74               | 6.39                     | 6.15                     | 9.04x                     | 9.39x                     |
-| 256          | 96.87               | 7.58                     | 6.95                     | 12.78x                    | 13.94x                    |
+| Permutations | Datasketch Time (s) | Rensa R-MinHash Time (s) | Rensa C-MinHash Time (s) | Rensa OptDensMinHash Time (s) | R-MinHash Speedup (vs DS) | C-MinHash Speedup (vs DS) | OptDensMinHash Speedup (vs DS) |
+| ------------ | ------------------- | ------------------------ | ------------------------ | ----------------------------- | ------------------------- | ------------------------- | ------------------------------ |
+| 64           | 37.89               | 4.80                     | 4.76                     | 6.28                          | 7.90x                     | 7.96x                     | 6.03x                          |
+| 128          | 56.59               | 5.15                     | 5.04                     | 8.37                          | 11.00x                    | 11.23x                    | 6.76x                          |
+| 256          | 92.45               | 5.58                     | 5.47                     | 12.36                         | 16.57x                    | 16.90x                    | 7.48x                          |
 
-
-### Accuracy (Deduplication Results)
+### MinHash Implementations Accuracy (Deduplication Results)
 
 Jaccard similarity of the deduplicated document indices produced by each method (using 128 permutations), compared against `datasketch` as the baseline or against each other.
 
--   **Datasketch vs Rensa (RMinHash)**: Jaccard Similarity **1.0000** (Intersection: 99262 identical items)
--   **Datasketch vs Rensa (CMinHash)**: Jaccard Similarity **0.9896** (Intersection: 98231 items)
--   **Rensa (RMinHash) vs Rensa (CMinHash)**: Jaccard Similarity **0.9896** (Intersection: 98231 items)
+  - **Datasketch vs Rensa (RMinHash)**: Jaccard Similarity **1.0000** (Intersection: 99262 identical items)
+  - **Datasketch vs Rensa (CMinHash)**: Jaccard Similarity **0.9996** (Intersection: 99223 items)
+  - **Datasketch vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9997** (Intersection: 99233 items)
+  - **Rensa (RMinHash) vs Rensa (CMinHash)**: Jaccard Similarity **0.9996** (Intersection: 99223 items)
+  - **Rensa (RMinHash) vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9997** (Intersection: 99233 items)
+  - **Rensa (CMinHash) vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9993** (Intersection: 99194 items)
 
-This confirms that `RMinHash` produces identical deduplication results to `datasketch`, while `CMinHash` is highly similar but not identical.
+This confirms that `RMinHash` produces identical deduplication results to `datasketch` in this benchmark, while `CMinHash` and `OptDensMinHash` are highly similar.
 
-## Running the Benchmarks
+### LSH Performance (RMinHashLSH vs. Datasketch MinHashLSH)
 
-To run the benchmarks yourself, follow these steps:
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/beowolx/rensa.git
-   cd rensa
-   ```
-
-2. Create a virtual environment:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Run the simple benchmark:
-   ```bash
-   python benchmarks/simple_benchmark.py
-   ```
-
-5. Run the advanced benchmark:
-   ```bash
-   python benchmarks/advanced_benchmark.py
-   ```
-
-The `simple_benchmark.py` script provides a basic comparison of deduplication performance between Rensa and `datasketch`. The `advanced_benchmark.py` script offers a more comprehensive analysis, including multiple runs with different numbers of permutations, memory usage tracking, and detailed profiling information.
-
-## Limitations and Future Work
-
-While Rensa offers significant performance improvements, it has some limitations compared to `datasketch`:
-
-1. **Feature set**: Rensa currently implements only the core MinHash (`RMinHash`, `CMinHash`) and LSH (for `RMinHash`) functionality. It doesn't include some of the advanced features found in `datasketch` like HyperLogLog, etc.
-
-2. **Customization**: `datasketch` offers more options for customizing the hash functions and other parameters. Rensa's implementations are more fixed for performance but offer `seed` and `num_perm` customization.
-
-3. **Theoretical guarantees**: 
-    - `RMinHash`, due to its simplified permutation generation, may not provide the same level of variance reduction as theoretically optimal MinHash or the full C-MinHash algorithm in all scenarios.
-    - `CMinHash` is designed to be a more faithful implementation of the C-MinHash paper's principles, aiming for stronger theoretical backing regarding its reduction of k permutations to two.
-
-Future work on Rensa may include:
-
-- Adding more advanced features and customization options
-- Further optimizing performance for specific use cases and data types
-
-Despite these limitations, Rensa's performance benefits make it an excellent choice for applications where speed and efficiency are critical, especially when working with large datasets.
-
-## Contributing
-
-Contributions to Rensa are welcome! Please feel free to submit pull requests, report bugs, or suggest features through the GitHub issue tracker.
-
-## License
-
-Rensa is released under the MIT License. See the LICENSE file for details.
+The following results are from `benchmarks/lsh_benchmark.py` using the `
