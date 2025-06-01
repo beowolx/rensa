@@ -38,7 +38,7 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processin
     deduplicated_indices = []
 
     for idx, example in tqdm(enumerate(dataset), total=len(dataset), desc=desc):
-        minhash = minhash_func(example["sql"], num_perm)
+        minhash = minhash_func(example["text"], num_perm)
 
         if isinstance(minhash, MinHash):
             hash_tuple = tuple(minhash.digest())
@@ -59,33 +59,35 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processin
 
 
 def run_benchmark():
-    print("Loading dataset...")
-    sql_dataset = load_dataset("gretelai/synthetic_text_to_sql", split="train")
+    print("Loading Wikipedia dataset...")
+    wikipedia_dataset = load_dataset(
+        "Salesforce/wikitext", "wikitext-103-raw-v1", split="train"
+    )
 
     print("\nRunning Datasketch benchmark...")
     datasketch_results = benchmark_deduplication(
-        sql_dataset, datasketch_minhash, desc="Datasketch"
+        wikipedia_dataset, datasketch_minhash, desc="Datasketch"
     )
 
     print("\nRunning Rensa (R-MinHash) benchmark...")
     rensa_results = benchmark_deduplication(
-        sql_dataset, rensa_minhash, desc="Rensa R-MinHash"
+        wikipedia_dataset, rensa_minhash, desc="Rensa R-MinHash"
     )
 
     print("\nRunning Rensa (C-MinHash) benchmark...")
     cminimash_results = benchmark_deduplication(
-        sql_dataset, cminimash, desc="Rensa C-MinHash"
+        wikipedia_dataset, cminimash, desc="Rensa C-MinHash"
     )
 
     print("\nRunning Rensa (OptDens-MinHash) benchmark...")
     optdens_results = benchmark_deduplication(
-        sql_dataset, optdens_minhash, desc="Rensa OptDens-MinHash"
+        wikipedia_dataset, optdens_minhash, desc="Rensa OptDens-MinHash"
     )
 
     print("\n" + "=" * 60)
     print("BENCHMARK RESULTS")
     print("=" * 60)
-    print(f"Total rows in dataset: {len(sql_dataset)}")
+    print(f"Total rows in dataset: {len(wikipedia_dataset)}")
 
     results = [
         ("Datasketch", datasketch_results),
@@ -98,7 +100,8 @@ def run_benchmark():
         print(f"\n{name}:")
         print(f"  Time: {result['time']:.2f} seconds")
         print(
-            f"  Rows removed: {len(sql_dataset) - result['deduplicated_count']}")
+            f"  Rows removed: {len(wikipedia_dataset) - result['deduplicated_count']}"
+        )
         print(f"  Rows remaining: {result['deduplicated_count']}")
 
     print("\n" + "=" * 60)
@@ -114,17 +117,14 @@ def run_benchmark():
                 result2["deduplicated_indices"]
             )
             jaccard = len(common) / len(
-                result1["deduplicated_indices"].union(
-                    result2["deduplicated_indices"])
+                result1["deduplicated_indices"].union(result2["deduplicated_indices"])
             )
-            print(
-                f"Jaccard similarity between {name1} and {name2}: {jaccard:.4f}")
+            print(f"Jaccard similarity between {name1} and {name2}: {jaccard:.4f}")
 
     print("\n" + "=" * 60)
     print("PERFORMANCE COMPARISON")
     print("=" * 60)
 
-    # Sort by time
     sorted_results = sorted(
         [(name, r["time"]) for name, r in results], key=lambda x: x[1]
     )
@@ -137,7 +137,6 @@ def run_benchmark():
         speedup = time / fastest_time
         print(f"{fastest_name} is {speedup:.2f}x faster than {name}")
 
-    # Additional statistics
     print("\n" + "=" * 60)
     print("DETAILED PERFORMANCE TABLE")
     print("=" * 60)
