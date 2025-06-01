@@ -1,35 +1,10 @@
-## Table of Contents
-
-- [Rensa: A novel high-performance MinHash Implementation in Rust](#rensa-a-novel-high-performance-minhash-implementation-in-rust)
-  - [Introduction](#introduction)
-  - [Technical Implementation](#technical-implementation)
-    - [R-MinHash (Original Rensa Variant)](#r-minhash-original-rensa-variant)
-    - [C-MinHash (Based on the C-MinHash Paper)](#c-minhash-based-on-the-c-minhash-paper)
-    - [OptDensMinHash (Based on Optimal Densification)](#optdensminhash-based-on-optimal-densification)
-  - [Installation](#installation)
-  - [Core Concepts: Direct MinHash vs. LSH-based Deduplication](#core-concepts-direct-minhash-vs-lsh-based-deduplication)
-    - [Direct MinHash Deduplication](#direct-minhash-deduplication)
-    - [LSH-based Deduplication](#lsh-based-deduplication)
-    - [When to Use Which](#when-to-use-which)
-  - [Usage Example](#usage-example)
-    - [Deduplicating with Direct MinHash](#deduplicating-with-direct-minhash)
-    - [Using C-MinHash for Similarity](#using-c-minhash-for-similarity)
-    - [Deduplicating with RMinHashLSH](#deduplicating-with-rminhashlsh)
-  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-optdensminhash-vs-datasketch)
-  - [Benchmark Results](#benchmark-results)
-    - [MinHash Implementations Speed](#minhash-implementations-speed)
-    - [MinHash Implementations Accuracy (Deduplication Results)](#minhash-implementations-accuracy-deduplication-results)
-    - [LSH Performance (RMinHashLSH vs. Datasketch MinHashLSH)](#lsh-performance-rminhashlsh-vs-datasketch-minhashlsh)
-  - [Running the Benchmarks](#running-the-benchmarks)
-  - [Limitations and Future Work](#limitations-and-future-work)
-  - [Contributing](#contributing)
-  - [License](#license)
-
 # Rensa: A novel high-performance MinHash Implementation in Rust
 
 ## Introduction
 
-Rensa (Swedish for "clean") is a high-performance MinHash suite written in Rust with Python bindings. It's designed for efficient similarity estimation and deduplication of large datasets.
+Rensa (Swedish for "clean") is a high-performance MinHash suite written in Rust with Python bindings. It's designed for efficient similarity estimation and deduplication of large datasets. **It's 40x faster than `datasketch` for MinHash operations while producing the same results and consuming less memory.**
+
+![Graph with benchmark results that demonstrate that Rensa is 40x faster](./assets/bench1.png)
 
 Rensa initially implemented a variant of the MinHash algorithm (`R-MinHash`) that combined ideas from traditional MinHash and the C-MinHash algorithm. It now also offers a more direct `C-MinHash` implementation and `OptDensMinHash` which uses optimal densification.
 
@@ -44,6 +19,30 @@ Use cases include:
 - Identifying similar items in recommendation systems
 - Clustering of high-dimensional data
 - Near-duplicate detection in web crawling
+
+## Table of Contents
+
+- [Rensa: A novel high-performance MinHash Implementation in Rust](#rensa-a-novel-high-performance-minhash-implementation-in-rust)
+  - [Introduction](#introduction)
+  - [Technical Implementation](#technical-implementation)
+    - [R-MinHash (Original Rensa Variant)](#r-minhash-original-rensa-variant)
+    - [C-MinHash (Based on the C-MinHash Paper)](#c-minhash-based-on-the-c-minhash-paper)
+    - [OptDensMinHash (Based on Optimal Densification)](#optdensminhash-based-on-optimal-densification)
+  - [Installation](#installation)
+  - [Usage Example](#usage-example)
+    - [Deduplicating with Direct MinHash](#deduplicating-with-direct-minhash)
+    - [Using C-MinHash for Similarity](#using-c-minhash-for-similarity)
+    - [Deduplicating with RMinHashLSH](#deduplicating-with-rminhashlsh)
+  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-optdensminhash-vs-datasketch)
+  - [Benchmark Results](#benchmark-results)
+    - [MinHash Implementations Speed](#minhash-implementations-speed)
+    - [MinHash Implementations Accuracy (Deduplication Results)](#minhash-implementations-accuracy-deduplication-results)
+    - [LSH Performance (RMinHashLSH vs. Datasketch MinHashLSH)](#lsh-performance-rminhashlsh-vs-datasketch-minhashlsh)
+  - [Running the Benchmarks](#running-the-benchmarks)
+  - [Limitations and Future Work](#limitations-and-future-work)
+  - [Contributing](#contributing)
+  - [License](#license)
+
 
 ## Technical Implementation
 
@@ -95,49 +94,6 @@ You can install Rensa using `pip`. It's available in all platforms:
 ```bash
 pip install rensa
 ```
-
-## Core Concepts: Direct MinHash vs. LSH-based Deduplication
-
-Rensa provides tools for both direct MinHash signature comparison and Locality Sensitive Hashing (LSH) for more scalable deduplication. Understanding the difference helps in choosing the right approach.
-
-### Direct MinHash Deduplication
-
-  * **How it works**:
-    1.  Generate a MinHash signature (e.g., using `RMinHash`, `CMinHash`, or `OptDensMinHash`) for every item in your dataset.
-    2.  To find exact duplicates (based on the MinHash signature), you can store the signatures (e.g., as tuples) in a set or dictionary and identify items that produce identical signatures.
-    3.  To find similar items, you would compute the Jaccard similarity between the MinHash signatures of pairs of items.
-  * **Pros**:
-      * Conceptually simple for finding items with identical MinHash signatures.
-      * Gives precise Jaccard similarity estimates between any two chosen MinHash signatures.
-  * **Cons**:
-      * Finding all similar pairs by computing Jaccard similarity between all MinHash signatures can be computationally expensive ($O(N^2)$ comparisons for $N$ items), making it unsuitable for very large datasets if broad similarity search is needed.
-  * **Example**: See the "Deduplicating with Direct MinHash" example below.
-
-### LSH-based Deduplication
-
-  * **How it works**:
-    1.  Generate MinHash signatures for all items (Rensa's `RMinHashLSH` uses `RMinHash`).
-    2.  Index these MinHash signatures into an LSH data structure (e.g., `RMinHashLSH`). LSH groups similar signatures into common "buckets" based on bands of their hash values.
-    3.  For each item, query the LSH index. The LSH index returns a small set of *candidate* items that are likely to be similar to the query item.
-    4.  Compute the true Jaccard similarity (using their MinHash signatures) only between the query item and its candidates. This significantly reduces the number of pairwise comparisons.
-  * **Pros**:
-      * Much faster for finding similar items in large datasets because it avoids most pairwise comparisons.
-      * Scales well for approximate nearest neighbor searches.
-  * **Cons**:
-      * Probabilistic: It might miss some similar pairs (false negatives) or identify some non-similar items as candidates (false positives for candidacy, which are then typically filtered by a final Jaccard check).
-      * Requires tuning parameters like the LSH similarity threshold, the number of bands, and the final Jaccard similarity threshold for verification.
-  * **Example**: See the "Deduplicating with RMinHashLSH" example below.
-
-### When to Use Which
-
-  * **Direct MinHash**:
-      * Smaller datasets where $O(N^2)$ comparisons (or a smarter selection of pairs) are feasible.
-      * When you need to find exact matches based on MinHash signatures.
-      * When you need to compute Jaccard similarity for specific, pre-selected pairs.
-  * **LSH-based Deduplication**:
-      * Large datasets where comparing all pairs is too slow.
-      * When you need to find approximately similar items efficiently (approximate nearest neighbor search).
-      * When performance and scalability for finding potential duplicates are critical.
 
 ## Usage Example
 
@@ -347,34 +303,124 @@ Based on the latest `advanced_benchmark.py` results (averaged over 5 runs on the
 
 ## Benchmark Results
 
-The results below are from the `advanced_benchmark.py` script, averaged over 5 runs on the `gretelai/synthetic_text_to_sql` dataset (100,000 rows).
+Rensa offers significant performance advantages over traditional MinHash libraries like `datasketch`. Recent benchmarks demonstrate that Rensa's MinHash implementations are particularly powerful on large-scale, high-cardinality datasets.
+
+### Large-Scale Benchmark (`Salesforce/wikitext`, 1.8 Million Rows)
+
+The following benchmark was conducted using the large-scale `Salesforce/wikitext` dataset containing 1.8 million rows. This benchmark highlights Rensa's remarkable performance advantage:
+
+* **R-MinHash** completed deduplication **\~39x faster** than `datasketch`.
+* **C-MinHash** performance was similarly impressive.
+
+**Performance comparison:**
+
+| Algorithm       | Execution Time (s) | Speedup vs Datasketch |
+| --------------- | ------------------ | --------------------- |
+| Datasketch      | 1725               | -                     |
+| Rensa R-MinHash | 44                 | **\~39x faster**      |
+| Rensa C-MinHash | 42                 | **\~41x faster**      |
+
+This benchmark clearly demonstrates Rensa's capability to handle large, diverse datasets at exceptional speed.
+
+### Why Does Speedup Vary?
+
+Benchmark speedups depend on dataset characteristics, including:
+
+* **Cardinality (number of distinct elements)**
+* **Document length and repetition rate**
+
+High cardinality and large-scale datasets (such as `Salesforce/wikitext`) leverage Rensa's optimizations fully, achieving maximal performance gains.
+
+### Previous Benchmarks (`gretelai/synthetic_text_to_sql`, 100K Rows)
 
 ![Graph with benchmark results that demonstrate that Rensa is 12x faster](./assets/final_benchmark_comparison.png)
 
+Earlier benchmarks, using the smaller and more repetitive `gretelai/synthetic_text_to_sql` dataset, indicated approximately a **15x speedup** over `datasketch`. While still impressive, these speedups reflect differences in dataset characteristics:
 
-### MinHash Implementations Speed
+| Algorithm            | Execution Time (s) | Speedup vs Datasketch |
+| -------------------- | ------------------ | --------------------- |
+| Datasketch           | 92.45              | -                     |
+| Rensa R-MinHash      | 5.58               | **\~16.6x faster**    |
+| Rensa C-MinHash      | 5.47               | **\~16.9x faster**    |
+| Rensa OptDensMinHash | 12.36              | **\~7.5x faster**     |
 
-Average execution time in seconds for deduplicating the dataset.
+This demonstrates that Rensa significantly outperforms `datasketch` in all scenarios, with even greater gains on larger, high-cardinality datasets.
 
-| Permutations | Datasketch Time (s) | Rensa R-MinHash Time (s) | Rensa C-MinHash Time (s) | Rensa OptDensMinHash Time (s) | R-MinHash Speedup (vs DS) | C-MinHash Speedup (vs DS) | OptDensMinHash Speedup (vs DS) |
-| ------------ | ------------------- | ------------------------ | ------------------------ | ----------------------------- | ------------------------- | ------------------------- | ------------------------------ |
-| 64           | 37.89               | 4.80                     | 4.76                     | 6.28                          | 7.90x                     | 7.96x                     | 6.03x                          |
-| 128          | 56.59               | 5.15                     | 5.04                     | 8.37                          | 11.00x                    | 11.23x                    | 6.76x                          |
-| 256          | 92.45               | 5.58                     | 5.47                     | 12.36                         | 16.57x                    | 16.90x                    | 7.48x                          |
+### Recommendation
 
-### MinHash Implementations Accuracy (Deduplication Results)
+* **Use `RMinHash` or `CMinHash`** for general purposes, especially with large-scale datasets, to achieve maximum performance.
+* **`OptDensMinHash`** is beneficial when dealing with sparse data or fewer permutations.
 
-Jaccard similarity of the deduplicated document indices produced by each method (using 128 permutations), compared against `datasketch` as the baseline or against each other.
+Rensa consistently delivers high-performance MinHash implementations that outperform `datasketch` substantially, making it ideal for real-world, large-scale deduplication and similarity estimation tasks.
 
-  - **Datasketch vs Rensa (RMinHash)**: Jaccard Similarity **1.0000** (Intersection: 99262 identical items)
-  - **Datasketch vs Rensa (CMinHash)**: Jaccard Similarity **0.9996** (Intersection: 99223 items)
-  - **Datasketch vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9997** (Intersection: 99233 items)
-  - **Rensa (RMinHash) vs Rensa (CMinHash)**: Jaccard Similarity **0.9996** (Intersection: 99223 items)
-  - **Rensa (RMinHash) vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9997** (Intersection: 99233 items)
-  - **Rensa (CMinHash) vs Rensa (OptDensMinHash)**: Jaccard Similarity **0.9993** (Intersection: 99194 items)
 
-This confirms that `RMinHash` produces identical deduplication results to `datasketch` in this benchmark, while `CMinHash` and `OptDensMinHash` are highly similar.
+## Running the Benchmarks
 
-### LSH Performance (RMinHashLSH vs. Datasketch MinHashLSH)
+To run the benchmarks yourself, follow these steps:
 
-The following results are from `benchmarks/lsh_benchmark.py` using the `
+1. **Clone the repository:**
+
+```bash
+git clone https://github.com/beowolx/rensa.git
+cd rensa
+```
+
+2. **Create a virtual environment:**
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+3. **Install the required dependencies:**
+
+```bash
+pip install -r requirements.txt
+```
+
+4. **Run the simple benchmark** (compares core MinHash deduplication, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+
+```bash
+python benchmarks/simple_benchmark.py
+```
+
+5. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash, OptDensMinHash, Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+
+```bash
+python benchmarks/advanced_benchmark.py
+```
+
+6. **Run the wiki benchmark** (compares deduplication performance on the `Salesforce/wikitext` dataset with 1.8M rows):
+
+```bash
+python benchmarks/wiki_benchmark.py
+```
+
+## Limitations and Future Work
+
+While Rensa offers significant performance improvements, it has some limitations compared to `datasketch`:
+
+- **Feature set**: Rensa currently implements core MinHash (`RMinHash`, `CMinHash`, `OptDensMinHash`) and LSH (for `RMinHash` via `RMinHashLSH`) functionality. It doesn't include some of the advanced features found in `datasketch` like HyperLogLog, etc.
+
+- **Customization**: `datasketch` offers more options for customizing the hash functions and other parameters. Rensa's implementations are more fixed for performance but offer `seed` and `num_perm` customization.
+
+- **Theoretical guarantees**:
+  - `RMinHash`, due to its simplified permutation generation, may not provide the same level of variance reduction as theoretically optimal MinHash or the full C-MinHash algorithm in all scenarios.
+  - `CMinHash` is designed to be a more faithful implementation of the C-MinHash paper's principles, aiming for stronger theoretical backing regarding its reduction of k permutations to two.
+  - `OptDensMinHash` relies on established densification techniques to improve estimates, particularly for sparse data.
+
+Future work on Rensa may include:
+
+- Adding more advanced features and customization options
+- Further optimizing performance for specific use cases and data types
+- Potentially extending LSH support to other MinHash variants if beneficial.
+
+Despite these limitations, Rensa's performance benefits make it an excellent choice for applications where speed and efficiency are critical, especially when working with large datasets.
+
+## Contributing
+
+Contributions to Rensa are welcome! Please feel free to submit pull requests, report bugs, or suggest features through the GitHub issue tracker.
+
+## License
+
+Rensa is released under the MIT License. See the LICENSE file for details.
