@@ -150,12 +150,18 @@ impl OptDensMinHash {
   }
 
   fn end_sketch(&mut self) {
-    if self.nb_empty > 0 {
+    if self.nb_empty > 0
+      && self.nb_empty < i64::try_from(self.num_perm).unwrap_or(i64::MAX)
+    {
       self.densify();
     }
   }
 
   fn densify(&mut self) {
+    if self.nb_empty == i64::try_from(self.num_perm).unwrap_or(i64::MAX) {
+      return;
+    }
+
     let m = self.num_perm;
     let uniform = Uniform::new(0, m).unwrap();
     for k in 0..m {
