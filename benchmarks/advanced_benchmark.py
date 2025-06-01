@@ -57,12 +57,10 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128):
 
 def measure_time_and_memory(func, *args, **kwargs):
     start_time = time.time()
-    # memory_usage = memory_profiler.memory_usage(
-    #     (func, args, kwargs), interval=0.1, timeout=None)  # type: ignore
-    func(*args, **kwargs)  # Execute the function
+    func(*args, **kwargs)
     end_time = time.time()
 
-    return end_time - start_time  # , max(memory_usage) - min(memory_usage)
+    return end_time - start_time
 
 
 def profile_func(func, *args, **kwargs):
@@ -111,15 +109,12 @@ def run_benchmark(num_runs=5, perm_values=[64, 128, 256]):
                     benchmark_deduplication, sql_dataset, minhash_func, num_perm
                 )
                 results[lib_name][num_perm]["time"].append(time_taken)
-                # results[lib_name][num_perm]["memory"].append(
-                #     memory_used / (1024 * 1024))  # Convert to MB
 
     print("\nBenchmark Results (Averages over runs):")
     for num_perm in perm_values:
         print(f"\nResults for {num_perm} permutations:")
         for lib_name, _, display_name in minhash_methods:
             times = results[lib_name][num_perm]["time"]
-            # memories = results[lib_name][num_perm]["memory"]
             print(f"  {display_name}:")
             if times:
                 print(
@@ -127,11 +122,6 @@ def run_benchmark(num_runs=5, perm_values=[64, 128, 256]):
                 )
             else:
                 print("    Time (seconds): No data")
-            # if memories:
-            #     print(
-            #         f"    Memory (MB): mean={statistics.mean(memories):.2f}, std={statistics.stdev(memories) if len(memories) > 1 else 0.0:.2f}")
-            # else:
-            #     print("    Memory (MB): No data")
 
     default_perm_for_correctness = 128
     print(
@@ -190,15 +180,12 @@ def plot_and_save_results(results, perm_values, minhash_methods, output_dir="ass
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    fig, ax_time = plt.subplots(1, 1, figsize=(12, 8))  # Changed to 1 plot
+    fig, ax_time = plt.subplots(1, 1, figsize=(12, 8))
     plt.style.use("seaborn-v0_8-whitegrid")
 
-    # Define colors for consistency, add more if needed
     colors = ["blue", "red", "green", "purple", "orange"]
     markers = ["o", "s", "D", "^", "v"]
 
-    # --- Execution Time Plot ---
-    # ax_time = axs[0] # No longer need axs
     datasketch_times = [
         statistics.mean(results["datasketch"][p]["time"])
         for p in perm_values
@@ -223,7 +210,6 @@ def plot_and_save_results(results, perm_values, minhash_methods, output_dir="ass
             label=display_name,
         )
 
-        # Annotations for speedup relative to Datasketch
         if lib_name != "datasketch" and datasketch_times:
             for j, p_val in enumerate(perm_values):
                 if (
@@ -247,29 +233,6 @@ def plot_and_save_results(results, perm_values, minhash_methods, output_dir="ass
     ax_time.set_title("Execution Time Comparison")
     ax_time.legend()
     ax_time.grid(True, which="both", ls="--", c="0.7")
-
-    # --- Memory Usage Plot ---
-    # ax_mem = axs[1] # Removed memory plot
-    # for i, (lib_name, _, display_name) in enumerate(minhash_methods):
-    #     mean_memory = [statistics.mean(results[lib_name][p]["memory"])
-    #                    for p in perm_values if results[lib_name][p]["memory"]]
-    #     if not mean_memory:
-    #         continue
-    #
-    #     ax_mem.plot(perm_values, mean_memory, marker=markers[i % len(
-    #         markers)], linestyle='-', color=colors[i % len(colors)], label=display_name)
-    #
-    #     # Annotations for memory usage
-    #     for j, p_val in enumerate(perm_values):
-    #         if j < len(mean_memory):
-    #             ax_mem.text(p_val, mean_memory[j], f"{mean_memory[j]:.2f} MB",
-    #                         ha='center', va='bottom', fontsize=9, color=colors[i % len(colors)])
-    #
-    # ax_mem.set_xlabel("Number of Permutations")
-    # ax_mem.set_ylabel("Memory Usage (MB)")
-    # ax_mem.set_title("Memory Usage Comparison")
-    # ax_mem.legend()
-    # ax_mem.grid(True, which="both", ls="--", c='0.7')
 
     fig.suptitle("Rensa vs Datasketch Performance Comparison",
                  fontsize=16, y=0.95)
