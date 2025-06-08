@@ -138,6 +138,11 @@ impl RMinHash {
     self.hash_values.clone()
   }
 
+  /// Resets the internal state so the object can be reused for new data.
+  pub fn clear(&mut self) {
+    self.hash_values.fill(u32::MAX);
+  }
+
   /// Calculates the Jaccard similarity between this MinHash and another.
   ///
   /// # Arguments

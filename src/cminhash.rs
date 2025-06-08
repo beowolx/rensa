@@ -151,6 +151,11 @@ impl CMinHash {
     self.hash_values.clone()
   }
 
+  /// Resets the internal state so the object can be reused for new data.
+  pub fn clear(&mut self) {
+    self.hash_values.fill(u64::MAX);
+  }
+
   /// Calculates the Jaccard similarity between this CMinHash and another.
   #[inline]
   #[must_use]

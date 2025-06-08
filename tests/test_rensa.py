@@ -1,4 +1,12 @@
-from rensa import RMinHash, RMinHashLSH
+from rensa import (
+    RMinHash,
+    RMinHashLSH,
+    CMinHash,
+    OptDensMinHash,
+    RMinHashDeduper,
+    CMinHashDeduper,
+    OptDensDeduper,
+)
 
 
 def test_rminhash_creation():
@@ -83,3 +91,24 @@ def test_rminhashlsh_is_similar():
     jaccard_value = m1.jaccard(m2)
     assert lsh.is_similar(m1, m2) == (
         jaccard_value >= 0.8), "Check LSH threshold vs real jaccard"
+
+
+def test_inline_dedup_rminhash():
+    d = RMinHashDeduper(num_perm=8, seed=1)
+    assert d.add(["foo", "bar"])
+    assert not d.add(["foo", "bar"])
+    assert d.add(["bar", "baz"])
+
+
+def test_inline_dedup_cminhash():
+    d = CMinHashDeduper(num_perm=8, seed=2)
+    assert d.add(["foo"])
+    assert not d.add(["foo"])
+    assert d.add(["bar"])
+
+
+def test_inline_dedup_optdens():
+    d = OptDensDeduper(num_perm=8, seed=3)
+    assert d.add(["foo", "baz"])
+    assert not d.add(["foo", "baz"])
+    assert d.add(["baz", "qux"])
