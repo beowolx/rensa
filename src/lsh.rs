@@ -85,8 +85,21 @@ impl RMinHashLSH {
   ///
   /// * `key` - A unique identifier for the MinHash.
   /// * `minhash` - The RMinHash instance to be inserted.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the MinHash has a different number of permutations than expected by the LSH index.
   pub fn insert(&mut self, key: usize, minhash: &RMinHash) {
     let digest = minhash.digest();
+
+    assert_eq!(
+      digest.len(),
+      self.num_perm,
+      "MinHash has {} permutations but LSH expects {}",
+      digest.len(),
+      self.num_perm
+    );
+
     for (i, table) in self.hash_tables.iter_mut().enumerate() {
       let start = i * self.band_size;
       let end = start + self.band_size;
@@ -104,9 +117,22 @@ impl RMinHashLSH {
   /// # Returns
   ///
   /// A vector of keys (usize) of potentially similar items.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the MinHash has a different number of permutations than expected by the LSH index.
   #[must_use]
   pub fn query(&self, minhash: &RMinHash) -> Vec<usize> {
     let digest = minhash.digest();
+
+    assert_eq!(
+      digest.len(),
+      self.num_perm,
+      "MinHash has {} permutations but LSH expects {}",
+      digest.len(),
+      self.num_perm
+    );
+
     let mut candidates = Vec::new();
     for (i, table) in self.hash_tables.iter().enumerate() {
       let start = i * self.band_size;
