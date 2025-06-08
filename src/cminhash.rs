@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 /// CMinHash implements an optimized version of C-MinHash with better memory access patterns
 /// and aggressive optimizations for maximum single-threaded performance.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[pyclass(module = "rensa")]
 pub struct CMinHash {
   num_perm: usize,

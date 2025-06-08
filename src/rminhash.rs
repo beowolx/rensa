@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 const PERM_CHUNK_SIZE: usize = 16;
 
 /// RMinHash implements the MinHash algorithm for efficient similarity estimation.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[pyclass(module = "rensa")]
 pub struct RMinHash {
   num_perm: usize,

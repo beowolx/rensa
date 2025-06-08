@@ -33,6 +33,7 @@ Use cases include:
     - [Deduplicating with Direct MinHash](#deduplicating-with-direct-minhash)
     - [Using C-MinHash for Similarity](#using-c-minhash-for-similarity)
     - [Deduplicating with RMinHashLSH](#deduplicating-with-rminhashlsh)
+    - [Inline Deduplication for Streaming Data](#inline-deduplication-for-streaming-data)
   - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-optdensminhash-vs-datasketch)
   - [Benchmark Results](#benchmark-results)
     - [MinHash Implementations Speed](#minhash-implementations-speed)
@@ -272,6 +273,88 @@ def main_lsh_deduplication_simple():
 if __name__ == "__main__":
     main_lsh_deduplication_simple()
 ```
+
+### Inline Deduplication for Streaming Data
+
+Rensa now supports inline deduplication, perfect for scenarios where you receive continuous streams of data and need to check each new record against existing ones in real-time.
+
+```python
+from rensa import RMinHash, RMinHashDeduplicator
+
+
+def inline_deduplication_example():
+    # Initialize the deduplicator with similarity threshold
+    # Adjust LSH parameters for the threshold
+    deduplicator = RMinHashDeduplicator(
+        threshold=0.7,  # Jaccard similarity threshold
+        num_perm=128,  # Number of permutations
+        use_lsh=True,  # Use LSH for efficiency
+        num_bands=32,  # More bands = more sensitive to lower similarities
+    )
+
+    # Simulate streaming data with varying similarities
+    document_stream = [
+        {"id": "001", "text": "The quick brown fox jumps over the lazy dog"},
+        {
+            "id": "002",
+            "text": "The quick brown fox jumps over the lazy dog today",
+        },  # Very similar
+        {
+            "id": "003",
+            "text": "A fast brown fox leaps over a sleepy dog",
+        },  # Somewhat similar
+        {"id": "004", "text": "Lorem ipsum dolor sit amet consectetur"},
+        {
+            "id": "005",
+            "text": "The quick brown fox jumps over the lazy dog",
+        },  # Exact duplicate
+        {
+            "id": "006",
+            "text": "Quick brown foxes jump over lazy dogs",
+        },  # Similar paraphrase
+        {"id": "007", "text": "Completely different content here"},
+    ]
+
+    # Process each document as it arrives
+    for doc in document_stream:
+        # Create MinHash for the new document
+        minhash = RMinHash(num_perm=128, seed=42)
+        minhash.update(doc["text"].split())
+
+        # Check if it's a duplicate
+        if deduplicator.is_duplicate(doc["id"], minhash):
+            # Find which documents it duplicates
+            duplicates = deduplicator.get_duplicates(minhash)
+            print(f"Document {doc['id']} is a duplicate of: {duplicates}")
+        else:
+            # Add to the deduplicator if unique
+            if deduplicator.add(doc["id"], minhash):
+                print(f"Document {doc['id']} added (unique)")
+
+    print(f"\nTotal unique documents: {deduplicator.len()}")
+
+
+if __name__ == "__main__":
+    inline_deduplication_example()
+```
+
+#### Inline Deduplication API
+
+All deduplicators (`RMinHashDeduplicator`, `CMinHashDeduplicator`, `OptDensMinHashDeduplicator`) support the following methods:
+
+- `add(key: str, minhash) -> bool`: Add a new item if it's not a duplicate. Returns True if added.
+- `is_duplicate(key: str, minhash) -> bool`: Check if an item is a duplicate without adding it.
+- `get_duplicates(minhash) -> List[str]`: Get list of keys that are duplicates of the given MinHash.
+- `remove(key: str) -> bool`: Remove an item from the deduplicator.
+- `len() -> int`: Get the number of unique items stored.
+- `clear()`: Remove all items from the deduplicator.
+
+**Performance Tips for Inline Deduplication:**
+
+1. **Use LSH for large datasets**: When dealing with thousands of documents, enable LSH (`use_lsh=True`) for `RMinHashDeduplicator`.
+2. **Adjust threshold**: Lower thresholds catch more duplicates but may have false positives.
+3. **Batch when possible**: If you receive data in small batches, process them together for better performance.
+4. **Memory management**: For very large datasets, consider implementing a sliding window or periodic cleanup of old entries.
 
 ## Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch
 
