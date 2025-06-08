@@ -159,6 +159,23 @@ if __name__ == "__main__":
     main_direct_deduplication()
 ```
 
+### Inline Deduplication
+
+For streaming scenarios you can deduplicate records as they arrive using the new
+`*Deduper` classes. They work with `RMinHash`, `CMinHash`, or `OptDensMinHash`:
+
+```python
+from rensa import RMinHashDeduper
+
+deduper = RMinHashDeduper(num_perm=128, seed=42)
+
+tokens = "a new record".split()
+if deduper.add(tokens):
+    print("unique")
+else:
+    print("duplicate")
+```
+
 ### Using C-MinHash for Similarity
 
 Here's a more direct example of using `CMinHash` for calculating Jaccard similarity:

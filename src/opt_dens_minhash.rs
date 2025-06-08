@@ -88,6 +88,14 @@ impl OptDensMinHash {
     self.values.clone()
   }
 
+  /// Resets the internal state so the object can be reused for new data.
+  pub fn clear(&mut self) {
+    self.hsketch.fill(f64::MAX);
+    self.values.fill(u64::MAX);
+    self.init.fill(false);
+    self.nb_empty = i64::try_from(self.num_perm).unwrap_or(i64::MAX);
+  }
+
   pub fn jaccard(&mut self, other: &mut Self) -> f64 {
     self.end_sketch();
     other.end_sketch();
