@@ -5,6 +5,11 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::needless_pass_by_value)]
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 mod cminhash;
 mod inline_dedup;
 mod lsh;
