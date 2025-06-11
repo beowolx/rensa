@@ -20,6 +20,14 @@ Use cases include:
 - Clustering of high-dimensional data
 - Near-duplicate detection in web crawling
 
+## Quick Start with Google Colab
+
+Want to try Rensa right away? Check out our interactive Google Colab notebook that demonstrates how to use Rensa to deduplicate a dataset from Hugging Face:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1o1nzwXWAa8kdkEJljbJFW1VuI-3VZLUn?usp=sharing)
+
+Thanks [mlabonne](https://github.com/mlabonne) for the Colab notebook!
+
 ## Table of Contents
 
 - [Rensa: A novel high-performance MinHash Implementation in Rust](#rensa-a-novel-high-performance-minhash-implementation-in-rust)
