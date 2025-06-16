@@ -6,7 +6,7 @@ Rensa (Swedish for "clean") is a high-performance MinHash suite written in Rust 
 
 ![Graph with benchmark results that demonstrate that Rensa is 40x faster](./assets/bench1.png)
 
-Rensa initially implemented a variant of the MinHash algorithm (`R-MinHash`) that combined ideas from traditional MinHash and the C-MinHash algorithm. It now also offers a more direct `C-MinHash` implementation and `OptDensMinHash` which uses optimal densification.
+Rensa initially implemented a variant of the MinHash algorithm (`R-MinHash`) that combined ideas from traditional MinHash and the C-MinHash algorithm. It now also offers a more direct `C-MinHash` implementation.
 
 Rensa is particularly useful in scenarios where you need to:
 
@@ -35,14 +35,13 @@ Thanks [mlabonne](https://github.com/mlabonne) for the Colab notebook!
   - [Technical Implementation](#technical-implementation)
     - [R-MinHash (Original Rensa Variant)](#r-minhash-original-rensa-variant)
     - [C-MinHash (Based on the C-MinHash Paper)](#c-minhash-based-on-the-c-minhash-paper)
-    - [OptDensMinHash (Based on Optimal Densification)](#optdensminhash-based-on-optimal-densification)
   - [Installation](#installation)
   - [Usage Example](#usage-example)
     - [Deduplicating with Direct MinHash](#deduplicating-with-direct-minhash)
     - [Using C-MinHash for Similarity](#using-c-minhash-for-similarity)
     - [Deduplicating with RMinHashLSH](#deduplicating-with-rminhashlsh)
     - [Inline Deduplication for Streaming Data](#inline-deduplication-for-streaming-data)
-  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-optdensminhash-vs-datasketch)
+  - [Algorithm Comparison: R-MinHash vs. C-MinHash vs. Datasketch](#algorithm-comparison-r-minhash-vs-c-minhash-vs-datasketch)
   - [Benchmark Results](#benchmark-results)
     - [MinHash Implementations Speed](#minhash-implementations-speed)
     - [MinHash Implementations Accuracy (Deduplication Results)](#minhash-implementations-accuracy-deduplication-results)
@@ -55,7 +54,7 @@ Thanks [mlabonne](https://github.com/mlabonne) for the Colab notebook!
 
 ## Technical Implementation
 
-Rensa offers three high-performance MinHash variants in Rust: `R-MinHash` (its original novel approach), `C-MinHash` (an implementation closely following the C-MinHash paper), and `OptDensMinHash` (based on optimal densification techniques). All are designed for efficient similarity estimation and leverage common strategies for speed and memory efficiency:
+Rensa offers two high-performance MinHash variants in Rust: `R-MinHash` (its original novel approach) and `C-MinHash` (an implementation closely following the C-MinHash paper). Both are designed for efficient similarity estimation and leverage common strategies for speed and memory efficiency:
 - **Fast Hash Functions**: Rensa employs fast, non-cryptographic hash functions (based on FxHash or Murmur3) for processing input items.
 - **Memory-Efficient Data Structures**: Implementations use compact data structures to minimize memory usage while maintaining fast access times.
 - **Optimized Routines**: Core operations are optimized using techniques like batch processing and vectorized operations where appropriate.
@@ -84,15 +83,6 @@ Rensa also includes `CMinHash`, an implementation more directly aligned with the
 2.  **Highly Optimized Routines**: The `update` and `jaccard` methods in `CMinHash` are heavily optimized. This includes batch processing of input items, structuring calculations to improve cache utilization, and using vectorized operations (e.g., processing data in fixed-size chunks like blocks of 16 or 8) for faster computations.
 3.  **Performance Focus**: This implementation is specifically engineered for maximum single-threaded performance through these aggressive optimizations and careful memory access patterns.
 
-### OptDensMinHash (Based on Optimal Densification)
-
-Rensa also provides `OptDensMinHash`, which implements MinHash enhanced by an optimal densification strategy. This approach aims to improve accuracy, especially for sparse datasets or smaller numbers of permutations, by ensuring that MinHash signatures are always fully populated.
-
-1.  **Densification**: If, after processing all input items, some slots in the MinHash signature remain empty (i.e., no item hashed to them as the minimum), this algorithm fills these empty slots using values from other, non-empty slots in a principled manner. This "densification" ensures a complete signature.
-2.  **Theoretical Basis**: The core ideas are drawn from research on densified MinHash algorithms, such as:
-    - Shrivastava, A. (2017). Optimal Densification for Fast and Accurate Minwise Hashing. *PMLR*.
-    - Mai, T., et al. (2020). On densification for MinWise Hashing. *PMLR*.
-3.  **Usage**: `OptDensMinHash` is designed for unweighted data. The densification process is automatically triggered internally when the signature is requested (e.g., via `digest()` or `jaccard()`).
 
 These design choices result in a suite of MinHash implementations that are fast, memory-efficient, and suitable for large-scale similarity estimation and deduplication tasks. Benchmarks show that Rensa's implementations offer significant performance improvements over traditional MinHash libraries like `datasketch`.
 
@@ -112,7 +102,7 @@ Here's an example of how to use Rensa's MinHash implementations (e.g., `RMinHash
 
 ```python
 from datasets import load_dataset
-from rensa import RMinHash, CMinHash # Or OptDensMinHash
+from rensa import RMinHash, CMinHash
 from tqdm import tqdm
 
 # Define a function to generate MinHash (works for RMinHash, CMinHash)
@@ -348,7 +338,7 @@ if __name__ == "__main__":
 
 #### Inline Deduplication API
 
-All deduplicators (`RMinHashDeduplicator`, `CMinHashDeduplicator`, `OptDensMinHashDeduplicator`) support the following methods:
+All deduplicators (`RMinHashDeduplicator`, `CMinHashDeduplicator`) support the following methods:
 
 - `add(key: str, minhash) -> bool`: Add a new item if it's not a duplicate. Returns True if added.
 - `is_duplicate(key: str, minhash) -> bool`: Check if an item is a duplicate without adding it.
@@ -364,9 +354,9 @@ All deduplicators (`RMinHashDeduplicator`, `CMinHashDeduplicator`, `OptDensMinHa
 3. **Batch when possible**: If you receive data in small batches, process them together for better performance.
 4. **Memory management**: For very large datasets, consider implementing a sliding window or periodic cleanup of old entries.
 
-## Algorithm Comparison: R-MinHash vs. C-MinHash vs. OptDensMinHash vs. Datasketch
+## Algorithm Comparison: R-MinHash vs. C-MinHash vs. Datasketch
 
-Rensa offers three MinHash implementations (`RMinHash`, `CMinHash`, `OptDensMinHash`), each with different trade-offs compared to each other and the popular `datasketch` library.
+Rensa offers two MinHash implementations (`RMinHash`, `CMinHash`), each with different trade-offs compared to each other and the popular `datasketch` library.
 
 Based on the latest `advanced_benchmark.py` results (averaged over 5 runs on the `gretelai/synthetic_text_to_sql` dataset, 100,000 rows, in a Macbook Pro M2 32GB):
 
@@ -374,22 +364,19 @@ Based on the latest `advanced_benchmark.py` results (averaged over 5 runs on the
 
       * **`CMinHash`** is consistently the fastest. Average execution time: **5.47 seconds**.
       * **`RMinHash`** is also very fast. Average execution time: **5.58 seconds**.
-      * **`OptDensMinHash`** is fast. Average execution time: **12.36 seconds**.
       * **`datasketch`** is considerably slower. Average execution time: **92.45 seconds**.
-        This makes `CMinHash` up to approximately **16.90x faster** than `datasketch`, `RMinHash` up to approximately **16.57x faster**, and `OptDensMinHash` up to approximately **7.48x faster** than `datasketch` (all at 256 permutations).
+        This makes `CMinHash` up to approximately **16.90x faster** than `datasketch` and `RMinHash` up to approximately **16.57x faster** (all at 256 permutations).
 
   * **Accuracy (Jaccard Similarity of Deduplicated Sets vs. Datasketch, 128 permutations)**:
 
       * **`RMinHash`** produces deduplication results identical to `datasketch` (Jaccard similarity of **1.0000** between their output sets of unique items, with 99262 common items).
-      * **`OptDensMinHash`** yields results very close to `datasketch`. The Jaccard similarity is **0.9997** (with 99233 common items with Datasketch).
       * **`CMinHash`** also yields results very close to `datasketch`. The Jaccard similarity is **0.9996** (with 99223 common items with Datasketch).
-        This indicates that while all Rensa variants are highly effective for similarity estimation, `RMinHash` perfectly matches `datasketch`'s deduplication output in this benchmark, while `CMinHash` and `OptDensMinHash` produce extremely similar results.
+        This indicates that while both Rensa variants are highly effective for similarity estimation, `RMinHash` perfectly matches `datasketch`'s deduplication output in this benchmark and `CMinHash` produces extremely similar results.
 
   * **Recommendation**:
 
       * For most use cases, **`RMinHash`** provides an excellent balance of high speed (up to ~16.6x faster than `datasketch`) and accuracy (matching `datasketch`'s deduplication results). **It remains the generally recommended algorithm.**
       * If absolute maximum throughput is the primary concern, **`CMinHash`** offers the best performance (up to ~16.9x faster than `datasketch`), with a negligible difference in exact deduplication results compared to `datasketch`/`RMinHash`.
-      * **`OptDensMinHash`** offers a good balance of speed and high accuracy, and might be particularly beneficial for datasets with high sparsity or when using fewer permutations, due to its densification strategy.
       * If you require features beyond core MinHash generation or need to integrate with an existing `datasketch` ecosystem, `datasketch` remains a comprehensive option, albeit slower for MinHash operations.
 
 ## Benchmark Results
@@ -433,14 +420,12 @@ Earlier benchmarks, using the smaller and more repetitive `gretelai/synthetic_te
 | Datasketch           | 92.45              | -                     |
 | Rensa R-MinHash      | 5.58               | **\~16.6x faster**    |
 | Rensa C-MinHash      | 5.47               | **\~16.9x faster**    |
-| Rensa OptDensMinHash | 12.36              | **\~7.5x faster**     |
 
 This demonstrates that Rensa significantly outperforms `datasketch` in all scenarios, with even greater gains on larger, high-cardinality datasets.
 
 ### Recommendation
 
 * **Use `RMinHash` or `CMinHash`** for general purposes, especially with large-scale datasets, to achieve maximum performance.
-* **`OptDensMinHash`** is beneficial when dealing with sparse data or fewer permutations.
 
 Rensa consistently delivers high-performance MinHash implementations that outperform `datasketch` substantially, making it ideal for real-world, large-scale deduplication and similarity estimation tasks.
 
@@ -475,7 +460,7 @@ pip install -r requirements.txt
 python benchmarks/simple_benchmark.py
 ```
 
-5. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash, OptDensMinHash, Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+5. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
 
 ```bash
 python benchmarks/advanced_benchmark.py
@@ -491,14 +476,13 @@ python benchmarks/wiki_benchmark.py
 
 While Rensa offers significant performance improvements, it has some limitations compared to `datasketch`:
 
-- **Feature set**: Rensa currently implements core MinHash (`RMinHash`, `CMinHash`, `OptDensMinHash`) and LSH (for `RMinHash` via `RMinHashLSH`) functionality. It doesn't include some of the advanced features found in `datasketch` like HyperLogLog, etc.
+- **Feature set**: Rensa currently implements core MinHash (`RMinHash`, `CMinHash`) and LSH (for `RMinHash` via `RMinHashLSH`) functionality. It doesn't include some of the advanced features found in `datasketch` like HyperLogLog, etc.
 
 - **Customization**: `datasketch` offers more options for customizing the hash functions and other parameters. Rensa's implementations are more fixed for performance but offer `seed` and `num_perm` customization.
 
 - **Theoretical guarantees**:
   - `RMinHash`, due to its simplified permutation generation, may not provide the same level of variance reduction as theoretically optimal MinHash or the full C-MinHash algorithm in all scenarios.
   - `CMinHash` is designed to be a more faithful implementation of the C-MinHash paper's principles, aiming for stronger theoretical backing regarding its reduction of k permutations to two.
-  - `OptDensMinHash` relies on established densification techniques to improve estimates, particularly for sparse data.
 
 Future work on Rensa may include:
 

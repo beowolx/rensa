@@ -13,7 +13,6 @@ static GLOBAL: MiMalloc = MiMalloc;
 mod cminhash;
 mod inline_dedup;
 mod lsh;
-mod opt_dens_minhash;
 mod rminhash;
 mod utils;
 
@@ -21,7 +20,6 @@ pub use cminhash::CMinHash;
 pub use inline_dedup::CMinHashDeduplicator;
 pub use inline_dedup::RMinHashDeduplicator;
 pub use lsh::RMinHashLSH;
-pub use opt_dens_minhash::OptDensMinHash;
 pub use rminhash::RMinHash;
 
 use pyo3::prelude::*;
@@ -33,7 +31,6 @@ use pyo3::prelude::*;
 #[pymodule]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
-  m.add_class::<OptDensMinHash>()?;
   m.add_class::<CMinHash>()?;
   m.add_class::<RMinHashLSH>()?;
   m.add_class::<RMinHashDeduplicator>()?;
