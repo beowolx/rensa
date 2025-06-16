@@ -8,7 +8,7 @@ import time
 import matplotlib.pyplot as plt
 from datasets import load_dataset
 from datasketch import MinHash
-from rensa import CMinHash, OptDensMinHash, RMinHash  # type: ignore
+from rensa import CMinHash, RMinHash  # type: ignore
 
 
 def datasketch_minhash(text, num_perm=128):
@@ -30,10 +30,6 @@ def cminhash_minhash(text, num_perm=128):
     return m
 
 
-def optdens_minhash(text, num_perm=128):
-    m = OptDensMinHash(num_perm=num_perm, seed=42)
-    m.update(text.split())
-    return m
 
 
 def benchmark_deduplication(dataset, minhash_func, num_perm=128):
@@ -88,14 +84,12 @@ def run_benchmark(num_runs=5, perm_values=[64, 128, 256]):
         "datasketch": {perm: {"time": []} for perm in perm_values},
         "rensa": {perm: {"time": []} for perm in perm_values},
         "cminhash": {perm: {"time": []} for perm in perm_values},
-        "optdens": {perm: {"time": []} for perm in perm_values},
     }
 
     minhash_methods = [
         ("datasketch", datasketch_minhash, "Datasketch"),
         ("rensa", rensa_minhash, "Rensa (RMinHash)"),
         ("cminhash", cminhash_minhash, "Rensa (CMinHash)"),
-        ("optdens", optdens_minhash, "Rensa (OptDensMinHash)"),
     ]
 
     for num_perm in perm_values:
@@ -138,9 +132,6 @@ def run_benchmark(num_runs=5, perm_values=[64, 128, 256]):
     cmin_deduped_indices = benchmark_deduplication(
         sql_dataset, cminhash_minhash, default_perm_for_correctness
     )
-    optdens_deduped_indices = benchmark_deduplication(
-        sql_dataset, optdens_minhash, default_perm_for_correctness
-    )
 
     print("\n  Jaccard Similarities of Deduplicated Sets:")
 
@@ -148,7 +139,6 @@ def run_benchmark(num_runs=5, perm_values=[64, 128, 256]):
         ("Datasketch", ds_deduped_indices),
         ("Rensa (RMinHash)", rensa_deduped_indices),
         ("Rensa (CMinHash)", cmin_deduped_indices),
-        ("Rensa (OptDensMinHash)", optdens_deduped_indices),
     ]
 
     for i in range(len(all_deduped_sets)):

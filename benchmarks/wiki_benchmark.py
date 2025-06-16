@@ -2,7 +2,7 @@ import time
 
 from datasets import load_dataset
 from datasketch import MinHash
-from rensa import CMinHash, OptDensMinHash, RMinHash
+from rensa import CMinHash, RMinHash
 from tqdm import tqdm
 
 
@@ -25,10 +25,6 @@ def cminimash(text, num_perm=128):
     return m
 
 
-def optdens_minhash(text, num_perm=128):
-    m = OptDensMinHash(num_perm=num_perm, seed=42)
-    m.update(text.split())
-    return m
 
 
 def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processing"):
@@ -79,10 +75,6 @@ def run_benchmark():
         wikipedia_dataset, cminimash, desc="Rensa C-MinHash"
     )
 
-    print("\nRunning Rensa (OptDens-MinHash) benchmark...")
-    optdens_results = benchmark_deduplication(
-        wikipedia_dataset, optdens_minhash, desc="Rensa OptDens-MinHash"
-    )
 
     print("\n" + "=" * 60)
     print("BENCHMARK RESULTS")
@@ -93,7 +85,6 @@ def run_benchmark():
         ("Datasketch", datasketch_results),
         ("R-MinHash", rensa_results),
         ("C-MinHash", cminimash_results),
-        ("OptDens-MinHash", optdens_results),
     ]
 
     for name, result in results:
