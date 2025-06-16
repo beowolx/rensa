@@ -24,7 +24,7 @@
 //! properly finalized before use, even if some hash slots were not initially filled
 //! by incoming data.
 
-use crate::utils::calculate_hash;
+use crate::utils::calculate_hash_fast;
 use murmur3::murmur3_32;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -64,7 +64,7 @@ impl OptDensMinHash {
 
   pub fn update(&mut self, items: Vec<String>) {
     for item in items {
-      let h = calculate_hash(&item);
+      let h = calculate_hash_fast(item.as_bytes());
       self.sketch_hash(h);
     }
   }
@@ -91,12 +91,31 @@ impl OptDensMinHash {
   pub fn jaccard(&mut self, other: &mut Self) -> f64 {
     self.end_sketch();
     other.end_sketch();
-    let equal_count = self
-      .values
-      .iter()
-      .zip(other.values.iter())
-      .filter(|(&a, &b)| a == b)
-      .count();
+    let mut equal_count = 0usize;
+
+    let chunks_a = self.values.chunks_exact(8);
+    let chunks_b = other.values.chunks_exact(8);
+
+    for (chunk_a, chunk_b) in chunks_a.zip(chunks_b) {
+      equal_count += usize::from(chunk_a[0] == chunk_b[0]);
+      equal_count += usize::from(chunk_a[1] == chunk_b[1]);
+      equal_count += usize::from(chunk_a[2] == chunk_b[2]);
+      equal_count += usize::from(chunk_a[3] == chunk_b[3]);
+      equal_count += usize::from(chunk_a[4] == chunk_b[4]);
+      equal_count += usize::from(chunk_a[5] == chunk_b[5]);
+      equal_count += usize::from(chunk_a[6] == chunk_b[6]);
+      equal_count += usize::from(chunk_a[7] == chunk_b[7]);
+    }
+
+    let remainder_start = (self.num_perm / 8) * 8;
+    if remainder_start < self.num_perm {
+      equal_count += self.values[remainder_start..]
+        .iter()
+        .zip(&other.values[remainder_start..])
+        .filter(|&(&a, &b)| a == b)
+        .count();
+    }
+
     equal_count as f64 / self.num_perm as f64
   }
 
