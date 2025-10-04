@@ -1,13 +1,5 @@
 use rustc_hash::FxHasher;
-use std::hash::{Hash, Hasher};
-
-/// Calculates a hash value for a given item.
-#[inline]
-pub fn calculate_hash<T: Hash>(t: &T) -> u64 {
-  let mut s = FxHasher::default();
-  t.hash(&mut s);
-  s.finish()
-}
+use std::hash::Hasher;
 
 /// Fast hash function for byte arrays
 #[inline]
