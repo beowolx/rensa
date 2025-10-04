@@ -24,7 +24,7 @@ pub use rminhash::RMinHash;
 
 use pyo3::prelude::*;
 
-/// Python module for MinHash and LSH implementations
+/// Python module for `MinHash` and LSH implementations
 ///
 /// # Errors
 /// Returns an error if the module initialization fails or classes cannot be added

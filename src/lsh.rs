@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
-/// RMinHashLSH implements Locality-Sensitive Hashing using MinHash for efficient similarity search.
+/// `RMinHashLSH` implements Locality-Sensitive Hashing using `MinHash` for efficient similarity search.
 #[derive(Serialize, Deserialize)]
 #[pyclass(module = "rensa")]
 pub struct RMinHashLSH {
@@ -55,12 +55,12 @@ pub struct RMinHashLSH {
 
 #[pymethods]
 impl RMinHashLSH {
-  /// Creates a new RMinHashLSH instance.
+  /// Creates a new `RMinHashLSH` instance.
   ///
   /// # Arguments
   ///
   /// * `threshold` - The similarity threshold for considering items as similar.
-  /// * `num_perm` - The number of permutations used in the MinHash algorithm.
+  /// * `num_perm` - The number of permutations used in the `MinHash` algorithm.
   /// * `num_bands` - The number of bands for the LSH algorithm.
   #[new]
   #[must_use]
@@ -79,16 +79,16 @@ impl RMinHashLSH {
     }
   }
 
-  /// Inserts a MinHash into the LSH index.
+  /// Inserts a `MinHash` into the LSH index.
   ///
   /// # Arguments
   ///
-  /// * `key` - A unique identifier for the MinHash.
-  /// * `minhash` - The RMinHash instance to be inserted.
+  /// * `key` - A unique identifier for the `MinHash`.
+  /// * `minhash` - The `RMinHash` instance to be inserted.
   ///
   /// # Panics
   ///
-  /// Panics if the MinHash has a different number of permutations than expected by the LSH index.
+  /// Panics if the `MinHash` has a different number of permutations than expected by the LSH index.
   pub fn insert(&mut self, key: usize, minhash: &RMinHash) {
     let digest = minhash.digest();
 
@@ -112,7 +112,7 @@ impl RMinHashLSH {
   ///
   /// # Arguments
   ///
-  /// * `minhash` - The RMinHash instance to query for.
+  /// * `minhash` - The `RMinHash` instance to query for.
   ///
   /// # Returns
   ///
@@ -120,7 +120,7 @@ impl RMinHashLSH {
   ///
   /// # Panics
   ///
-  /// Panics if the MinHash has a different number of permutations than expected by the LSH index.
+  /// Panics if the `MinHash` has a different number of permutations than expected by the LSH index.
   #[must_use]
   pub fn query(&self, minhash: &RMinHash) -> Vec<usize> {
     let digest = minhash.digest();
@@ -147,16 +147,16 @@ impl RMinHashLSH {
     candidates
   }
 
-  /// Checks if two MinHashes are similar based on the LSH threshold.
+  /// Checks if two `MinHashes` are similar based on the LSH threshold.
   ///
   /// # Arguments
   ///
-  /// * `minhash1` - The first RMinHash instance.
-  /// * `minhash2` - The second RMinHash instance.
+  /// * `minhash1` - The first `RMinHash` instance.
+  /// * `minhash2` - The second `RMinHash` instance.
   ///
   /// # Returns
   ///
-  /// A boolean indicating whether the MinHashes are considered similar.
+  /// A boolean indicating whether the `MinHashes` are considered similar.
   #[must_use]
   pub fn is_similar(&self, minhash1: &RMinHash, minhash2: &RMinHash) -> bool {
     minhash1.jaccard(minhash2) >= self.threshold
