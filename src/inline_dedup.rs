@@ -44,12 +44,12 @@ impl RMinHashDeduplicator {
       };
       let bands = num_bands.unwrap_or(default_bands);
 
-      let bands = if num_perm % bands == 0 {
+      let bands = if num_perm.is_multiple_of(bands) {
         bands
       } else {
         (1..=num_perm)
           .rev()
-          .find(|&b| num_perm % b == 0 && b <= bands)
+          .find(|&b| num_perm.is_multiple_of(b) && b <= bands)
           .unwrap_or(1)
       };
 
@@ -124,7 +124,7 @@ impl RMinHashDeduplicator {
     false
   }
 
-  /// Get duplicate candidates for a given MinHash
+  /// Get duplicate candidates for a given `MinHash`
   #[must_use]
   pub fn get_duplicates(&self, minhash: &RMinHash) -> Vec<String> {
     let mut duplicates = Vec::new();
@@ -187,7 +187,7 @@ impl RMinHashDeduplicator {
   }
 }
 
-/// InlineDeduplicator for CMinHash
+/// `InlineDeduplicator` for `CMinHash`
 #[pyclass(module = "rensa")]
 pub struct CMinHashDeduplicator {
   threshold: f64,

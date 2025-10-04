@@ -28,14 +28,14 @@
 
 use crate::utils::{calculate_hash_fast, permute_hash};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyIterator};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 
 const PERM_CHUNK_SIZE: usize = 16;
 
-/// RMinHash implements the MinHash algorithm for efficient similarity estimation.
+/// `RMinHash` implements the `MinHash` algorithm for efficient similarity estimation.
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(module = "rensa")]
 pub struct RMinHash {
@@ -45,41 +45,8 @@ pub struct RMinHash {
   permutations: Vec<(u64, u64)>,
 }
 
-#[pymethods]
 impl RMinHash {
-  /// Creates a new RMinHash instance.
-  ///
-  /// # Arguments
-  ///
-  /// * `num_perm` - The number of permutations to use in the MinHash algorithm.
-  /// * `seed` - A seed value for the random number generator.
-  #[new]
-  #[must_use]
-  pub fn new(num_perm: usize, seed: u64) -> Self {
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let permutations: Vec<(u64, u64)> = (0..num_perm)
-      .map(|_| {
-        // Ensure odd multiplier for better distribution
-        let a = rng.random::<u64>() | 1;
-        let b = rng.random::<u64>();
-        (a, b)
-      })
-      .collect();
-
-    Self {
-      num_perm,
-      seed,
-      hash_values: vec![u32::MAX; num_perm],
-      permutations,
-    }
-  }
-
-  /// Updates the MinHash with a new set of items.
-  ///
-  /// # Arguments
-  ///
-  /// * `items` - A vector of strings to be hashed and incorporated into the MinHash.
-  pub fn update(&mut self, items: Vec<String>) {
+  fn update_internal(&mut self, items: Vec<String>) {
     const BATCH_SIZE: usize = 32;
     let mut hash_batch = Vec::with_capacity(BATCH_SIZE);
 
@@ -128,25 +95,82 @@ impl RMinHash {
     }
   }
 
-  /// Returns the current MinHash digest.
+  /// Updates the `MinHash` with a new set of items from a vector of strings.
+  pub fn update_vec(&mut self, items: Vec<String>) {
+    self.update_internal(items);
+  }
+}
+
+#[pymethods]
+impl RMinHash {
+  /// Creates a new `RMinHash` instance.
+  ///
+  /// # Arguments
+  ///
+  /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
+  /// * `seed` - A seed value for the random number generator.
+  #[new]
+  #[must_use]
+  pub fn new(num_perm: usize, seed: u64) -> Self {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let permutations: Vec<(u64, u64)> = (0..num_perm)
+      .map(|_| {
+        // Ensure odd multiplier for better distribution
+        let a = rng.random::<u64>() | 1;
+        let b = rng.random::<u64>();
+        (a, b)
+      })
+      .collect();
+
+    Self {
+      num_perm,
+      seed,
+      hash_values: vec![u32::MAX; num_perm],
+      permutations,
+    }
+  }
+
+  /// Updates the `MinHash` with a new set of items.
+  ///
+  /// # Arguments
+  ///
+  /// * `items` - An iterable of strings to be hashed and incorporated into the `MinHash`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `items` is not iterable or contains non-string elements.
+  #[pyo3(signature = (items))]
+  pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
+    let iterator = PyIterator::from_object(&items)?;
+    let mut collected_items = Vec::new();
+
+    for item in iterator {
+      collected_items.push(item?.extract::<String>()?);
+    }
+
+    self.update_internal(collected_items);
+    Ok(())
+  }
+
+  /// Returns the current `MinHash` digest.
   ///
   /// # Returns
   ///
-  /// A vector of u32 values representing the MinHash signature.
+  /// A vector of u32 values representing the `MinHash` signature.
   #[must_use]
   pub fn digest(&self) -> Vec<u32> {
     self.hash_values.clone()
   }
 
-  /// Calculates the Jaccard similarity between this MinHash and another.
+  /// Calculates the Jaccard similarity between this `MinHash` and another.
   ///
   /// # Arguments
   ///
-  /// * `other` - Another RMinHash instance to compare with.
+  /// * `other` - Another `RMinHash` instance to compare with.
   ///
   /// # Returns
   ///
-  /// A float value representing the estimated Jaccard similarity.
+  /// A float value representing the estimated `Jaccard` similarity.
   #[must_use]
   pub fn jaccard(&self, other: &Self) -> f64 {
     let mut equal_count = 0usize;
