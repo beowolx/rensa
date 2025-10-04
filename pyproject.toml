@@ -5,11 +5,20 @@ build-backend = "maturin"
 [project]
 name = "rensa"
 requires-python = ">=3.8"
+description = "High-performance MinHash implementation in Rust with Python bindings - 40x faster than datasketch"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Luis Cardoso", email = "luis@luiscardoso.dev" }]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/beowolx/rensa"
+Repository = "https://github.com/beowolx/rensa"
+Issues = "https://github.com/beowolx/rensa/issues"
 [tool.maturin]
 features = ["pyo3/extension-module"]
