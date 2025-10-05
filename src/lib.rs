@@ -5,10 +5,8 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::needless_pass_by_value)]
 
-use mimalloc::MiMalloc;
-
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 mod cminhash;
 mod inline_dedup;
