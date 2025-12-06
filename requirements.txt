@@ -38,6 +38,6 @@ tomli==2.0.1
 tqdm==4.66.4
 typing-extensions==4.12.2
 tzdata==2024.1
-urllib3==2.5.0
+urllib3==2.6.0
 xxhash==3.4.1
 yarl==1.12.0
