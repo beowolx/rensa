@@ -105,6 +105,11 @@ impl RMinHash {
   pub fn update_vec(&mut self, items: Vec<String>) {
     self.update_internal(items);
   }
+
+  #[must_use]
+  pub(crate) fn digest_slice(&self) -> &[u32] {
+    &self.hash_values
+  }
 }
 
 #[pymethods]
@@ -115,9 +120,16 @@ impl RMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero.
   #[new]
-  #[must_use]
-  pub fn new(num_perm: usize, seed: u64) -> Self {
+  pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
+    if num_perm == 0 {
+      return Err(PyValueError::new_err("num_perm must be greater than 0"));
+    }
+
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let permutations: Vec<(u64, u64)> = (0..num_perm)
       .map(|_| {
@@ -128,12 +140,12 @@ impl RMinHash {
       })
       .collect();
 
-    Self {
+    Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
       permutations,
-    }
+    })
   }
 
   /// Updates the `MinHash` with a new set of items.
@@ -190,8 +202,18 @@ impl RMinHash {
   /// # Returns
   ///
   /// A float value representing the estimated `Jaccard` similarity.
-  #[must_use]
-  pub fn jaccard(&self, other: &Self) -> f64 {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the two signatures have different `num_perm` values.
+  pub fn jaccard(&self, other: &Self) -> PyResult<f64> {
+    if self.num_perm != other.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Cannot compare MinHashes with different num_perm values: {} and {}",
+        self.num_perm, other.num_perm
+      )));
+    }
+
     let mut equal_count = 0usize;
 
     // Process in chunks of 8 for CPU-friendly operations
@@ -220,7 +242,7 @@ impl RMinHash {
         .count();
     }
 
-    equal_count as f64 / self.num_perm as f64
+    Ok(equal_count as f64 / self.num_perm as f64)
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
@@ -230,6 +252,26 @@ impl RMinHash {
           "failed to deserialize RMinHash state: {err}"
         ))
       })?;
+
+    if decoded.num_perm == 0 {
+      return Err(PyValueError::new_err(
+        "Invalid state: num_perm must be greater than 0",
+      ));
+    }
+    if decoded.hash_values.len() != decoded.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Invalid state: hash_values length {} does not match num_perm {}",
+        decoded.hash_values.len(),
+        decoded.num_perm
+      )));
+    }
+    if decoded.permutations.len() != decoded.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Invalid state: permutations length {} does not match num_perm {}",
+        decoded.permutations.len(),
+        decoded.num_perm
+      )));
+    }
     *self = decoded;
     Ok(())
   }
