@@ -1,4 +1,7 @@
-from rensa import RMinHash, RMinHashLSH
+from array import array
+
+import pytest
+from rensa import CMinHash, RMinHash, RMinHashLSH
 
 
 def test_rminhash_creation():
@@ -44,6 +47,106 @@ def test_rminhash_serialization_roundtrip():
     m2 = pickle.loads(data)
 
     assert m2.digest() == digest_before, "Deserialized RMinHash should have the same digest"
+
+
+def test_rminhash_update_accepts_iterable_bytes_like_tokens():
+    m = RMinHash(num_perm=32, seed=77)
+    initial_digest = m.digest()
+
+    m.update([
+        b"alpha",
+        bytearray(b"beta"),
+        memoryview(b"gamma"),
+        array("B", [100, 101, 102]),
+    ])
+
+    assert m.digest() != initial_digest
+
+
+def test_cminhash_update_accepts_iterable_bytes_like_tokens():
+    m = CMinHash(num_perm=32, seed=77)
+    initial_digest = m.digest()
+
+    m.update([
+        b"alpha",
+        bytearray(b"beta"),
+        memoryview(b"gamma"),
+        array("B", [100, 101, 102]),
+    ])
+
+    assert m.digest() != initial_digest
+
+
+def test_rminhash_top_level_bytes_and_memoryview_are_single_tokens():
+    bytes_direct = RMinHash(num_perm=32, seed=42)
+    bytes_list = RMinHash(num_perm=32, seed=42)
+    bytes_direct.update(b"abc")
+    bytes_list.update([b"abc"])
+    assert bytes_direct.digest() == bytes_list.digest()
+
+    mv_direct = RMinHash(num_perm=32, seed=42)
+    mv_list = RMinHash(num_perm=32, seed=42)
+    mv = memoryview(b"abc")
+    mv_direct.update(mv)
+    mv_list.update([mv])
+    assert mv_direct.digest() == mv_list.digest()
+
+
+def test_cminhash_top_level_bytes_and_memoryview_are_single_tokens():
+    bytes_direct = CMinHash(num_perm=32, seed=42)
+    bytes_list = CMinHash(num_perm=32, seed=42)
+    bytes_direct.update(b"abc")
+    bytes_list.update([b"abc"])
+    assert bytes_direct.digest() == bytes_list.digest()
+
+    mv_direct = CMinHash(num_perm=32, seed=42)
+    mv_list = CMinHash(num_perm=32, seed=42)
+    mv = memoryview(b"abc")
+    mv_direct.update(mv)
+    mv_list.update([mv])
+    assert mv_direct.digest() == mv_list.digest()
+
+
+def test_rminhash_rejects_non_contiguous_memoryview():
+    m = RMinHash(num_perm=32, seed=42)
+    non_contiguous = memoryview(bytearray(b"abcd"))[::2]
+    with pytest.raises(TypeError, match="C-contiguous and byte-sized"):
+        m.update(non_contiguous)
+
+
+def test_cminhash_rejects_non_contiguous_memoryview():
+    m = CMinHash(num_perm=32, seed=42)
+    non_contiguous = memoryview(bytearray(b"abcd"))[::2]
+    with pytest.raises(TypeError, match="C-contiguous and byte-sized"):
+        m.update(non_contiguous)
+
+
+def test_rminhash_rejects_invalid_iterable_item_type():
+    m = RMinHash(num_perm=32, seed=42)
+    with pytest.raises(TypeError, match="each item must be"):
+        m.update([123])
+
+
+def test_cminhash_rejects_invalid_iterable_item_type():
+    m = CMinHash(num_perm=32, seed=42)
+    with pytest.raises(TypeError, match="each item must be"):
+        m.update([123])
+
+
+def test_rminhash_top_level_str_behavior_is_unchanged():
+    direct = RMinHash(num_perm=32, seed=11)
+    tokenized = RMinHash(num_perm=32, seed=11)
+    direct.update("abc")
+    tokenized.update(["a", "b", "c"])
+    assert direct.digest() == tokenized.digest()
+
+
+def test_cminhash_top_level_str_behavior_is_unchanged():
+    direct = CMinHash(num_perm=32, seed=11)
+    tokenized = CMinHash(num_perm=32, seed=11)
+    direct.update("abc")
+    tokenized.update(["a", "b", "c"])
+    assert direct.digest() == tokenized.digest()
 
 # --------------------- RMinHashLSH Tests ---------------------
 

@@ -13,6 +13,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 mod cminhash;
 mod inline_dedup;
 mod lsh;
+mod py_input;
 mod rminhash;
 mod utils;
 
