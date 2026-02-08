@@ -15,12 +15,15 @@
 //! The `update` method processes items in batches to improve cache utilization,
 //! and the Jaccard calculation is optimized using chunked operations.
 
+use crate::py_input::{hash_single_bufferlike, hash_token};
 use crate::utils::calculate_hash_fast;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+
+const HASH_BATCH_SIZE: usize = 32;
 
 /// `CMinHash` implements an optimized version of `C-MinHash` with better memory access patterns
 /// and aggressive optimizations for maximum single-threaded performance.
@@ -41,60 +44,64 @@ pub struct CMinHash {
 }
 
 impl CMinHash {
+  #[inline]
+  const fn sigma_transform(&self, hash: u64) -> u64 {
+    self.sigma_a.wrapping_mul(hash).wrapping_add(self.sigma_b)
+  }
+
+  fn apply_sigma_batch(&mut self, sigma_batch: &[u64]) {
+    // Update hash values in blocks of 16 for better vectorization
+    let chunks_iter = self.hash_values.chunks_exact_mut(16);
+    let pi_chunks_iter = self.pi_precomputed.chunks_exact(16);
+
+    // Process complete chunks of 16
+    for (hash_chunk, pi_chunk) in chunks_iter.zip(pi_chunks_iter) {
+      let mut current = [0u64; 16];
+      current.copy_from_slice(hash_chunk);
+
+      for &sigma_h in sigma_batch {
+        let base = self.pi_c.wrapping_mul(sigma_h);
+
+        for i in 0..16 {
+          let pi_value = base.wrapping_add(pi_chunk[i]);
+          current[i] = current[i].min(pi_value);
+        }
+      }
+
+      hash_chunk.copy_from_slice(&current);
+    }
+
+    // Handle remainder (elements not in chunks of 16)
+    let remainder_start = (self.num_perm / 16) * 16;
+    if remainder_start < self.num_perm {
+      let hash_remainder = &mut self.hash_values[remainder_start..];
+      let pi_remainder = &self.pi_precomputed[remainder_start..];
+
+      for &sigma_h in sigma_batch {
+        let base = self.pi_c.wrapping_mul(sigma_h);
+
+        for (hash_val, &pi_val) in
+          hash_remainder.iter_mut().zip(pi_remainder.iter())
+        {
+          let pi_value = base.wrapping_add(pi_val);
+          *hash_val = (*hash_val).min(pi_value);
+        }
+      }
+    }
+  }
+
   fn update_internal(&mut self, items: Vec<String>) {
-    // Batch hash computation
-    const BATCH_SIZE: usize = 32;
-    let mut hash_batch = Vec::with_capacity(BATCH_SIZE);
+    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    for chunk in items.chunks(BATCH_SIZE) {
-      hash_batch.clear();
+    for chunk in items.chunks(HASH_BATCH_SIZE) {
+      sigma_batch.clear();
 
-      // First pass: compute all hashes
       for item in chunk {
         let h = calculate_hash_fast(item.as_bytes());
-        let sigma_h = self.sigma_a.wrapping_mul(h).wrapping_add(self.sigma_b);
-        hash_batch.push(sigma_h);
+        sigma_batch.push(self.sigma_transform(h));
       }
 
-      // Second pass: update hash values
-      // Process in blocks of 16 for better vectorization
-      let chunks_iter = self.hash_values.chunks_exact_mut(16);
-      let pi_chunks_iter = self.pi_precomputed.chunks_exact(16);
-
-      // Process complete chunks of 16
-      for (hash_chunk, pi_chunk) in chunks_iter.zip(pi_chunks_iter) {
-        let mut current = [0u64; 16];
-        current.copy_from_slice(hash_chunk);
-
-        for &sigma_h in &hash_batch {
-          let base = self.pi_c.wrapping_mul(sigma_h);
-
-          for i in 0..16 {
-            let pi_value = base.wrapping_add(pi_chunk[i]);
-            current[i] = current[i].min(pi_value);
-          }
-        }
-
-        hash_chunk.copy_from_slice(&current);
-      }
-
-      // Handle remainder (elements not in chunks of 16)
-      let remainder_start = (self.num_perm / 16) * 16;
-      if remainder_start < self.num_perm {
-        let hash_remainder = &mut self.hash_values[remainder_start..];
-        let pi_remainder = &self.pi_precomputed[remainder_start..];
-
-        for &sigma_h in &hash_batch {
-          let base = self.pi_c.wrapping_mul(sigma_h);
-
-          for (hash_val, &pi_val) in
-            hash_remainder.iter_mut().zip(pi_remainder.iter())
-          {
-            let pi_value = base.wrapping_add(pi_val);
-            *hash_val = (*hash_val).min(pi_value);
-          }
-        }
-      }
+      self.apply_sigma_batch(&sigma_batch);
     }
   }
 
@@ -143,21 +150,35 @@ impl CMinHash {
   ///
   /// # Arguments
   ///
-  /// * `items` - An iterable of strings to be hashed and incorporated into the `MinHash`.
+  /// * `items` - `str`, bytes-like object, or iterable of `str`/bytes-like tokens.
   ///
   /// # Errors
   ///
-  /// Returns an error if `items` is not iterable or contains non-string elements.
+  /// Returns an error if `items` is neither a supported bytes-like object
+  /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
-    let iterator = PyIterator::from_object(&items)?;
-    let mut collected_items = Vec::new();
-
-    for item in iterator {
-      collected_items.push(item?.extract::<String>()?);
+    if let Some(single_hash) = hash_single_bufferlike(&items)? {
+      self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
+      return Ok(());
     }
 
-    self.update_internal(collected_items);
+    let iterator = PyIterator::from_object(&items)?;
+    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
+
+    for item in iterator {
+      let hash = hash_token(&item?)?;
+      sigma_batch.push(self.sigma_transform(hash));
+      if sigma_batch.len() == HASH_BATCH_SIZE {
+        self.apply_sigma_batch(&sigma_batch);
+        sigma_batch.clear();
+      }
+    }
+
+    if !sigma_batch.is_empty() {
+      self.apply_sigma_batch(&sigma_batch);
+    }
+
     Ok(())
   }
 
