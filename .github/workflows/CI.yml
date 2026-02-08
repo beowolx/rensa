@@ -206,9 +206,17 @@ jobs:
   performance-check:
     name: Performance Check
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      BENCH_DATASET: gretelai/synthetic_text_to_sql
+      BENCH_SPLIT: train
+      BENCH_REVISION: 740ab236e64503fba51be1101df7a1be83bf455d
+      BENCH_NUM_PERM: "128"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -216,136 +224,144 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      - name: Prepare Python Environment
+      - name: Create benchmark directories
         shell: bash
         run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
+          mkdir -p .bench
+
+      - name: Prepare PR base checkout
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          echo "Base SHA: ${BASE_SHA}"
+          git fetch --no-tags origin "${BASE_SHA}"
+          git worktree add ../rensa-base "${BASE_SHA}"
+          echo "BASE_DIR=$(cd ../rensa-base && pwd)" >> "$GITHUB_ENV"
+
+      - name: Run PR base and head benchmarks
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_commit_benchmark() {
+            local commit_dir="$1"
+            local venv_dir="$2"
+            local output_json="$3"
+            local output_log="$4"
+            local label="$5"
+
+            python -m venv "${venv_dir}"
+            source "${venv_dir}/bin/activate"
+            python -m pip install --upgrade pip
+            pip install maturin
+            pip install -r "${GITHUB_WORKSPACE}/requirements.txt"
+
+            pushd "${commit_dir}" >/dev/null
+            maturin develop --release
+            popd >/dev/null
+
+            python "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
+              --dataset "${BENCH_DATASET}" \
+              --split "${BENCH_SPLIT}" \
+              --revision "${BENCH_REVISION}" \
+              --num-perm "${BENCH_NUM_PERM}" \
+              --warmup-runs 1 \
+              --measured-runs 5 \
+              --disable-progress \
+              --output-json "${output_json}" \
+              | tee "${output_log}"
+
+            deactivate
+            echo "Completed ${label} benchmark."
+          }
+
+          run_commit_benchmark \
+            "${GITHUB_WORKSPACE}" \
+            "${GITHUB_WORKSPACE}/.bench/.venv-head" \
+            "${GITHUB_WORKSPACE}/.bench/head.json" \
+            "${GITHUB_WORKSPACE}/.bench/head_summary.txt" \
+            "head"
+
+          run_commit_benchmark \
+            "${BASE_DIR}" \
+            "${GITHUB_WORKSPACE}/.bench/.venv-base" \
+            "${GITHUB_WORKSPACE}/.bench/base.json" \
+            "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
+            "base"
+
+      - name: Validate PR benchmark regression gates
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python benchmarks/validate_benchmark.py \
+            --mode compare \
+            --head-json .bench/head.json \
+            --base-json .bench/base.json \
+            --min-speedup 10.0 \
+            --max-slowdown-fraction 0.10 \
+            --min-jaccard-ds-r 1.0 \
+            --min-jaccard-ds-c 0.999 \
+            --min-jaccard-r-c 0.999 \
+            | tee .bench/validation_pr.txt
+
+      - name: Run push smoke benchmark
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .bench/.venv-smoke
+          source .bench/.venv-smoke/bin/activate
+          python -m pip install --upgrade pip
           pip install maturin
           pip install -r requirements.txt
-
-      - name: Build & Install Rensa Locally
-        shell: bash
-        run: |
-          source .venv/bin/activate
           maturin develop --release
 
-      - name: Run Benchmark
+          python benchmarks/simple_benchmark.py \
+            --dataset "${BENCH_DATASET}" \
+            --split "${BENCH_SPLIT}" \
+            --revision "${BENCH_REVISION}" \
+            --num-perm "${BENCH_NUM_PERM}" \
+            --warmup-runs 0 \
+            --measured-runs 1 \
+            --disable-progress \
+            --output-json .bench/head_smoke.json \
+            | tee .bench/head_smoke_summary.txt
+
+      - name: Validate push smoke benchmark gates
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
-          source .venv/bin/activate
-          python benchmarks/simple_benchmark.py > benchmark_log.txt
-          cat benchmark_log.txt
+          set -euo pipefail
+          python benchmarks/validate_benchmark.py \
+            --mode absolute \
+            --head-json .bench/head_smoke.json \
+            --min-speedup 10.0 \
+            --min-jaccard-ds-r 1.0 \
+            --min-jaccard-ds-c 0.999 \
+            --min-jaccard-r-c 0.999 \
+            | tee .bench/validation_smoke.txt
 
-      - name: Enforce Performance and Jaccard Similarity
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-check-artifacts
+          path: |
+            .bench/*.json
+            .bench/*.txt
+
+      - name: Cleanup PR base checkout
+        if: always() && github.event_name == 'pull_request'
         shell: bash
         run: |
-          set -e
-          set -o pipefail
-
-          # Helper function to check performance
-          check_performance() {
-            local method_name="$1"
-            local reference_name="$2"
-            local min_speedup="$3"
-            local speedup
-
-            echo "Checking performance: ${method_name} vs ${reference_name} (min speedup: ${min_speedup}x)"
-
-            # Parse from the detailed performance table
-            local table_line
-            table_line=$(grep "^${method_name}[ ]*[0-9]*\.[0-9]*[ ]*[0-9]*\.[0-9]*[ ]*x" benchmark_log.txt | head -1 || true)
-            
-            if [ -z "$table_line" ]; then
-              echo "FAILURE: Could not find performance table line for ${method_name}."
-              exit 1
-            fi
-            
-            echo "Detected table line: $table_line"
-            # Extract speedup vs Datasketch from the table (third column)
-            speedup=$(echo "$table_line" | awk '{print $3}' | sed 's/x$//')
-            
-            if [ -z "$speedup" ]; then
-              echo "FAILURE: Could not parse speedup for ${method_name} from table line: $table_line"
-              exit 1
-            fi
-            echo "${method_name} speedup over ${reference_name} = $speedup"
-
-            if (( $(echo "$speedup < $min_speedup" | bc -l) )); then
-              echo "FAILURE: ${method_name} is only ${speedup}x faster than ${reference_name} (Requirement: >= ${min_speedup}x)."
-              exit 1
-            else
-              echo "SUCCESS: ${method_name} is ${speedup}x faster than ${reference_name} (Requirement: >= ${min_speedup}x)."
-            fi
-          }
-
-          # Helper function to check Jaccard similarity
-          check_jaccard() {
-            local method1_name="$1"
-            local method2_name="$2"
-            local min_expected_jaccard="$3"
-            local jaccard_line
-            local jaccard
-
-            echo "Checking Jaccard similarity: ${method1_name} vs ${method2_name} (min expected: ${min_expected_jaccard})"
-
-            jaccard_line=$(grep "Jaccard similarity between ${method1_name} and ${method2_name}:" benchmark_log.txt || true)
-            
-            if [ -z "$jaccard_line" ]; then
-                # Try reversed order if the benchmark might print it that way
-                jaccard_line=$(grep "Jaccard similarity between ${method2_name} and ${method1_name}:" benchmark_log.txt || true)
-            fi
-
-            if [ -z "$jaccard_line" ]; then
-                echo "FAILURE: Could not find Jaccard similarity line for ${method1_name} vs ${method2_name}."
-                exit 1
-            fi
-
-            echo "Detected Jaccard line: $jaccard_line"
-            jaccard=$(echo "$jaccard_line" | awk '{print $NF}')
-            
-            if [ -z "$jaccard" ]; then
-                echo "FAILURE: Could not parse Jaccard similarity for ${method1_name} vs ${method2_name} from line: $jaccard_line"
-                exit 1
-            fi
-            echo "Parsed Jaccard for ${method1_name} vs ${method2_name} = $jaccard"
-
-            if (( $(echo "$jaccard < $min_expected_jaccard" | bc -l) )); then
-              echo "FAILURE: Jaccard similarity for ${method1_name} vs ${method2_name} is ${jaccard}, expected >= ${min_expected_jaccard}."
-              exit 1
-            else
-              echo "SUCCESS: Jaccard similarity for ${method1_name} vs ${method2_name} is ${jaccard} (>= ${min_expected_jaccard})."
-            fi
-          }
-          
-          source .venv/bin/activate
-          
-          echo "--- Validating benchmark_log.txt content ---"
-          if [ ! -f benchmark_log.txt ]; then
-            echo "benchmark_log.txt not found!"
-            exit 1
+          set -euo pipefail
+          if [ -d ../rensa-base ]; then
+            git worktree remove --force ../rensa-base
           fi
-          echo "benchmark_log.txt first 10 and last 20 lines:"
-          head -n 10 benchmark_log.txt
-          echo "..."
-          tail -n 30 benchmark_log.txt # Increased tail for more context on Jaccard/Perf sections
-          echo "--- End of benchmark_log.txt preview ---"
-
-          # Performance checks (against Datasketch, >= 10.0x for R-MinHash and C-MinHash)
-          check_performance "R-MinHash" "Datasketch" 10.0
-          check_performance "C-MinHash" "Datasketch" 10.0
-          
-          # Jaccard similarity checks
-          echo "--- Checking Jaccard Similarities vs Datasketch ---"
-          check_jaccard "Datasketch" "R-MinHash" 1.0
-          check_jaccard "Datasketch" "C-MinHash" 0.9
-          
-          echo "--- Checking Jaccard Similarities Among Implemented Methods ---"
-          # Assuming R-MinHash vs C-MinHash should also be >= 0.9, adjust if necessary
-          check_jaccard "R-MinHash" "C-MinHash" 0.9
-
-          echo "All performance and Jaccard similarity checks passed successfully!"
 
   test:
     name: Run Tests

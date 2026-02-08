@@ -468,19 +468,70 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. **Run the simple benchmark** (compares core MinHash deduplication, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+4. **Run the simple benchmark** (core MinHash deduplication on `gretelai/synthetic_text_to_sql`):
 
 ```bash
 python benchmarks/simple_benchmark.py
 ```
 
-5. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+You can also configure the benchmark run and emit CI-compatible JSON output:
+
+```bash
+python benchmarks/simple_benchmark.py \
+  --dataset gretelai/synthetic_text_to_sql \
+  --split train \
+  --revision 740ab236e64503fba51be1101df7a1be83bf455d \
+  --num-perm 128 \
+  --warmup-runs 1 \
+  --measured-runs 5 \
+  --disable-progress \
+  --output-json benchmark.json
+```
+
+Supported `simple_benchmark.py` flags:
+
+- `--dataset` (default: `gretelai/synthetic_text_to_sql`)
+- `--split` (default: `train`)
+- `--revision` (default: `740ab236e64503fba51be1101df7a1be83bf455d`)
+- `--num-perm` (default: `128`)
+- `--warmup-runs` (default: `0`)
+- `--measured-runs` (default: `1`)
+- `--output-json` (optional path)
+- `--disable-progress` (enabled by default on CI)
+
+5. **Validate benchmark gates** (absolute smoke checks or base-vs-head comparison checks):
+
+```bash
+# Absolute mode (single benchmark JSON)
+python benchmarks/validate_benchmark.py \
+  --mode absolute \
+  --head-json benchmark.json \
+  --min-speedup 10.0 \
+  --min-jaccard-ds-r 1.0 \
+  --min-jaccard-ds-c 0.999 \
+  --min-jaccard-r-c 0.999
+```
+
+```bash
+# Compare mode (PR regression gate)
+python benchmarks/validate_benchmark.py \
+  --mode compare \
+  --head-json head.json \
+  --base-json base.json \
+  --min-speedup 10.0 \
+  --max-slowdown-fraction 0.10 \
+  --min-jaccard-ds-r 1.0 \
+  --min-jaccard-ds-c 0.999 \
+  --min-jaccard-r-c 0.999
+```
+
+6. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
 
 ```bash
 python benchmarks/advanced_benchmark.py
 ```
 
-6. **Run the wiki benchmark** (compares deduplication performance on the `Salesforce/wikitext` dataset with 1.8M rows):
+7. **Run the wiki benchmark** (compares deduplication performance on the `Salesforce/wikitext` dataset with 1.8M rows):
 
 ```bash
 python benchmarks/wiki_benchmark.py
