@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   cargo-deny:
-    name: Cargo Deny (Advisories)
+    name: Cargo Deny
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -26,5 +26,5 @@ jobs:
       - uses: taiki-e/install-action@f176c07a0a40cbfdd08ee9aa8bf1655701d11e69
         with:
           tool: cargo-deny
-      - name: Check Rust advisories
-        run: cargo deny check advisories
+      - name: Check Rust dependency policy
+        run: cargo deny check all

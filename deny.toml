@@ -1,3 +1,45 @@
+[graph]
+# Check the full dependency graph, including optional deps behind features.
+all-features = true
+
 [advisories]
-# Track unmaintained status for first-party crates.
+# Unsound advisories remain errors, scoped to direct workspace deps.
+unsound = "workspace"
+# Track maintenance status for direct dependencies used by the workspace.
 unmaintained = "workspace"
+# Yanked crates are worth surfacing but should not block contributors by default.
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Keep the policy permissive-license friendly while still explicit.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unlicense",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.8
+# Allow future-safe entries in the allowlist without warning churn.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicate versions and wildcard requirements should be visible, but not fatal.
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+# Only allow crates.io registry dependencies by default.
+unknown-registry = "deny"
+# Flag git dependencies so they stay intentional and reviewed.
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
