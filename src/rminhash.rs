@@ -26,6 +26,7 @@
 //! - Obtain the signature with `rminhash.digest()`.
 //! - Estimate Jaccard similarity with `rminhash.jaccard(&other_rminhash)`.
 
+use crate::py_input::{hash_single_bufferlike, hash_token};
 use crate::utils::{calculate_hash_fast, permute_hash};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
@@ -34,6 +35,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 
 const PERM_CHUNK_SIZE: usize = 16;
+const HASH_BATCH_SIZE: usize = 32;
 
 /// `RMinHash` implements the `MinHash` algorithm for efficient similarity estimation.
 #[derive(Serialize, Deserialize, Clone)]
@@ -46,12 +48,47 @@ pub struct RMinHash {
 }
 
 impl RMinHash {
+  fn apply_hash_batch(&mut self, hash_batch: &[u64]) {
+    // Update hash values in chunks for better vectorization
+    let perm_chunks_iter = self.permutations.chunks_exact(PERM_CHUNK_SIZE);
+    let hash_chunks_iter = self.hash_values.chunks_exact_mut(PERM_CHUNK_SIZE);
+
+    // Process complete chunks
+    for (perm_chunk, hash_chunk) in perm_chunks_iter.zip(hash_chunks_iter) {
+      let mut current = [0u32; PERM_CHUNK_SIZE];
+      current.copy_from_slice(hash_chunk);
+
+      for &item_hash in hash_batch {
+        for i in 0..PERM_CHUNK_SIZE {
+          let (a, b) = perm_chunk[i];
+          let hash = permute_hash(item_hash, a, b);
+          current[i] = current[i].min(hash);
+        }
+      }
+
+      hash_chunk.copy_from_slice(&current);
+    }
+
+    // Handle remainder
+    let remainder_start = (self.num_perm / PERM_CHUNK_SIZE) * PERM_CHUNK_SIZE;
+    if remainder_start < self.num_perm {
+      let perm_remainder = &self.permutations[remainder_start..];
+      let hash_remainder = &mut self.hash_values[remainder_start..];
+
+      for &item_hash in hash_batch {
+        for (i, &(a, b)) in perm_remainder.iter().enumerate() {
+          let hash = permute_hash(item_hash, a, b);
+          hash_remainder[i] = hash_remainder[i].min(hash);
+        }
+      }
+    }
+  }
+
   fn update_internal(&mut self, items: Vec<String>) {
-    const BATCH_SIZE: usize = 32;
-    let mut hash_batch = Vec::with_capacity(BATCH_SIZE);
+    let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
     // Process items in batches for better cache utilization
-    for chunk in items.chunks(BATCH_SIZE) {
+    for chunk in items.chunks(HASH_BATCH_SIZE) {
       hash_batch.clear();
 
       // First pass: compute all hashes
@@ -59,39 +96,7 @@ impl RMinHash {
         hash_batch.push(calculate_hash_fast(item.as_bytes()));
       }
 
-      // Second pass: update hash values in chunks for better vectorization
-      let perm_chunks_iter = self.permutations.chunks_exact(PERM_CHUNK_SIZE);
-      let hash_chunks_iter = self.hash_values.chunks_exact_mut(PERM_CHUNK_SIZE);
-
-      // Process complete chunks
-      for (perm_chunk, hash_chunk) in perm_chunks_iter.zip(hash_chunks_iter) {
-        let mut current = [0u32; PERM_CHUNK_SIZE];
-        current.copy_from_slice(hash_chunk);
-
-        for &item_hash in &hash_batch {
-          for i in 0..PERM_CHUNK_SIZE {
-            let (a, b) = perm_chunk[i];
-            let hash = permute_hash(item_hash, a, b);
-            current[i] = current[i].min(hash);
-          }
-        }
-
-        hash_chunk.copy_from_slice(&current);
-      }
-
-      // Handle remainder
-      let remainder_start = (self.num_perm / PERM_CHUNK_SIZE) * PERM_CHUNK_SIZE;
-      if remainder_start < self.num_perm {
-        let perm_remainder = &self.permutations[remainder_start..];
-        let hash_remainder = &mut self.hash_values[remainder_start..];
-
-        for &item_hash in &hash_batch {
-          for (i, &(a, b)) in perm_remainder.iter().enumerate() {
-            let hash = permute_hash(item_hash, a, b);
-            hash_remainder[i] = hash_remainder[i].min(hash);
-          }
-        }
-      }
+      self.apply_hash_batch(&hash_batch);
     }
   }
 
@@ -134,21 +139,34 @@ impl RMinHash {
   ///
   /// # Arguments
   ///
-  /// * `items` - An iterable of strings to be hashed and incorporated into the `MinHash`.
+  /// * `items` - `str`, bytes-like object, or iterable of `str`/bytes-like tokens.
   ///
   /// # Errors
   ///
-  /// Returns an error if `items` is not iterable or contains non-string elements.
+  /// Returns an error if `items` is neither a supported bytes-like object
+  /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
-    let iterator = PyIterator::from_object(&items)?;
-    let mut collected_items = Vec::new();
-
-    for item in iterator {
-      collected_items.push(item?.extract::<String>()?);
+    if let Some(single_hash) = hash_single_bufferlike(&items)? {
+      self.apply_hash_batch(&[single_hash]);
+      return Ok(());
     }
 
-    self.update_internal(collected_items);
+    let iterator = PyIterator::from_object(&items)?;
+    let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
+
+    for item in iterator {
+      hash_batch.push(hash_token(&item?)?);
+      if hash_batch.len() == HASH_BATCH_SIZE {
+        self.apply_hash_batch(&hash_batch);
+        hash_batch.clear();
+      }
+    }
+
+    if !hash_batch.is_empty() {
+      self.apply_hash_batch(&hash_batch);
+    }
+
     Ok(())
   }
 
