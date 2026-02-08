@@ -31,7 +31,7 @@ use crate::utils::{calculate_hash_fast, permute_hash};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
-use rand::prelude::*;
+use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 
@@ -134,8 +134,8 @@ impl RMinHash {
     let permutations: Vec<(u64, u64)> = (0..num_perm)
       .map(|_| {
         // Ensure odd multiplier for better distribution
-        let a = rng.random::<u64>() | 1;
-        let b = rng.random::<u64>();
+        let a = rng.next_u64() | 1;
+        let b = rng.next_u64();
         (a, b)
       })
       .collect();
