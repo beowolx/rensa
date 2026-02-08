@@ -28,7 +28,7 @@ serde = { version = "1.0", features = ["derive"] }
 murmur3 = "0.5.2"
 rand_xoshiro = "0.7.0"
 rand_core = "0.9.3"
-mimalloc = "0.1.46"
+mimalloc = "0.1.48"
 
 [profile.release]
 lto = "fat"
