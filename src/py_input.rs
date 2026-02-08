@@ -1,11 +1,10 @@
 use crate::utils::calculate_hash_fast;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyTypeError;
-use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{
-  PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods, PyString,
-  PyStringMethods,
+  PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods, PyMemoryView,
+  PyString, PyStringMethods,
 };
 
 const TOKEN_TYPE_ERROR: &str =
@@ -15,8 +14,7 @@ const BUFFER_TYPE_ERROR: &str =
 
 #[inline]
 fn has_buffer_protocol(item: &Bound<'_, PyAny>) -> bool {
-  // SAFETY: `item` is a live Python object pointer.
-  unsafe { ffi::PyObject_CheckBuffer(item.as_ptr()) != 0 }
+  PyMemoryView::from(item).is_ok()
 }
 
 fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
