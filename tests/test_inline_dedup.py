@@ -1,7 +1,21 @@
+import pytest
+
 from rensa import CMinHash, CMinHashDeduplicator, RMinHash, RMinHashDeduplicator
 
 
 class TestInlineDeduplication:
+    def test_deduplicator_rejects_invalid_configuration(self):
+        with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+            RMinHashDeduplicator(threshold=-0.1, num_perm=128, use_lsh=False)
+        with pytest.raises(ValueError, match="num_perm must be greater than 0"):
+            RMinHashDeduplicator(threshold=0.8, num_perm=0, use_lsh=False)
+        with pytest.raises(ValueError, match="num_bands must be greater than 0"):
+            RMinHashDeduplicator(
+                threshold=0.8, num_perm=128, use_lsh=True, num_bands=0
+            )
+        with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+            CMinHashDeduplicator(threshold=1.5)
+
     def test_rminhash_deduplicator_basic(self):
         """
         GIVEN: A deduplicator with threshold 0.7
@@ -171,3 +185,15 @@ class TestInlineDeduplication:
         # THEN: Should filter out duplicates
         assert duplicate_count >= 1  # At least the exact duplicate
         assert len(unique_docs) < len(stream)
+
+    def test_deduplicator_rejects_mismatched_num_perm_signatures(self):
+        dedup = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+
+        m1 = RMinHash(num_perm=64, seed=42)
+        m1.update(["base", "document"])
+        assert dedup.add("doc1", m1) is True
+
+        m2 = RMinHash(num_perm=128, seed=42)
+        m2.update(["base", "document"])
+        with pytest.raises(ValueError, match="different num_perm"):
+            dedup.is_duplicate("doc2", m2)
