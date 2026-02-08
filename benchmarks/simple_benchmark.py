@@ -99,6 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default=DEFAULT_SPLIT)
     parser.add_argument("--revision", default=DEFAULT_REVISION)
     parser.add_argument("--num-perm", type=int, default=DEFAULT_NUM_PERM)
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        help="Optional cap for dataset rows used in benchmark runs.",
+    )
     parser.add_argument("--warmup-runs", type=int, default=DEFAULT_WARMUP_RUNS)
     parser.add_argument("--measured-runs", type=int, default=DEFAULT_MEASURED_RUNS)
     parser.add_argument("--output-json", type=Path)
@@ -118,6 +123,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         split=args.split,
         revision=args.revision,
     )
+    if args.max_rows is not None and args.max_rows < len(dataset):
+        dataset = dataset.select(range(args.max_rows))
+        print(f"Using dataset subset with {len(dataset)} rows.")
 
     methods: list[tuple[str, str, MinHashFactory]] = [
         ("datasketch", "Datasketch", datasketch_minhash),
@@ -253,6 +261,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             "split": args.split,
             "revision": args.revision,
             "num_perm": args.num_perm,
+            "max_rows_requested": args.max_rows,
+            "rows_used": len(dataset),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -310,6 +320,8 @@ def main() -> None:
         raise ValueError("--measured-runs must be > 0")
     if args.num_perm <= 0:
         raise ValueError("--num-perm must be > 0")
+    if args.max_rows is not None and args.max_rows <= 0:
+        raise ValueError("--max-rows must be > 0 when provided")
 
     run_benchmark(args)
 
