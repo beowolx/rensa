@@ -209,6 +209,7 @@ jobs:
     timeout-minutes: 45
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
+      PYTHONUNBUFFERED: "1"
       BENCH_DATASET: gretelai/synthetic_text_to_sql
       BENCH_SPLIT: train
       BENCH_REVISION: 740ab236e64503fba51be1101df7a1be83bf455d
@@ -263,7 +264,7 @@ jobs:
             maturin develop --release
             popd >/dev/null
 
-            python "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
+            python -u "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
               --dataset "${BENCH_DATASET}" \
               --split "${BENCH_SPLIT}" \
               --revision "${BENCH_REVISION}" \
@@ -297,7 +298,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python benchmarks/validate_benchmark.py \
+          python -u benchmarks/validate_benchmark.py \
             --mode compare \
             --head-json .bench/head.json \
             --base-json .bench/base.json \
@@ -320,7 +321,7 @@ jobs:
           pip install -r requirements.txt
           maturin develop --release
 
-          python benchmarks/simple_benchmark.py \
+          python -u benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET}" \
             --split "${BENCH_SPLIT}" \
             --revision "${BENCH_REVISION}" \
@@ -336,7 +337,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python benchmarks/validate_benchmark.py \
+          python -u benchmarks/validate_benchmark.py \
             --mode absolute \
             --head-json .bench/head_smoke.json \
             --min-speedup 10.0 \
