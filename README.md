@@ -537,30 +537,6 @@ python benchmarks/advanced_benchmark.py
 python benchmarks/wiki_benchmark.py
 ```
 
-### CI benchmark policy
-
-CI uses deterministic benchmark gates:
-
-- **Pull requests** run a full regression gate:
-  - Base commit vs head commit benchmark comparison
-  - `1` warmup + `5` measured runs
-  - Median-time slowdown budget: max `10%` for both `R-MinHash` and `C-MinHash`
-  - Absolute speedup floor: at least `10x` vs Datasketch for both methods
-- **Pushes to main/master and tags** run a smoke benchmark:
-  - `1` measured run (no warmup)
-  - Absolute speedup and accuracy gates only
-
-Accuracy thresholds enforced in both paths:
-
-- Datasketch vs R-MinHash Jaccard: `1.0` and exact set equality
-- Datasketch vs C-MinHash Jaccard: `>= 0.999`
-- R-MinHash vs C-MinHash Jaccard: `>= 0.999`
-
-For reproducibility, CI pins:
-
-- Datasketch dependency version (`datasketch==1.9.0` in `requirements.txt`)
-- Dataset revision (`gretelai/synthetic_text_to_sql@740ab236e64503fba51be1101df7a1be83bf455d`)
-
 ## Limitations and Future Work
 
 While Rensa offers significant performance improvements, it has some limitations compared to `datasketch`:
