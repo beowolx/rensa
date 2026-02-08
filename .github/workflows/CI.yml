@@ -213,8 +213,6 @@ jobs:
       BENCH_SPLIT: train
       BENCH_REVISION: 740ab236e64503fba51be1101df7a1be83bf455d
       BENCH_NUM_PERM: "128"
-      BENCH_MAX_ROWS_PR: "50000"
-      BENCH_MAX_ROWS_PUSH: "30000"
       BENCH_PR_WARMUP_RUNS: "1"
       BENCH_PR_MEASURED_RUNS: "3"
     steps:
@@ -271,7 +269,6 @@ jobs:
               --split "${BENCH_SPLIT}" \
               --revision "${BENCH_REVISION}" \
               --num-perm "${BENCH_NUM_PERM}" \
-              --max-rows "${BENCH_MAX_ROWS_PR}" \
               --warmup-runs "${BENCH_PR_WARMUP_RUNS}" \
               --measured-runs "${BENCH_PR_MEASURED_RUNS}" \
               --disable-progress \
@@ -328,7 +325,6 @@ jobs:
             --split "${BENCH_SPLIT}" \
             --revision "${BENCH_REVISION}" \
             --num-perm "${BENCH_NUM_PERM}" \
-            --max-rows "${BENCH_MAX_ROWS_PUSH}" \
             --warmup-runs 0 \
             --measured-runs 1 \
             --disable-progress \
