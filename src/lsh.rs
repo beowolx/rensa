@@ -36,6 +36,7 @@
 
 use crate::rminhash::RMinHash;
 use crate::utils::calculate_band_hash;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use rustc_hash::FxHasher;
@@ -224,21 +225,27 @@ impl RMinHashLSH {
     self.num_bands
   }
 
-  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
-    *self = bincode::serde::decode_from_slice(
-      state.as_bytes(),
-      bincode::config::standard(),
-    )
-    .unwrap()
-    .0;
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
+    let decoded: Self =
+      postcard::from_bytes(state.as_bytes()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to deserialize RMinHashLSH state: {err}"
+        ))
+      })?;
+    *self = decoded;
+    Ok(())
   }
 
-  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-    PyBytes::new(
-      py,
-      &bincode::serde::encode_to_vec(self, bincode::config::standard())
-        .unwrap(),
-    )
+  fn __getstate__<'py>(
+    &self,
+    py: Python<'py>,
+  ) -> PyResult<Bound<'py, PyBytes>> {
+    let encoded = postcard::to_allocvec(self).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to serialize RMinHashLSH state: {err}"
+      ))
+    })?;
+    Ok(PyBytes::new(py, &encoded))
   }
 
   const fn __getnewargs__(&self) -> (f64, usize, usize) {

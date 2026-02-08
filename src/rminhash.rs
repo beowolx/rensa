@@ -28,6 +28,7 @@
 
 use crate::py_input::{hash_single_bufferlike, hash_token};
 use crate::utils::{calculate_hash_fast, permute_hash};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
 use rand::prelude::*;
@@ -222,21 +223,27 @@ impl RMinHash {
     equal_count as f64 / self.num_perm as f64
   }
 
-  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
-    *self = bincode::serde::decode_from_slice(
-      state.as_bytes(),
-      bincode::config::standard(),
-    )
-    .unwrap()
-    .0;
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
+    let decoded: Self =
+      postcard::from_bytes(state.as_bytes()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to deserialize RMinHash state: {err}"
+        ))
+      })?;
+    *self = decoded;
+    Ok(())
   }
 
-  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-    PyBytes::new(
-      py,
-      &bincode::serde::encode_to_vec(self, bincode::config::standard())
-        .unwrap(),
-    )
+  fn __getstate__<'py>(
+    &self,
+    py: Python<'py>,
+  ) -> PyResult<Bound<'py, PyBytes>> {
+    let encoded = postcard::to_allocvec(self).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to serialize RMinHash state: {err}"
+      ))
+    })?;
+    Ok(PyBytes::new(py, &encoded))
   }
 
   const fn __getnewargs__(&self) -> (usize, u64) {
@@ -246,7 +253,7 @@ impl RMinHash {
   fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
     Python::with_gil(|py| {
       let type_obj = py.get_type::<Self>().into();
-      let state = self.__getstate__(py).into();
+      let state = self.__getstate__(py)?.into();
       Ok((type_obj, (self.num_perm, self.seed), state))
     })
   }
