@@ -58,16 +58,21 @@ pub struct RMinHashLSH {
 }
 
 impl RMinHashLSH {
-  fn validate_params(
-    threshold: f64,
-    num_perm: usize,
-    num_bands: usize,
-  ) -> PyResult<()> {
+  fn validate_threshold(threshold: f64) -> PyResult<()> {
     if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
       return Err(PyValueError::new_err(
         "threshold must be a finite value between 0.0 and 1.0",
       ));
     }
+    Ok(())
+  }
+
+  fn validate_params(
+    threshold: f64,
+    num_perm: usize,
+    num_bands: usize,
+  ) -> PyResult<usize> {
+    Self::validate_threshold(threshold)?;
     if num_perm == 0 {
       return Err(PyValueError::new_err("num_perm must be greater than 0"));
     }
@@ -76,15 +81,84 @@ impl RMinHashLSH {
     }
     if num_bands > num_perm {
       return Err(PyValueError::new_err(format!(
-        "num_bands ({num_bands}) must be less than or equal to num_perm ({num_perm})",
+        "num_bands ({num_bands}) must be less than or equal to num_perm ({num_perm})"
       )));
     }
-    if !num_perm.is_multiple_of(num_bands) {
+    if num_perm % num_bands != 0 {
       return Err(PyValueError::new_err(format!(
-        "num_perm ({num_perm}) must be divisible by num_bands ({num_bands})",
+        "num_perm ({num_perm}) must be divisible by num_bands ({num_bands})"
+      )));
+    }
+
+    Ok(num_perm / num_bands)
+  }
+
+  pub(crate) fn from_validated(
+    threshold: f64,
+    num_perm: usize,
+    num_bands: usize,
+  ) -> Self {
+    let hasher = BuildHasherDefault::<FxHasher>::default();
+    let hash_tables = (0..num_bands)
+      .map(|_| HashMap::with_hasher(hasher.clone()))
+      .collect();
+
+    Self {
+      threshold,
+      num_perm,
+      num_bands,
+      band_size: num_perm / num_bands,
+      hash_tables,
+      key_bands: HashMap::with_hasher(hasher),
+    }
+  }
+
+  fn validate_state(&self) -> PyResult<()> {
+    let expected_band_size =
+      Self::validate_params(self.threshold, self.num_perm, self.num_bands)?;
+    if self.band_size != expected_band_size {
+      return Err(PyValueError::new_err(format!(
+        "invalid RMinHashLSH state: band_size {} does not match expected {}",
+        self.band_size, expected_band_size
+      )));
+    }
+    if self.hash_tables.len() != self.num_bands {
+      return Err(PyValueError::new_err(format!(
+        "invalid RMinHashLSH state: hash_tables length {} does not match num_bands {}",
+        self.hash_tables.len(),
+        self.num_bands
+      )));
+    }
+    for (key, band_hashes) in &self.key_bands {
+      if band_hashes.len() != self.num_bands {
+        return Err(PyValueError::new_err(format!(
+          "invalid RMinHashLSH state: key {key} stores {} band hashes, expected {}",
+          band_hashes.len(),
+          self.num_bands
+        )));
+      }
+    }
+    Ok(())
+  }
+
+  fn ensure_digest_len(&self, digest_len: usize) -> PyResult<()> {
+    if digest_len != self.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "MinHash has {digest_len} permutations but LSH expects {}",
+        self.num_perm
       )));
     }
     Ok(())
+  }
+
+  fn digest_band_hashes(&self, digest: &[u32]) -> Vec<u64> {
+    let mut band_hashes = Vec::with_capacity(self.num_bands);
+    for i in 0..self.num_bands {
+      band_hashes.push(calculate_band_hash(
+        &digest[i * self.band_size..(i + 1) * self.band_size],
+      ));
+    }
+    band_hashes
   }
 
   fn remove_key_from_bands(&mut self, key: usize, band_hashes: &[u64]) {
@@ -99,44 +173,6 @@ impl RMinHashLSH {
       }
     }
   }
-
-  fn validate_digest_len(&self, digest_len: usize) -> PyResult<()> {
-    if digest_len != self.num_perm {
-      return Err(PyValueError::new_err(format!(
-        "MinHash has {digest_len} permutations but LSH expects {}",
-        self.num_perm
-      )));
-    }
-    Ok(())
-  }
-
-  fn validate_state(&self) -> PyResult<()> {
-    Self::validate_params(self.threshold, self.num_perm, self.num_bands)?;
-    if self.band_size != self.num_perm / self.num_bands {
-      return Err(PyValueError::new_err(format!(
-        "Invalid state: band_size {} does not match num_perm/num_bands ({})",
-        self.band_size,
-        self.num_perm / self.num_bands
-      )));
-    }
-    if self.hash_tables.len() != self.num_bands {
-      return Err(PyValueError::new_err(format!(
-        "Invalid state: hash_tables length {} does not match num_bands {}",
-        self.hash_tables.len(),
-        self.num_bands
-      )));
-    }
-    if self
-      .key_bands
-      .values()
-      .any(|band_hashes| band_hashes.len() != self.num_bands)
-    {
-      return Err(PyValueError::new_err(
-        "Invalid state: key_bands entries must have one hash per band",
-      ));
-    }
-    Ok(())
-  }
 }
 
 #[pymethods]
@@ -148,10 +184,6 @@ impl RMinHashLSH {
   /// * `threshold` - The similarity threshold for considering items as similar.
   /// * `num_perm` - The number of permutations used in the `MinHash` algorithm.
   /// * `num_bands` - The number of bands for the LSH algorithm.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any input invariant is violated.
   #[new]
   pub fn new(
     threshold: f64,
@@ -159,20 +191,7 @@ impl RMinHashLSH {
     num_bands: usize,
   ) -> PyResult<Self> {
     Self::validate_params(threshold, num_perm, num_bands)?;
-
-    let hasher = BuildHasherDefault::<FxHasher>::default();
-    let hash_tables = (0..num_bands)
-      .map(|_| HashMap::with_hasher(hasher.clone()))
-      .collect();
-
-    Ok(Self {
-      threshold,
-      num_perm,
-      num_bands,
-      band_size: num_perm / num_bands,
-      hash_tables,
-      key_bands: HashMap::with_hasher(hasher),
-    })
+    Ok(Self::from_validated(threshold, num_perm, num_bands))
   }
 
   /// Inserts a `MinHash` into the LSH index.
@@ -182,24 +201,23 @@ impl RMinHashLSH {
   /// * `key` - A unique identifier for the `MinHash`.
   /// * `minhash` - The `RMinHash` instance to be inserted.
   ///
+  ///
   /// # Errors
   ///
-  /// Returns an error if the `MinHash` has a different number of permutations than expected by the LSH index.
+  /// Returns an error if the supplied `MinHash` has a different number of permutations.
   pub fn insert(&mut self, key: usize, minhash: &RMinHash) -> PyResult<()> {
-    let digest = minhash.digest_slice();
-    self.validate_digest_len(digest.len())?;
+    let digest = minhash.hash_values();
+    self.ensure_digest_len(digest.len())?;
 
     if let Some(previous_band_hashes) = self.key_bands.get(&key).cloned() {
       self.remove_key_from_bands(key, &previous_band_hashes);
     }
 
-    let mut band_hashes = Vec::with_capacity(self.num_bands);
-    for (i, table) in self.hash_tables.iter_mut().enumerate() {
-      let start = i * self.band_size;
-      let end = start + self.band_size;
-      let band_hash = calculate_band_hash(&digest[start..end]);
+    let band_hashes = self.digest_band_hashes(digest);
+    for (table, &band_hash) in
+      self.hash_tables.iter_mut().zip(band_hashes.iter())
+    {
       table.entry(band_hash).or_default().push(key);
-      band_hashes.push(band_hash);
     }
 
     self.key_bands.insert(key, band_hashes);
@@ -230,19 +248,19 @@ impl RMinHashLSH {
   ///
   /// A vector of keys (usize) of potentially similar items.
   ///
+  ///
   /// # Errors
   ///
-  /// Returns an error if the `MinHash` has a different number of permutations than expected by the LSH index.
+  /// Returns an error if the supplied `MinHash` has a different number of permutations.
   pub fn query(&self, minhash: &RMinHash) -> PyResult<Vec<usize>> {
-    let digest = minhash.digest_slice();
-    self.validate_digest_len(digest.len())?;
+    let digest = minhash.hash_values();
+    self.ensure_digest_len(digest.len())?;
 
     let mut candidates = Vec::new();
     for (i, table) in self.hash_tables.iter().enumerate() {
-      let start = i * self.band_size;
-      let end = start + self.band_size;
-      let band_hash = calculate_band_hash(&digest[start..end]);
-      if let Some(keys) = table.get(&band_hash) {
+      if let Some(keys) = table.get(&calculate_band_hash(
+        &digest[i * self.band_size..(i + 1) * self.band_size],
+      )) {
         candidates.extend(keys);
       }
     }
@@ -262,10 +280,6 @@ impl RMinHashLSH {
   /// # Returns
   ///
   /// A boolean indicating whether the `MinHashes` are considered similar.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the signatures are incompatible.
   pub fn is_similar(
     &self,
     minhash1: &RMinHash,
@@ -289,7 +303,9 @@ impl RMinHashLSH {
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
     let decoded: Self =
       postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!("Failed to decode state: {err}"))
+        PyValueError::new_err(format!(
+          "failed to deserialize RMinHashLSH state: {err}"
+        ))
       })?;
     decoded.validate_state()?;
     *self = decoded;

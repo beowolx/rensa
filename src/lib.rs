@@ -29,7 +29,7 @@ use pyo3::prelude::*;
 ///
 /// # Errors
 /// Returns an error if the module initialization fails or classes cannot be added
-#[pymodule]
+#[pymodule(gil_used = false)]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
   m.add_class::<CMinHash>()?;

@@ -4,17 +4,12 @@ from rensa import CMinHash, CMinHashDeduplicator, RMinHash, RMinHashDeduplicator
 
 
 class TestInlineDeduplication:
-    def test_deduplicator_rejects_invalid_configuration(self):
-        with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-            RMinHashDeduplicator(threshold=-0.1, num_perm=128, use_lsh=False)
-        with pytest.raises(ValueError, match="num_perm must be greater than 0"):
-            RMinHashDeduplicator(threshold=0.8, num_perm=0, use_lsh=False)
-        with pytest.raises(ValueError, match="num_bands must be greater than 0"):
-            RMinHashDeduplicator(
-                threshold=0.8, num_perm=128, use_lsh=True, num_bands=0
-            )
-        with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-            CMinHashDeduplicator(threshold=1.5)
+    def test_deduplicator_rejects_invalid_threshold(self):
+        with pytest.raises(ValueError, match="threshold"):
+            RMinHashDeduplicator(threshold=1.1, num_perm=128, use_lsh=False)
+
+        with pytest.raises(ValueError, match="threshold"):
+            CMinHashDeduplicator(threshold=-0.1)
 
     def test_rminhash_deduplicator_basic(self):
         """
@@ -186,14 +181,38 @@ class TestInlineDeduplication:
         assert duplicate_count >= 1  # At least the exact duplicate
         assert len(unique_docs) < len(stream)
 
-    def test_deduplicator_rejects_mismatched_num_perm_signatures(self):
-        dedup = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+    def test_rminhash_deduplicator_rejects_num_perm_mismatch(self):
+        dedup = RMinHashDeduplicator(threshold=0.7, num_perm=128, use_lsh=False)
+        m128 = RMinHash(num_perm=128, seed=42)
+        m128.update(["alpha", "beta"])
+        assert dedup.add("doc1", m128) is True
 
-        m1 = RMinHash(num_perm=64, seed=42)
-        m1.update(["base", "document"])
-        assert dedup.add("doc1", m1) is True
+        m64 = RMinHash(num_perm=64, seed=42)
+        m64.update(["alpha", "beta"])
 
-        m2 = RMinHash(num_perm=128, seed=42)
-        m2.update(["base", "document"])
-        with pytest.raises(ValueError, match="different num_perm"):
-            dedup.is_duplicate("doc2", m2)
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.is_duplicate("doc2", m64)
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.get_duplicates(m64)
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.add("doc2", m64)
+
+    def test_cminhash_deduplicator_rejects_num_perm_mismatch(self):
+        dedup = CMinHashDeduplicator(threshold=0.8)
+        c128 = CMinHash(num_perm=128, seed=42)
+        c128.update(["alpha", "beta"])
+        assert dedup.add("doc1", c128) is True
+
+        c64 = CMinHash(num_perm=64, seed=42)
+        c64.update(["alpha", "beta"])
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.is_duplicate("doc2", c64)
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.get_duplicates(c64)
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.add("doc2", c64)

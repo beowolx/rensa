@@ -25,11 +25,12 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 
 const HASH_BATCH_SIZE: usize = 32;
+type ReduceResult = (Py<PyAny>, (usize, u64), Py<PyAny>);
 
 /// `CMinHash` implements an optimized version of `C-MinHash` with better memory access patterns
 /// and aggressive optimizations for maximum single-threaded performance.
 #[derive(Serialize, Deserialize, Clone)]
-#[pyclass(module = "rensa")]
+#[pyclass(module = "rensa", skip_from_py_object)]
 pub struct CMinHash {
   num_perm: usize,
   seed: u64,
@@ -46,8 +47,88 @@ pub struct CMinHash {
 
 impl CMinHash {
   #[inline]
+  pub(crate) const fn num_perm(&self) -> usize {
+    self.num_perm
+  }
+
+  fn validate_num_perm(num_perm: usize) -> PyResult<()> {
+    if num_perm == 0 {
+      return Err(PyValueError::new_err("num_perm must be greater than 0"));
+    }
+    Ok(())
+  }
+
+  fn validate_state(&self) -> PyResult<()> {
+    Self::validate_num_perm(self.num_perm)?;
+    if self.hash_values.len() != self.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "invalid CMinHash state: hash_values length {} does not match num_perm {}",
+        self.hash_values.len(),
+        self.num_perm
+      )));
+    }
+    if self.pi_precomputed.len() != self.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {}",
+        self.pi_precomputed.len(),
+        self.num_perm
+      )));
+    }
+    Ok(())
+  }
+
+  pub(crate) fn ensure_compatible_for_jaccard(
+    &self,
+    other: &Self,
+  ) -> PyResult<()> {
+    self.validate_state()?;
+    other.validate_state()?;
+    if self.num_perm != other.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "num_perm mismatch: left is {}, right is {}",
+        self.num_perm, other.num_perm
+      )));
+    }
+    Ok(())
+  }
+
+  #[inline]
   const fn sigma_transform(&self, hash: u64) -> u64 {
     self.sigma_a.wrapping_mul(hash).wrapping_add(self.sigma_b)
+  }
+
+  #[inline]
+  pub(crate) fn jaccard_unchecked(&self, other: &Self) -> f64 {
+    let mut equal_count = 0usize;
+
+    // Process in chunks of 8 for CPU-friendly operations
+    let chunks_a = self.hash_values.chunks_exact(8);
+    let chunks_b = other.hash_values.chunks_exact(8);
+
+    // Process complete chunks
+    for (chunk_a, chunk_b) in chunks_a.zip(chunks_b) {
+      // Unroll manually for better performance
+      equal_count += usize::from(chunk_a[0] == chunk_b[0]);
+      equal_count += usize::from(chunk_a[1] == chunk_b[1]);
+      equal_count += usize::from(chunk_a[2] == chunk_b[2]);
+      equal_count += usize::from(chunk_a[3] == chunk_b[3]);
+      equal_count += usize::from(chunk_a[4] == chunk_b[4]);
+      equal_count += usize::from(chunk_a[5] == chunk_b[5]);
+      equal_count += usize::from(chunk_a[6] == chunk_b[6]);
+      equal_count += usize::from(chunk_a[7] == chunk_b[7]);
+    }
+
+    // Handle remainder
+    let remainder_start = (self.num_perm / 8) * 8;
+    if remainder_start < self.num_perm {
+      equal_count += self.hash_values[remainder_start..]
+        .iter()
+        .zip(&other.hash_values[remainder_start..])
+        .filter(|&(&a, &b)| a == b)
+        .count();
+    }
+
+    equal_count as f64 / self.num_perm as f64
   }
 
   fn apply_sigma_batch(&mut self, sigma_batch: &[u64]) {
@@ -120,15 +201,9 @@ impl CMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `num_perm` is zero.
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
-    if num_perm == 0 {
-      return Err(PyValueError::new_err("num_perm must be greater than 0"));
-    }
+    Self::validate_num_perm(num_perm)?;
 
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
@@ -206,75 +281,19 @@ impl CMinHash {
 
   /// Calculates the Jaccard similarity between this `CMinHash` and another.
   #[inline]
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the two signatures have different `num_perm` values.
   pub fn jaccard(&self, other: &Self) -> PyResult<f64> {
-    if self.num_perm != other.num_perm {
-      return Err(PyValueError::new_err(format!(
-        "Cannot compare MinHashes with different num_perm values: {} and {}",
-        self.num_perm, other.num_perm
-      )));
-    }
-
-    let mut equal_count = 0usize;
-
-    // Process in chunks of 8 for CPU-friendly operations
-    let chunks_a = self.hash_values.chunks_exact(8);
-    let chunks_b = other.hash_values.chunks_exact(8);
-
-    // Process complete chunks
-    for (chunk_a, chunk_b) in chunks_a.zip(chunks_b) {
-      // Unroll manually for better performance
-      equal_count += usize::from(chunk_a[0] == chunk_b[0]);
-      equal_count += usize::from(chunk_a[1] == chunk_b[1]);
-      equal_count += usize::from(chunk_a[2] == chunk_b[2]);
-      equal_count += usize::from(chunk_a[3] == chunk_b[3]);
-      equal_count += usize::from(chunk_a[4] == chunk_b[4]);
-      equal_count += usize::from(chunk_a[5] == chunk_b[5]);
-      equal_count += usize::from(chunk_a[6] == chunk_b[6]);
-      equal_count += usize::from(chunk_a[7] == chunk_b[7]);
-    }
-
-    // Handle remainder
-    let remainder_start = (self.num_perm / 8) * 8;
-    if remainder_start < self.num_perm {
-      equal_count += self.hash_values[remainder_start..]
-        .iter()
-        .zip(&other.hash_values[remainder_start..])
-        .filter(|&(&a, &b)| a == b)
-        .count();
-    }
-
-    Ok(equal_count as f64 / self.num_perm as f64)
+    self.ensure_compatible_for_jaccard(other)?;
+    Ok(self.jaccard_unchecked(other))
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
     let decoded: Self =
       postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!("Failed to decode state: {err}"))
+        PyValueError::new_err(format!(
+          "failed to deserialize CMinHash state: {err}"
+        ))
       })?;
-
-    if decoded.num_perm == 0 {
-      return Err(PyValueError::new_err(
-        "Invalid state: num_perm must be greater than 0",
-      ));
-    }
-    if decoded.hash_values.len() != decoded.num_perm {
-      return Err(PyValueError::new_err(format!(
-        "Invalid state: hash_values length {} does not match num_perm {}",
-        decoded.hash_values.len(),
-        decoded.num_perm
-      )));
-    }
-    if decoded.pi_precomputed.len() != decoded.num_perm {
-      return Err(PyValueError::new_err(format!(
-        "Invalid state: pi_precomputed length {} does not match num_perm {}",
-        decoded.pi_precomputed.len(),
-        decoded.num_perm
-      )));
-    }
+    decoded.validate_state()?;
     *self = decoded;
     Ok(())
   }
@@ -295,8 +314,8 @@ impl CMinHash {
     (self.num_perm, self.seed)
   }
 
-  fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
-    Python::with_gil(|py| {
+  fn __reduce__(&self) -> PyResult<ReduceResult> {
+    Python::attach(|py| {
       let type_obj = py.get_type::<Self>().into();
       let state = self.__getstate__(py)?.into();
       Ok((type_obj, (self.num_perm, self.seed), state))
