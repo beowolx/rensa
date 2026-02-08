@@ -27,6 +27,7 @@
 //! Key methods include:
 //! - `new(threshold, num_perm, num_bands)`: Initializes a new LSH index.
 //! - `insert(key, minhash)`: Inserts an item's `MinHash` signature into the index.
+//! - `remove(key)`: Removes a previously inserted key from the index.
 //! - `query(minhash)`: Retrieves candidate keys that are potentially similar to the query `MinHash`.
 //! - `is_similar(minhash1, minhash2)`: Directly checks if two `MinHashes` meet the similarity threshold.
 //!
@@ -51,6 +52,36 @@ pub struct RMinHashLSH {
   num_bands: usize,
   band_size: usize,
   hash_tables: Vec<HashMap<u64, Vec<usize>, BuildHasherDefault<FxHasher>>>,
+  #[serde(default)]
+  key_bands: HashMap<usize, Vec<u64>, BuildHasherDefault<FxHasher>>,
+}
+
+impl RMinHashLSH {
+  fn digest_band_hashes(&self, digest: &[u32]) -> Vec<u64> {
+    self
+      .hash_tables
+      .iter()
+      .enumerate()
+      .map(|(i, _)| {
+        let start = i * self.band_size;
+        let end = start + self.band_size;
+        calculate_band_hash(&digest[start..end])
+      })
+      .collect()
+  }
+
+  fn remove_key_from_bands(&mut self, key: usize, band_hashes: &[u64]) {
+    for (table, &band_hash) in
+      self.hash_tables.iter_mut().zip(band_hashes.iter())
+    {
+      if let Some(keys) = table.get_mut(&band_hash) {
+        keys.retain(|&stored_key| stored_key != key);
+        if keys.is_empty() {
+          table.remove(&band_hash);
+        }
+      }
+    }
+  }
 }
 
 #[pymethods]
@@ -76,6 +107,7 @@ impl RMinHashLSH {
       num_bands,
       band_size: num_perm / num_bands,
       hash_tables,
+      key_bands: HashMap::with_hasher(hasher),
     }
   }
 
@@ -100,12 +132,32 @@ impl RMinHashLSH {
       self.num_perm
     );
 
-    for (i, table) in self.hash_tables.iter_mut().enumerate() {
-      let start = i * self.band_size;
-      let end = start + self.band_size;
-      let band_hash = calculate_band_hash(&digest[start..end]);
-      table.entry(band_hash).or_insert_with(Vec::new).push(key);
+    if let Some(previous_band_hashes) = self.key_bands.get(&key).cloned() {
+      self.remove_key_from_bands(key, &previous_band_hashes);
     }
+
+    let band_hashes = self.digest_band_hashes(&digest);
+    for (table, &band_hash) in
+      self.hash_tables.iter_mut().zip(band_hashes.iter())
+    {
+      table.entry(band_hash).or_default().push(key);
+    }
+
+    self.key_bands.insert(key, band_hashes);
+  }
+
+  /// Removes a key from all LSH bands.
+  ///
+  /// # Returns
+  ///
+  /// `true` if the key existed and was removed, `false` otherwise.
+  pub fn remove(&mut self, key: usize) -> bool {
+    let Some(band_hashes) = self.key_bands.remove(&key) else {
+      return false;
+    };
+
+    self.remove_key_from_bands(key, &band_hashes);
+    true
   }
 
   /// Queries the LSH index for similar items.
@@ -134,10 +186,8 @@ impl RMinHashLSH {
     );
 
     let mut candidates = Vec::new();
-    for (i, table) in self.hash_tables.iter().enumerate() {
-      let start = i * self.band_size;
-      let end = start + self.band_size;
-      let band_hash = calculate_band_hash(&digest[start..end]);
+    let band_hashes = self.digest_band_hashes(&digest);
+    for (table, &band_hash) in self.hash_tables.iter().zip(band_hashes.iter()) {
       if let Some(keys) = table.get(&band_hash) {
         candidates.extend(keys);
       }
