@@ -253,9 +253,7 @@ impl CMinHash {
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
     let decoded: Self =
       postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize CMinHash state: {err}"
-        ))
+        PyValueError::new_err(format!("Failed to decode state: {err}"))
       })?;
 
     if decoded.num_perm == 0 {
