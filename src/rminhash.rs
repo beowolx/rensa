@@ -49,11 +49,6 @@ pub struct RMinHash {
 }
 
 impl RMinHash {
-  #[inline]
-  pub(crate) fn hash_values(&self) -> &[u32] {
-    &self.hash_values
-  }
-
   fn apply_hash_batch(&mut self, hash_batch: &[u64]) {
     // Update hash values in chunks for better vectorization
     let perm_chunks_iter = self.permutations.chunks_exact(PERM_CHUNK_SIZE);
