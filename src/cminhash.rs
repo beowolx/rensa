@@ -20,7 +20,7 @@ use crate::utils::calculate_hash_fast;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
-use rand::prelude::*;
+use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 
@@ -132,10 +132,10 @@ impl CMinHash {
 
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
-    let sigma_a = rng.random::<u64>() | 1;
-    let sigma_b = rng.random::<u64>();
-    let pi_c = rng.random::<u64>() | 1;
-    let pi_d = rng.random::<u64>();
+    let sigma_a = rng.next_u64() | 1;
+    let sigma_b = rng.next_u64();
+    let pi_c = rng.next_u64() | 1;
+    let pi_d = rng.next_u64();
 
     // Precompute pi_c * k + pi_d for all k values
     let pi_precomputed: Vec<u64> = (0..num_perm)

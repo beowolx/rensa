@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
 description = "High-performance MinHash implementation in Rust with Python bindings for efficient similarity estimation and deduplication of large datasets"
 readme = "README.md"
-license-file = "LICENSE"
+license = "MIT"
 repository = "https://github.com/beowolx/rensa"
 keywords = ["minhash", "lsh", "similarity", "deduplication", "data-mining"]
 categories = [
@@ -22,14 +22,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.25.0"
-rand = "0.9.0"
 rustc-hash = "2.1.1"
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 murmur3 = "0.5.2"
 rand_xoshiro = "0.7.0"
-rand_chacha = "0.9.0"
-mimalloc = "*"
+rand_core = "0.9.3"
+mimalloc = "0.1.48"
 
 [profile.release]
 lto = "fat"
