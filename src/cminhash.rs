@@ -17,6 +17,7 @@
 
 use crate::py_input::{hash_single_bufferlike, hash_token};
 use crate::utils::calculate_hash_fast;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator};
 use rand::prelude::*;
@@ -119,9 +120,16 @@ impl CMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero.
   #[new]
-  #[must_use]
-  pub fn new(num_perm: usize, seed: u64) -> Self {
+  pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
+    if num_perm == 0 {
+      return Err(PyValueError::new_err("num_perm must be greater than 0"));
+    }
+
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
 
     let sigma_a = rng.random::<u64>() | 1;
@@ -134,7 +142,7 @@ impl CMinHash {
       .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
       .collect();
 
-    Self {
+    Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u64::MAX; num_perm],
@@ -143,7 +151,7 @@ impl CMinHash {
       pi_c,
       pi_d,
       pi_precomputed,
-    }
+    })
   }
 
   /// Updates the `CMinHash` with a new set of items.
@@ -198,8 +206,18 @@ impl CMinHash {
 
   /// Calculates the Jaccard similarity between this `CMinHash` and another.
   #[inline]
-  #[must_use]
-  pub fn jaccard(&self, other: &Self) -> f64 {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the two signatures have different `num_perm` values.
+  pub fn jaccard(&self, other: &Self) -> PyResult<f64> {
+    if self.num_perm != other.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Cannot compare MinHashes with different num_perm values: {} and {}",
+        self.num_perm, other.num_perm
+      )));
+    }
+
     let mut equal_count = 0usize;
 
     // Process in chunks of 8 for CPU-friendly operations
@@ -229,24 +247,53 @@ impl CMinHash {
         .count();
     }
 
-    equal_count as f64 / self.num_perm as f64
+    Ok(equal_count as f64 / self.num_perm as f64)
   }
 
-  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) {
-    *self = bincode::serde::decode_from_slice(
+  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
+    let decoded: Self = bincode::serde::decode_from_slice(
       state.as_bytes(),
       bincode::config::standard(),
     )
-    .unwrap()
+    .map_err(|err| {
+      PyValueError::new_err(format!("Failed to decode state: {err}"))
+    })?
     .0;
+
+    if decoded.num_perm == 0 {
+      return Err(PyValueError::new_err(
+        "Invalid state: num_perm must be greater than 0",
+      ));
+    }
+    if decoded.hash_values.len() != decoded.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Invalid state: hash_values length {} does not match num_perm {}",
+        decoded.hash_values.len(),
+        decoded.num_perm
+      )));
+    }
+    if decoded.pi_precomputed.len() != decoded.num_perm {
+      return Err(PyValueError::new_err(format!(
+        "Invalid state: pi_precomputed length {} does not match num_perm {}",
+        decoded.pi_precomputed.len(),
+        decoded.num_perm
+      )));
+    }
+
+    *self = decoded;
+    Ok(())
   }
 
-  fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-    PyBytes::new(
-      py,
-      &bincode::serde::encode_to_vec(self, bincode::config::standard())
-        .unwrap(),
-    )
+  fn __getstate__<'py>(
+    &self,
+    py: Python<'py>,
+  ) -> PyResult<Bound<'py, PyBytes>> {
+    let encoded =
+      bincode::serde::encode_to_vec(self, bincode::config::standard())
+        .map_err(|err| {
+          PyValueError::new_err(format!("Failed to encode state: {err}"))
+        })?;
+    Ok(PyBytes::new(py, &encoded))
   }
 
   const fn __getnewargs__(&self) -> (usize, u64) {
@@ -256,7 +303,7 @@ impl CMinHash {
   fn __reduce__(&self) -> PyResult<(PyObject, (usize, u64), PyObject)> {
     Python::with_gil(|py| {
       let type_obj = py.get_type::<Self>().into();
-      let state = self.__getstate__(py).into();
+      let state = self.__getstate__(py)?.into();
       Ok((type_obj, (self.num_perm, self.seed), state))
     })
   }

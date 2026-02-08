@@ -94,6 +94,20 @@ You can install Rensa using `pip`. It's available in all platforms:
 pip install rensa
 ```
 
+## Input Validation and Errors
+
+Rensa validates constructor and API invariants up front and raises `ValueError` for invalid inputs (instead of aborting the Python process).
+
+Key constraints:
+- `RMinHash(num_perm=...)` and `CMinHash(num_perm=...)`: `num_perm` must be greater than `0`.
+- `RMinHashLSH(threshold, num_perm, num_bands)`:
+  - `threshold` must be finite and in `[0.0, 1.0]`.
+  - `num_perm` must be greater than `0`.
+  - `num_bands` must be greater than `0`.
+  - `num_bands <= num_perm`.
+  - `num_perm % num_bands == 0`.
+- `jaccard` comparisons require matching `num_perm` on both signatures.
+
 ## Usage Example
 
 ### Deduplicating with Direct MinHash
