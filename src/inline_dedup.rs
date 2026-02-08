@@ -6,6 +6,7 @@
 use crate::cminhash::CMinHash;
 use crate::lsh::RMinHashLSH;
 use crate::rminhash::RMinHash;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -22,13 +23,25 @@ pub struct RMinHashDeduplicator {
 impl RMinHashDeduplicator {
   #[new]
   #[pyo3(signature = (threshold, num_perm, use_lsh, num_bands=None))]
-  #[must_use]
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if thresholds or permutation parameters are invalid.
   pub fn new(
     threshold: f64,
     num_perm: usize,
     use_lsh: bool,
     num_bands: Option<usize>,
-  ) -> Self {
+  ) -> PyResult<Self> {
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+      return Err(PyValueError::new_err(
+        "threshold must be a finite value between 0.0 and 1.0",
+      ));
+    }
+    if num_perm == 0 {
+      return Err(PyValueError::new_err("num_perm must be greater than 0"));
+    }
+
     let lsh_index = if use_lsh {
       let default_bands = if threshold >= 0.9 {
         4
@@ -39,37 +52,55 @@ impl RMinHashDeduplicator {
       } else if threshold >= 0.5 {
         32
       } else {
-        num_perm / 2
+        (num_perm / 2).max(1)
       };
-      let bands = num_bands.unwrap_or(default_bands);
-
-      let bands = if num_perm.is_multiple_of(bands) {
-        bands
+      let bands = if let Some(requested_bands) = num_bands {
+        if requested_bands == 0 {
+          return Err(PyValueError::new_err(
+            "num_bands must be greater than 0",
+          ));
+        }
+        if requested_bands > num_perm {
+          return Err(PyValueError::new_err(format!(
+            "num_bands ({requested_bands}) must be less than or equal to num_perm ({num_perm})",
+          )));
+        }
+        if !num_perm.is_multiple_of(requested_bands) {
+          return Err(PyValueError::new_err(format!(
+            "num_perm ({num_perm}) must be divisible by num_bands ({requested_bands})",
+          )));
+        }
+        requested_bands
       } else {
-        (1..=num_perm)
+        let upper = default_bands.min(num_perm).max(1);
+        (1..=upper)
           .rev()
-          .find(|&b| num_perm.is_multiple_of(b) && b <= bands)
+          .find(|&candidate| num_perm.is_multiple_of(candidate))
           .unwrap_or(1)
       };
 
-      Some(RMinHashLSH::new(threshold, num_perm, bands))
+      Some(RMinHashLSH::new(threshold, num_perm, bands)?)
     } else {
       None
     };
 
-    Self {
+    Ok(Self {
       threshold,
       entries_by_id: FxHashMap::default(),
       lsh_index,
       next_id: 0,
       key_to_id: FxHashMap::default(),
-    }
+    })
   }
 
   /// Add a new item to the deduplicator. Returns true if added (not a duplicate), false if duplicate.
-  pub fn add(&mut self, key: String, minhash: &RMinHash) -> bool {
-    if self.is_duplicate(&key, minhash) {
-      return false;
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with the configured signature size.
+  pub fn add(&mut self, key: String, minhash: &RMinHash) -> PyResult<bool> {
+    if self.is_duplicate(&key, minhash)? {
+      return Ok(false);
     }
 
     let next_id = self.next_id;
@@ -79,67 +110,73 @@ impl RMinHashDeduplicator {
     self.key_to_id.insert(key, next_id);
 
     if let Some(ref mut lsh) = self.lsh_index {
-      lsh.insert(next_id, minhash);
+      lsh.insert(next_id, minhash)?;
     }
 
     self.next_id += 1;
-    true
+    Ok(true)
   }
 
   /// Check if an item is a duplicate without adding it
-  #[must_use]
-  pub fn is_duplicate(&self, key: &str, minhash: &RMinHash) -> bool {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with stored signatures.
+  pub fn is_duplicate(&self, key: &str, minhash: &RMinHash) -> PyResult<bool> {
     if self.key_to_id.contains_key(key) {
-      return true;
+      return Ok(true);
     }
 
     if let Some(ref lsh) = self.lsh_index {
-      let candidates = lsh.query(minhash);
+      let candidates = lsh.query(minhash)?;
       for candidate_id in candidates {
         if let Some((_, candidate_minhash)) =
           self.entries_by_id.get(&candidate_id)
         {
-          if minhash.jaccard(candidate_minhash) >= self.threshold {
-            return true;
+          if minhash.jaccard(candidate_minhash)? >= self.threshold {
+            return Ok(true);
           }
         }
       }
     } else {
       for (_, existing_minhash) in self.entries_by_id.values() {
-        if minhash.jaccard(existing_minhash) >= self.threshold {
-          return true;
+        if minhash.jaccard(existing_minhash)? >= self.threshold {
+          return Ok(true);
         }
       }
     }
 
-    false
+    Ok(false)
   }
 
   /// Get duplicate candidates for a given `MinHash`
-  #[must_use]
-  pub fn get_duplicates(&self, minhash: &RMinHash) -> Vec<String> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with stored signatures.
+  pub fn get_duplicates(&self, minhash: &RMinHash) -> PyResult<Vec<String>> {
     let mut duplicates = Vec::new();
 
     if let Some(ref lsh) = self.lsh_index {
-      let candidates = lsh.query(minhash);
+      let candidates = lsh.query(minhash)?;
       for candidate_id in candidates {
         if let Some((candidate_key, candidate_minhash)) =
           self.entries_by_id.get(&candidate_id)
         {
-          if minhash.jaccard(candidate_minhash) >= self.threshold {
+          if minhash.jaccard(candidate_minhash)? >= self.threshold {
             duplicates.push(candidate_key.clone());
           }
         }
       }
     } else {
       for (key, existing_minhash) in self.entries_by_id.values() {
-        if minhash.jaccard(existing_minhash) >= self.threshold {
+        if minhash.jaccard(existing_minhash)? >= self.threshold {
           duplicates.push(key.clone());
         }
       }
     }
 
-    duplicates
+    Ok(duplicates)
   }
 
   /// Remove an item from the deduplicator
@@ -168,17 +205,23 @@ impl RMinHashDeduplicator {
   }
 
   /// Clear all items from the deduplicator
-  pub fn clear(&mut self) {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the internal LSH index cannot be recreated.
+  pub fn clear(&mut self) -> PyResult<()> {
     self.entries_by_id.clear();
     self.key_to_id.clear();
     self.next_id = 0;
-    if let Some(ref mut lsh) = self.lsh_index {
-      // Recreate LSH index
-      let threshold = self.threshold;
-      let num_perm = lsh.get_num_perm();
-      let num_bands = lsh.get_num_bands();
-      self.lsh_index = Some(RMinHashLSH::new(threshold, num_perm, num_bands));
+    if let Some((num_perm, num_bands)) = self
+      .lsh_index
+      .as_ref()
+      .map(|lsh| (lsh.get_num_perm(), lsh.get_num_bands()))
+    {
+      self.lsh_index =
+        Some(RMinHashLSH::new(self.threshold, num_perm, num_bands)?);
     }
+    Ok(())
   }
 }
 
@@ -187,62 +230,73 @@ impl RMinHashDeduplicator {
 pub struct CMinHashDeduplicator {
   threshold: f64,
   existing_signatures: FxHashMap<String, CMinHash>,
-  signature_cache: FxHashMap<String, Vec<u64>>,
 }
 
 #[pymethods]
 impl CMinHashDeduplicator {
   #[new]
-  #[must_use]
-  pub fn new(threshold: f64) -> Self {
-    Self {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `threshold` is invalid.
+  pub fn new(threshold: f64) -> PyResult<Self> {
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+      return Err(PyValueError::new_err(
+        "threshold must be a finite value between 0.0 and 1.0",
+      ));
+    }
+
+    Ok(Self {
       threshold,
       existing_signatures: FxHashMap::default(),
-      signature_cache: FxHashMap::default(),
-    }
+    })
   }
 
-  pub fn add(&mut self, key: String, minhash: &CMinHash) -> bool {
-    if self.is_duplicate(&key, minhash) {
-      return false;
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with stored signatures.
+  pub fn add(&mut self, key: String, minhash: &CMinHash) -> PyResult<bool> {
+    if self.is_duplicate(&key, minhash)? {
+      return Ok(false);
     }
 
-    let signature = minhash.digest_u64();
-    self.signature_cache.insert(key.clone(), signature);
     self.existing_signatures.insert(key, minhash.clone());
-    true
+    Ok(true)
   }
 
-  #[must_use]
-  pub fn is_duplicate(&self, key: &str, minhash: &CMinHash) -> bool {
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with stored signatures.
+  pub fn is_duplicate(&self, key: &str, minhash: &CMinHash) -> PyResult<bool> {
     if self.existing_signatures.contains_key(key) {
-      return true;
+      return Ok(true);
     }
 
     for existing_minhash in self.existing_signatures.values() {
-      if minhash.jaccard(existing_minhash) >= self.threshold {
-        return true;
+      if minhash.jaccard(existing_minhash)? >= self.threshold {
+        return Ok(true);
       }
     }
 
-    false
+    Ok(false)
   }
 
-  #[must_use]
-  pub fn get_duplicates(&self, minhash: &CMinHash) -> Vec<String> {
+  /// # Errors
+  ///
+  /// Returns an error if `minhash` is incompatible with stored signatures.
+  pub fn get_duplicates(&self, minhash: &CMinHash) -> PyResult<Vec<String>> {
     let mut duplicates = Vec::new();
 
     for (key, existing_minhash) in &self.existing_signatures {
-      if minhash.jaccard(existing_minhash) >= self.threshold {
+      if minhash.jaccard(existing_minhash)? >= self.threshold {
         duplicates.push(key.clone());
       }
     }
 
-    duplicates
+    Ok(duplicates)
   }
 
   pub fn remove(&mut self, key: &str) -> bool {
-    self.signature_cache.remove(key);
     self.existing_signatures.remove(key).is_some()
   }
 
@@ -258,6 +312,5 @@ impl CMinHashDeduplicator {
 
   pub fn clear(&mut self) {
     self.existing_signatures.clear();
-    self.signature_cache.clear();
   }
 }
