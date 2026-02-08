@@ -12,8 +12,9 @@ pub fn calculate_hash_fast(data: &[u8]) -> u64 {
   let remainder = chunks.remainder();
 
   for chunk in chunks {
-    // Safe conversion using try_into with unwrap (chunk is guaranteed to be 8 bytes)
-    let val = u64::from_le_bytes(chunk.try_into().unwrap());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(chunk);
+    let val = u64::from_le_bytes(bytes);
     hash = hash.wrapping_mul(0x0100_0000_01b3).wrapping_add(val);
   }
 
