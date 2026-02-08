@@ -1,10 +1,11 @@
 use crate::utils::calculate_hash_fast;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyTypeError;
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{
-  PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods, PyMemoryView,
-  PyString, PyStringMethods,
+  PyByteArray, PyByteArrayMethods, PyBytes, PyBytesMethods, PyString,
+  PyStringMethods,
 };
 
 const TOKEN_TYPE_ERROR: &str =
@@ -14,7 +15,8 @@ const BUFFER_TYPE_ERROR: &str =
 
 #[inline]
 fn has_buffer_protocol(item: &Bound<'_, PyAny>) -> bool {
-  PyMemoryView::from(item).is_ok()
+  // SAFETY: reads CPython type metadata and does not mutate the object.
+  unsafe { ffi::PyObject_CheckBuffer(item.as_ptr()) == 1 }
 }
 
 fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
@@ -40,15 +42,18 @@ fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
 }
 
 pub fn hash_token(item: &Bound<'_, PyAny>) -> PyResult<u64> {
-  if let Ok(py_string) = item.downcast::<PyString>() {
+  if item.is_instance_of::<PyString>() {
+    let py_string = item.downcast::<PyString>()?;
     return Ok(calculate_hash_fast(py_string.to_str()?.as_bytes()));
   }
 
-  if let Ok(py_bytes) = item.downcast::<PyBytes>() {
+  if item.is_instance_of::<PyBytes>() {
+    let py_bytes = item.downcast::<PyBytes>()?;
     return Ok(calculate_hash_fast(py_bytes.as_bytes()));
   }
 
-  if let Ok(py_bytearray) = item.downcast::<PyByteArray>() {
+  if item.is_instance_of::<PyByteArray>() {
+    let py_bytearray = item.downcast::<PyByteArray>()?;
     // SAFETY: used only for immediate hashing.
     let bytes = unsafe { py_bytearray.as_bytes() };
     return Ok(calculate_hash_fast(bytes));
@@ -68,11 +73,13 @@ pub fn hash_single_bufferlike(
     return Ok(None);
   }
 
-  if let Ok(py_bytes) = items.downcast::<PyBytes>() {
+  if items.is_instance_of::<PyBytes>() {
+    let py_bytes = items.downcast::<PyBytes>()?;
     return Ok(Some(calculate_hash_fast(py_bytes.as_bytes())));
   }
 
-  if let Ok(py_bytearray) = items.downcast::<PyByteArray>() {
+  if items.is_instance_of::<PyByteArray>() {
+    let py_bytearray = items.downcast::<PyByteArray>()?;
     // SAFETY: used only for immediate hashing.
     let bytes = unsafe { py_bytearray.as_bytes() };
     return Ok(Some(calculate_hash_fast(bytes)));
