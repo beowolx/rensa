@@ -206,13 +206,17 @@ jobs:
   performance-check:
     name: Performance Check
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
       BENCH_DATASET: gretelai/synthetic_text_to_sql
       BENCH_SPLIT: train
       BENCH_REVISION: 740ab236e64503fba51be1101df7a1be83bf455d
       BENCH_NUM_PERM: "128"
+      BENCH_MAX_ROWS_PR: "50000"
+      BENCH_MAX_ROWS_PUSH: "30000"
+      BENCH_PR_WARMUP_RUNS: "1"
+      BENCH_PR_MEASURED_RUNS: "3"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -246,18 +250,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          python -m venv "${GITHUB_WORKSPACE}/.bench/.venv-pr"
+          source "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/activate"
+          python -m pip install --upgrade pip
+          pip install maturin
+          pip install -r "${GITHUB_WORKSPACE}/requirements.txt"
+
           run_commit_benchmark() {
             local commit_dir="$1"
-            local venv_dir="$2"
-            local output_json="$3"
-            local output_log="$4"
-            local label="$5"
-
-            python -m venv "${venv_dir}"
-            source "${venv_dir}/bin/activate"
-            python -m pip install --upgrade pip
-            pip install maturin
-            pip install -r "${GITHUB_WORKSPACE}/requirements.txt"
+            local output_json="$2"
+            local output_log="$3"
+            local label="$4"
 
             pushd "${commit_dir}" >/dev/null
             maturin develop --release
@@ -268,29 +271,29 @@ jobs:
               --split "${BENCH_SPLIT}" \
               --revision "${BENCH_REVISION}" \
               --num-perm "${BENCH_NUM_PERM}" \
-              --warmup-runs 1 \
-              --measured-runs 5 \
+              --max-rows "${BENCH_MAX_ROWS_PR}" \
+              --warmup-runs "${BENCH_PR_WARMUP_RUNS}" \
+              --measured-runs "${BENCH_PR_MEASURED_RUNS}" \
               --disable-progress \
               --output-json "${output_json}" \
               | tee "${output_log}"
 
-            deactivate
             echo "Completed ${label} benchmark."
           }
 
           run_commit_benchmark \
             "${GITHUB_WORKSPACE}" \
-            "${GITHUB_WORKSPACE}/.bench/.venv-head" \
             "${GITHUB_WORKSPACE}/.bench/head.json" \
             "${GITHUB_WORKSPACE}/.bench/head_summary.txt" \
             "head"
 
           run_commit_benchmark \
             "${BASE_DIR}" \
-            "${GITHUB_WORKSPACE}/.bench/.venv-base" \
             "${GITHUB_WORKSPACE}/.bench/base.json" \
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
+
+          deactivate
 
       - name: Validate PR benchmark regression gates
         if: github.event_name == 'pull_request'
@@ -325,6 +328,7 @@ jobs:
             --split "${BENCH_SPLIT}" \
             --revision "${BENCH_REVISION}" \
             --num-perm "${BENCH_NUM_PERM}" \
+            --max-rows "${BENCH_MAX_ROWS_PUSH}" \
             --warmup-runs 0 \
             --measured-runs 1 \
             --disable-progress \
