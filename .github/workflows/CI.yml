@@ -256,6 +256,7 @@ jobs:
             "datasets>=2.20" \
             "datasketch>=1.9" \
             "tqdm>=4.66"
+          BENCH_VENV="${GITHUB_WORKSPACE}/.venv"
           BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
           BENCH_MATURIN="${GITHUB_WORKSPACE}/.venv/bin/maturin"
 
@@ -266,7 +267,7 @@ jobs:
             local label="$4"
 
             pushd "${commit_dir}" >/dev/null
-            "${BENCH_MATURIN}" develop --release
+            VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release
             popd >/dev/null
 
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
@@ -324,7 +325,7 @@ jobs:
             "datasketch>=1.9" \
             "tqdm>=4.66"
 
-          .venv/bin/maturin develop --release
+          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
 
           .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET}" \
