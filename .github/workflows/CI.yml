@@ -249,13 +249,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          uv venv --python 3.9 "${GITHUB_WORKSPACE}/.bench/.venv-pr"
-          uv sync --python "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/python" --group dev --no-install-project
+          uv venv --python 3.9 "${GITHUB_WORKSPACE}/.venv"
+          uv sync --python "${GITHUB_WORKSPACE}/.venv/bin/python" --group dev --no-install-project
           uv pip install \
-            --python "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/python" \
+            --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
             "datasets>=2.20" \
             "datasketch>=1.9" \
             "tqdm>=4.66"
+          BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
+          BENCH_MATURIN="${GITHUB_WORKSPACE}/.venv/bin/maturin"
 
           run_commit_benchmark() {
             local commit_dir="$1"
@@ -264,10 +266,10 @@ jobs:
             local label="$4"
 
             pushd "${commit_dir}" >/dev/null
-            uv run --python "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/python" maturin develop --release
+            "${BENCH_MATURIN}" develop --release
             popd >/dev/null
 
-            uv run --python "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/python" python "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
               --dataset "${BENCH_DATASET}" \
               --split "${BENCH_SPLIT}" \
               --revision "${BENCH_REVISION}" \
@@ -298,7 +300,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --python "${GITHUB_WORKSPACE}/.bench/.venv-pr/bin/python" python benchmarks/validate_benchmark.py \
+          "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/validate_benchmark.py \
             --mode compare \
             --head-json .bench/head.json \
             --base-json .bench/base.json \
@@ -314,17 +316,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv venv --python 3.9 .bench/.venv-smoke
-          uv sync --python .bench/.venv-smoke/bin/python --group dev --no-install-project
+          uv venv --python 3.9 .venv
+          uv sync --python .venv/bin/python --group dev --no-install-project
           uv pip install \
-            --python .bench/.venv-smoke/bin/python \
+            --python .venv/bin/python \
             "datasets>=2.20" \
             "datasketch>=1.9" \
             "tqdm>=4.66"
 
-          uv run --python .bench/.venv-smoke/bin/python maturin develop --release
+          .venv/bin/maturin develop --release
 
-          uv run --python .bench/.venv-smoke/bin/python python benchmarks/simple_benchmark.py \
+          .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET}" \
             --split "${BENCH_SPLIT}" \
             --revision "${BENCH_REVISION}" \
@@ -340,7 +342,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --python .bench/.venv-smoke/bin/python python benchmarks/validate_benchmark.py \
+          .venv/bin/python benchmarks/validate_benchmark.py \
             --mode absolute \
             --head-json .bench/head_smoke.json \
             --min-speedup 10.0 \
