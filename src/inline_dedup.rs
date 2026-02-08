@@ -17,6 +17,7 @@ pub struct RMinHashDeduplicator {
   use_lsh: bool,
   next_id: usize,
   id_to_key: FxHashMap<usize, String>,
+  key_to_id: FxHashMap<String, usize>,
 }
 
 #[pymethods]
@@ -65,6 +66,7 @@ impl RMinHashDeduplicator {
       use_lsh,
       next_id: 0,
       id_to_key: FxHashMap::default(),
+      key_to_id: FxHashMap::default(),
     }
   }
 
@@ -81,8 +83,10 @@ impl RMinHashDeduplicator {
 
     // Add to LSH index if enabled
     if let Some(ref mut lsh) = self.lsh_index {
-      lsh.insert(self.next_id, minhash);
-      self.id_to_key.insert(self.next_id, key);
+      let next_id = self.next_id;
+      lsh.insert(next_id, minhash);
+      self.id_to_key.insert(next_id, key.clone());
+      self.key_to_id.insert(key, next_id);
       self.next_id += 1;
     }
 
@@ -157,6 +161,13 @@ impl RMinHashDeduplicator {
 
   /// Remove an item from the deduplicator
   pub fn remove(&mut self, key: &str) -> bool {
+    if let Some(id) = self.key_to_id.remove(key) {
+      self.id_to_key.remove(&id);
+      if let Some(ref mut lsh) = self.lsh_index {
+        let _ = lsh.remove(id);
+      }
+    }
+
     self.existing_signatures.remove(key).is_some()
   }
 
@@ -176,6 +187,7 @@ impl RMinHashDeduplicator {
   pub fn clear(&mut self) {
     self.existing_signatures.clear();
     self.id_to_key.clear();
+    self.key_to_id.clear();
     self.next_id = 0;
     if let Some(ref mut lsh) = self.lsh_index {
       // Recreate LSH index
