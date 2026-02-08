@@ -59,16 +59,13 @@ pub struct RMinHashLSH {
 
 impl RMinHashLSH {
   fn digest_band_hashes(&self, digest: &[u32]) -> Vec<u64> {
-    self
-      .hash_tables
-      .iter()
-      .enumerate()
-      .map(|(i, _)| {
-        let start = i * self.band_size;
-        let end = start + self.band_size;
-        calculate_band_hash(&digest[start..end])
-      })
-      .collect()
+    let mut band_hashes = Vec::with_capacity(self.num_bands);
+    for i in 0..self.num_bands {
+      band_hashes.push(calculate_band_hash(
+        &digest[i * self.band_size..(i + 1) * self.band_size],
+      ));
+    }
+    band_hashes
   }
 
   fn remove_key_from_bands(&mut self, key: usize, band_hashes: &[u64]) {
@@ -123,7 +120,7 @@ impl RMinHashLSH {
   ///
   /// Panics if the `MinHash` has a different number of permutations than expected by the LSH index.
   pub fn insert(&mut self, key: usize, minhash: &RMinHash) {
-    let digest = minhash.digest();
+    let digest = minhash.hash_values();
 
     assert_eq!(
       digest.len(),
@@ -137,7 +134,7 @@ impl RMinHashLSH {
       self.remove_key_from_bands(key, &previous_band_hashes);
     }
 
-    let band_hashes = self.digest_band_hashes(&digest);
+    let band_hashes = self.digest_band_hashes(digest);
     for (table, &band_hash) in
       self.hash_tables.iter_mut().zip(band_hashes.iter())
     {
@@ -176,7 +173,7 @@ impl RMinHashLSH {
   /// Panics if the `MinHash` has a different number of permutations than expected by the LSH index.
   #[must_use]
   pub fn query(&self, minhash: &RMinHash) -> Vec<usize> {
-    let digest = minhash.digest();
+    let digest = minhash.hash_values();
 
     assert_eq!(
       digest.len(),
@@ -187,12 +184,14 @@ impl RMinHashLSH {
     );
 
     let mut candidates = Vec::new();
-    let band_hashes = self.digest_band_hashes(&digest);
-    for (table, &band_hash) in self.hash_tables.iter().zip(band_hashes.iter()) {
-      if let Some(keys) = table.get(&band_hash) {
+    for (i, table) in self.hash_tables.iter().enumerate() {
+      if let Some(keys) = table.get(&calculate_band_hash(
+        &digest[i * self.band_size..(i + 1) * self.band_size],
+      )) {
         candidates.extend(keys);
       }
     }
+
     candidates.sort_unstable();
     candidates.dedup();
     candidates
