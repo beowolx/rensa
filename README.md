@@ -455,29 +455,38 @@ git clone https://github.com/beowolx/rensa.git
 cd rensa
 ```
 
-2. **Create a virtual environment:**
+2. **Install `uv` (if not already installed):**
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-3. **Install the required dependencies:**
+3. **Create a virtual environment and sync the developer toolchain:**
 
 ```bash
-pip install -r requirements.txt
+uv venv
+uv sync --python .venv/bin/python --group dev --no-install-project
+uv pip install --python .venv/bin/python "datasets>=2.20" "datasketch>=1.9" "tqdm>=4.66" "matplotlib>=3.9"
 ```
 
-4. **Run the simple benchmark** (core MinHash deduplication on `gretelai/synthetic_text_to_sql`):
+Benchmark dependencies are intentionally installed ad hoc for benchmark runs, they are not part of the package dependency manifest.
+
+4. **Build the Rust extension in the environment:**
 
 ```bash
-python benchmarks/simple_benchmark.py
+uv run --python .venv/bin/python maturin develop --release
 ```
 
-You can also configure the benchmark run and emit CI-compatible JSON output:
+5. **Run the simple benchmark** (core MinHash deduplication on `gretelai/synthetic_text_to_sql`):
 
 ```bash
-python benchmarks/simple_benchmark.py \
+uv run --python .venv/bin/python python benchmarks/simple_benchmark.py
+```
+
+You can also configure benchmark input and emit CI-compatible JSON output:
+
+```bash
+uv run --python .venv/bin/python python benchmarks/simple_benchmark.py \
   --dataset gretelai/synthetic_text_to_sql \
   --split train \
   --revision 740ab236e64503fba51be1101df7a1be83bf455d \
@@ -499,11 +508,11 @@ Supported `simple_benchmark.py` flags:
 - `--output-json` (optional path)
 - `--disable-progress` (enabled by default on CI)
 
-5. **Validate benchmark gates** (absolute smoke checks or base-vs-head comparison checks):
+6. **Validate benchmark gates** (absolute smoke checks or base-vs-head comparison checks):
 
 ```bash
 # Absolute mode (single benchmark JSON)
-python benchmarks/validate_benchmark.py \
+uv run --python .venv/bin/python python benchmarks/validate_benchmark.py \
   --mode absolute \
   --head-json benchmark.json \
   --min-speedup 10.0 \
@@ -514,7 +523,7 @@ python benchmarks/validate_benchmark.py \
 
 ```bash
 # Compare mode (PR regression gate)
-python benchmarks/validate_benchmark.py \
+uv run --python .venv/bin/python python benchmarks/validate_benchmark.py \
   --mode compare \
   --head-json head.json \
   --base-json base.json \
@@ -525,16 +534,16 @@ python benchmarks/validate_benchmark.py \
   --min-jaccard-r-c 0.999
 ```
 
-6. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
+7. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
 
 ```bash
-python benchmarks/advanced_benchmark.py
+uv run --python .venv/bin/python python benchmarks/advanced_benchmark.py
 ```
 
-7. **Run the wiki benchmark** (compares deduplication performance on the `Salesforce/wikitext` dataset with 1.8M rows):
+8. **Run the wiki benchmark** (compares deduplication performance on the `Salesforce/wikitext` dataset with 1.8M rows):
 
 ```bash
-python benchmarks/wiki_benchmark.py
+uv run --python .venv/bin/python python benchmarks/wiki_benchmark.py
 ```
 
 ## Limitations and Future Work
