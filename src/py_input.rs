@@ -40,18 +40,15 @@ fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
 }
 
 pub fn hash_token(item: &Bound<'_, PyAny>) -> PyResult<u64> {
-  if item.is_instance_of::<PyString>() {
-    let py_string = item.downcast::<PyString>()?;
+  if let Ok(py_string) = item.cast::<PyString>() {
     return Ok(calculate_hash_fast(py_string.to_str()?.as_bytes()));
   }
 
-  if item.is_instance_of::<PyBytes>() {
-    let py_bytes = item.downcast::<PyBytes>()?;
+  if let Ok(py_bytes) = item.cast::<PyBytes>() {
     return Ok(calculate_hash_fast(py_bytes.as_bytes()));
   }
 
-  if item.is_instance_of::<PyByteArray>() {
-    let py_bytearray = item.downcast::<PyByteArray>()?;
+  if let Ok(py_bytearray) = item.cast::<PyByteArray>() {
     // SAFETY: used only for immediate hashing.
     let bytes = unsafe { py_bytearray.as_bytes() };
     return Ok(calculate_hash_fast(bytes));
@@ -71,13 +68,11 @@ pub fn hash_single_bufferlike(
     return Ok(None);
   }
 
-  if items.is_instance_of::<PyBytes>() {
-    let py_bytes = items.downcast::<PyBytes>()?;
+  if let Ok(py_bytes) = items.cast::<PyBytes>() {
     return Ok(Some(calculate_hash_fast(py_bytes.as_bytes())));
   }
 
-  if items.is_instance_of::<PyByteArray>() {
-    let py_bytearray = items.downcast::<PyByteArray>()?;
+  if let Ok(py_bytearray) = items.cast::<PyByteArray>() {
     // SAFETY: used only for immediate hashing.
     let bytes = unsafe { py_bytearray.as_bytes() };
     return Ok(Some(calculate_hash_fast(bytes)));
