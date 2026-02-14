@@ -46,37 +46,10 @@ def cminhash_minhash(text: str, num_perm: int = DEFAULT_NUM_PERM) -> CMinHash:
     return minhash
 
 
-def cminimash(text: str, num_perm: int = DEFAULT_NUM_PERM) -> CMinHash:
-    # Backward-compatible alias used by older benchmark scripts/imports.
-    return cminhash_minhash(text, num_perm)
-
-
 def digest_tuple(minhash: object) -> tuple[int, ...]:
-    digest_u64_method = getattr(minhash, "digest_u64", None)
-    if digest_u64_method is not None and callable(digest_u64_method):
-        digest_values = digest_u64_method()
-    else:
-        digest_method = getattr(minhash, "digest", None)
-        if digest_method is None or not callable(digest_method):
-            raise TypeError(
-                "minhash object must expose a callable digest() or digest_u64() method"
-            )
-        digest_values = digest_method()
-    try:
-        return tuple(digest_values)
-    except TypeError as err:
-        raise TypeError("minhash digest() output is not iterable") from err
-
-
-def minhash_jaccard(left: object, right: object) -> float:
-    jaccard_method = getattr(left, "jaccard", None)
-    if jaccard_method is None or not callable(jaccard_method):
-        raise TypeError("minhash object must expose a callable jaccard() method")
-
-    value = jaccard_method(right)
-    if not isinstance(value, (int, float)):
-        raise TypeError("minhash jaccard() return value must be numeric")
-    return float(value)
+    if hasattr(minhash, "digest_u64"):
+        return tuple(minhash.digest_u64())
+    return tuple(minhash.digest())
 
 
 def calculate_optimal_num_bands(threshold: float, num_perm: int) -> int:
@@ -117,7 +90,6 @@ def benchmark_deduplication(
     kept_indices: set[int] = set()
 
     total_candidates = 0
-    rows_processed = 0
 
     iterator = tqdm(
         enumerate(texts),
@@ -143,12 +115,11 @@ def benchmark_deduplication(
             candidate_ids.update(band_tables[band_index].get(band_key, []))
 
         total_candidates += len(candidate_ids)
-        rows_processed += 1
 
         duplicate_found = False
         for candidate_id in candidate_ids:
             candidate_minhash = kept_minhashes[candidate_id]
-            if minhash_jaccard(minhash, candidate_minhash) >= final_jaccard_threshold:
+            if minhash.jaccard(candidate_minhash) >= final_jaccard_threshold:
                 duplicate_found = True
                 break
 
@@ -170,26 +141,12 @@ def benchmark_deduplication(
         "deduplicated_count": len(kept_indices),
         "deduplicated_indices": kept_indices,
         "total_candidates": total_candidates,
-        "avg_candidates_per_row": total_candidates / rows_processed
-        if rows_processed > 0
-        else 0.0,
+        "avg_candidates_per_row": total_candidates / len(texts) if texts else 0.0,
     }
 
 
 def materialize_texts(dataset: object, text_column: str) -> list[str]:
-    texts: list[str] = []
-    iterator = tqdm(
-        dataset,
-        total=len(dataset),
-        desc=f"Materializing '{text_column}'",
-        disable=True,
-    )
-    for row in iterator:
-        if text_column not in row:
-            raise KeyError(f"Column '{text_column}' was not found in dataset rows")
-        value = row[text_column]
-        texts.append(value if isinstance(value, str) else str(value))
-    return texts
+    return [str(row[text_column]) for row in dataset]
 
 
 def calculate_jaccard(set_a: set[int], set_b: set[int]) -> float:
@@ -203,8 +160,6 @@ def rotate_methods(
     methods: list[tuple[str, str, MinHashFactory]],
     rotation: int,
 ) -> list[tuple[str, str, MinHashFactory]]:
-    if not methods:
-        return methods
     offset = rotation % len(methods)
     return methods[offset:] + methods[:offset]
 
@@ -404,16 +359,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     print(f"Jaccard similarity between R-MinHash and C-MinHash: {r_vs_c_jaccard:.4f}")
 
     print("\n" + "=" * 60)
-    print("PERFORMANCE COMPARISON")
-    print("=" * 60)
-    print(f"Median Datasketch time: {datasketch_median:.2f}s")
-    print(f"Median R-MinHash time: {rminhash_median:.2f}s")
-    print(f"Median C-MinHash time: {cminhash_median:.2f}s")
-    print(f"R-MinHash speedup vs Datasketch (median): {speedup_r:.2f}x")
-    print(f"C-MinHash speedup vs Datasketch (median): {speedup_c:.2f}x")
-
-    print("\n" + "=" * 60)
-    print("DETAILED PERFORMANCE TABLE")
+    print("PERFORMANCE SUMMARY")
     print("=" * 60)
     print(f"{'Method':<20} {'Median Time (s)':<18} {'Speedup vs Datasketch':<25}")
     print("-" * 67)
@@ -434,7 +380,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             "final_jaccard_threshold": args.final_jaccard_threshold,
             "max_rows_requested": args.max_rows,
             "rows_used": len(texts),
-            "materialized_rows": True,
             "python_version": platform.python_version(),
             "platform": platform.platform(),
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
