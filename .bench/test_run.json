@@ -1,0 +1,74 @@
+{
+  "accuracy": {
+    "jaccard": {
+      "datasketch_vs_c_minhash": 0.9991940521045315,
+      "datasketch_vs_r_minhash": 0.9999194052104532,
+      "r_minhash_vs_c_minhash": 0.9991940439850495
+    },
+    "rows_removed": {
+      "c_minhash": 815,
+      "datasketch": 741,
+      "r_minhash": 743
+    },
+    "set_diff_counts": {
+      "ds_vs_c_symdiff_count": 80,
+      "ds_vs_r_symdiff_count": 8,
+      "r_vs_c_symdiff_count": 80
+    },
+    "set_equality": {
+      "datasketch_equals_r_minhash": false
+    }
+  },
+  "metadata": {
+    "dataset": "gretelai/synthetic_text_to_sql",
+    "final_jaccard_threshold": 0.95,
+    "lsh_threshold": 0.97,
+    "materialized_rows": true,
+    "max_rows_requested": null,
+    "num_bands": 2,
+    "num_perm": 128,
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "python_version": "3.9.6",
+    "revision": "740ab236e64503fba51be1101df7a1be83bf455d",
+    "rows_per_band": 64,
+    "rows_used": 100000,
+    "split": "train",
+    "text_column": "sql",
+    "timestamp_utc": "2026-02-14T13:30:08.984289+00:00"
+  },
+  "runs": [
+    {
+      "avg_candidates_per_row": {
+        "c_minhash": 0.00815,
+        "datasketch": 0.00743,
+        "r_minhash": 0.00745
+      },
+      "rows_remaining": {
+        "c_minhash": 99185,
+        "datasketch": 99259,
+        "r_minhash": 99257
+      },
+      "times_seconds": {
+        "c_minhash": 1.008453375000002,
+        "datasketch": 43.492764709,
+        "r_minhash": 0.8919172499999988
+      },
+      "total_candidates": {
+        "c_minhash": 815,
+        "datasketch": 743,
+        "r_minhash": 745
+      }
+    }
+  ],
+  "summary": {
+    "median_times_seconds": {
+      "c_minhash": 1.008453375000002,
+      "datasketch": 43.492764709,
+      "r_minhash": 0.8919172499999988
+    },
+    "speedup_vs_datasketch": {
+      "c_minhash": 43.12818597984256,
+      "r_minhash": 48.76322854950956
+    }
+  }
+}

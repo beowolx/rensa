@@ -46,10 +46,23 @@ pub struct RMinHash {
   num_perm: usize,
   seed: u64,
   hash_values: Vec<u32>,
+  #[serde(skip, default)]
   permutations: Vec<(u64, u64)>,
 }
 
 impl RMinHash {
+  fn build_permutations(num_perm: usize, seed: u64) -> Vec<(u64, u64)> {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    (0..num_perm)
+      .map(|_| {
+        // Ensure odd multiplier for better distribution
+        let a = rng.next_u64() | 1;
+        let b = rng.next_u64();
+        (a, b)
+      })
+      .collect()
+  }
+
   fn validate_num_perm(num_perm: usize) -> PyResult<()> {
     if num_perm == 0 {
       return Err(PyValueError::new_err("num_perm must be greater than 0"));
@@ -66,9 +79,10 @@ impl RMinHash {
         self.num_perm
       )));
     }
-    if self.permutations.len() != self.num_perm {
+    if !self.permutations.is_empty() && self.permutations.len() != self.num_perm
+    {
       return Err(PyValueError::new_err(format!(
-        "invalid RMinHash state: permutations length {} does not match num_perm {}",
+        "invalid RMinHash state: permutations length {} does not match num_perm {} (or be compacted to 0)",
         self.permutations.len(),
         self.num_perm
       )));
@@ -99,6 +113,12 @@ impl RMinHash {
   #[inline]
   pub(crate) const fn num_perm(&self) -> usize {
     self.num_perm
+  }
+
+  fn ensure_permutations(&mut self) {
+    if self.permutations.len() != self.num_perm {
+      self.permutations = Self::build_permutations(self.num_perm, self.seed);
+    }
   }
 
   #[inline]
@@ -170,25 +190,39 @@ impl RMinHash {
     }
   }
 
-  fn update_internal(&mut self, items: Vec<String>) {
+  fn update_internal<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.ensure_permutations();
     let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    // Process items in batches for better cache utilization
-    for chunk in items.chunks(HASH_BATCH_SIZE) {
-      hash_batch.clear();
-
-      // First pass: compute all hashes
-      for item in chunk {
-        hash_batch.push(calculate_hash_fast(item.as_bytes()));
+    for item in items {
+      hash_batch.push(calculate_hash_fast(item.as_ref().as_bytes()));
+      if hash_batch.len() == HASH_BATCH_SIZE {
+        self.apply_hash_batch(&hash_batch);
+        hash_batch.clear();
       }
+    }
 
+    if !hash_batch.is_empty() {
       self.apply_hash_batch(&hash_batch);
     }
   }
 
+  /// Updates the `MinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.update_internal(items);
+  }
+
   /// Updates the `MinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
-    self.update_internal(items);
+    self.update_iter(items);
   }
 }
 
@@ -200,25 +234,19 @@ impl RMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `num_perm` is zero.
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
-
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let permutations: Vec<(u64, u64)> = (0..num_perm)
-      .map(|_| {
-        // Ensure odd multiplier for better distribution
-        let a = rng.next_u64() | 1;
-        let b = rng.next_u64();
-        (a, b)
-      })
-      .collect();
 
     Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
-      permutations,
+      permutations: Self::build_permutations(num_perm, seed),
     })
   }
 
@@ -234,6 +262,7 @@ impl RMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
+    self.ensure_permutations();
     if let Some(single_hash) = hash_single_bufferlike(&items)? {
       self.apply_hash_batch(&[single_hash]);
       return Ok(());

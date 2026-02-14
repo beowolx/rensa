@@ -42,10 +42,17 @@ pub struct CMinHash {
   pi_c: u64,
   pi_d: u64,
   // Precomputed pi_c * k + pi_d for k in 0..num_perm
+  #[serde(skip, default)]
   pi_precomputed: Vec<u64>,
 }
 
 impl CMinHash {
+  fn build_pi_precomputed(num_perm: usize, pi_c: u64, pi_d: u64) -> Vec<u64> {
+    (0..num_perm)
+      .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
+      .collect()
+  }
+
   #[inline]
   pub(crate) const fn num_perm(&self) -> usize {
     self.num_perm
@@ -67,9 +74,11 @@ impl CMinHash {
         self.num_perm
       )));
     }
-    if self.pi_precomputed.len() != self.num_perm {
+    if !self.pi_precomputed.is_empty()
+      && self.pi_precomputed.len() != self.num_perm
+    {
       return Err(PyValueError::new_err(format!(
-        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {}",
+        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {} (or be compacted to 0)",
         self.pi_precomputed.len(),
         self.num_perm
       )));
@@ -95,6 +104,13 @@ impl CMinHash {
   #[inline]
   const fn sigma_transform(&self, hash: u64) -> u64 {
     self.sigma_a.wrapping_mul(hash).wrapping_add(self.sigma_b)
+  }
+
+  fn ensure_pi_precomputed(&mut self) {
+    if self.pi_precomputed.len() != self.num_perm {
+      self.pi_precomputed =
+        Self::build_pi_precomputed(self.num_perm, self.pi_c, self.pi_d);
+    }
   }
 
   #[inline]
@@ -172,24 +188,40 @@ impl CMinHash {
     }
   }
 
-  fn update_internal(&mut self, items: Vec<String>) {
+  fn update_internal<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.ensure_pi_precomputed();
     let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    for chunk in items.chunks(HASH_BATCH_SIZE) {
-      sigma_batch.clear();
-
-      for item in chunk {
-        let h = calculate_hash_fast(item.as_bytes());
-        sigma_batch.push(self.sigma_transform(h));
+    for item in items {
+      let h = calculate_hash_fast(item.as_ref().as_bytes());
+      sigma_batch.push(self.sigma_transform(h));
+      if sigma_batch.len() == HASH_BATCH_SIZE {
+        self.apply_sigma_batch(&sigma_batch);
+        sigma_batch.clear();
       }
+    }
 
+    if !sigma_batch.is_empty() {
       self.apply_sigma_batch(&sigma_batch);
     }
   }
 
+  /// Updates the `CMinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.update_internal(items);
+  }
+
   /// Updates the `CMinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
-    self.update_internal(items);
+    self.update_iter(items);
   }
 }
 
@@ -201,6 +233,10 @@ impl CMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `num_perm` is zero.
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
@@ -212,11 +248,6 @@ impl CMinHash {
     let pi_c = rng.next_u64() | 1;
     let pi_d = rng.next_u64();
 
-    // Precompute pi_c * k + pi_d for all k values
-    let pi_precomputed: Vec<u64> = (0..num_perm)
-      .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
-      .collect();
-
     Ok(Self {
       num_perm,
       seed,
@@ -225,7 +256,7 @@ impl CMinHash {
       sigma_b,
       pi_c,
       pi_d,
-      pi_precomputed,
+      pi_precomputed: Self::build_pi_precomputed(num_perm, pi_c, pi_d),
     })
   }
 
@@ -241,6 +272,7 @@ impl CMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
+    self.ensure_pi_precomputed();
     if let Some(single_hash) = hash_single_bufferlike(&items)? {
       self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
       return Ok(());
@@ -280,6 +312,10 @@ impl CMinHash {
   }
 
   /// Calculates the Jaccard similarity between this `CMinHash` and another.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when instances have incompatible parameters.
   #[inline]
   pub fn jaccard(&self, other: &Self) -> PyResult<f64> {
     self.ensure_compatible_for_jaccard(other)?;

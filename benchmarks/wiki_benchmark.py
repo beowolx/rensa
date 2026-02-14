@@ -19,12 +19,10 @@ def rensa_minhash(text, num_perm=128):
     return m
 
 
-def cminimash(text, num_perm=128):
+def cminhash_minhash(text, num_perm=128):
     m = CMinHash(num_perm=num_perm, seed=42)
     m.update(text.split())
     return m
-
-
 
 
 def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processing"):
@@ -35,11 +33,7 @@ def benchmark_deduplication(dataset, minhash_func, num_perm=128, desc="Processin
 
     for idx, example in tqdm(enumerate(dataset), total=len(dataset), desc=desc):
         minhash = minhash_func(example["text"], num_perm)
-
-        if isinstance(minhash, MinHash):
-            hash_tuple = tuple(minhash.digest())
-        else:
-            hash_tuple = tuple(minhash.digest())
+        hash_tuple = tuple(minhash.digest())
 
         if hash_tuple not in unique_hashes:
             unique_hashes.add(hash_tuple)
@@ -71,10 +65,9 @@ def run_benchmark():
     )
 
     print("\nRunning Rensa (C-MinHash) benchmark...")
-    cminimash_results = benchmark_deduplication(
-        wikipedia_dataset, cminimash, desc="Rensa C-MinHash"
+    cminhash_results = benchmark_deduplication(
+        wikipedia_dataset, cminhash_minhash, desc="Rensa C-MinHash"
     )
-
 
     print("\n" + "=" * 60)
     print("BENCHMARK RESULTS")
@@ -84,7 +77,7 @@ def run_benchmark():
     results = [
         ("Datasketch", datasketch_results),
         ("R-MinHash", rensa_results),
-        ("C-MinHash", cminimash_results),
+        ("C-MinHash", cminhash_results),
     ]
 
     for name, result in results:
@@ -99,7 +92,6 @@ def run_benchmark():
     print("ACCURACY COMPARISON")
     print("=" * 60)
 
-    # Compare results between methods
     for i in range(len(results)):
         for j in range(i + 1, len(results)):
             name1, result1 = results[i]
@@ -107,9 +99,10 @@ def run_benchmark():
             common = result1["deduplicated_indices"].intersection(
                 result2["deduplicated_indices"]
             )
-            jaccard = len(common) / len(
-                result1["deduplicated_indices"].union(result2["deduplicated_indices"])
+            union = result1["deduplicated_indices"].union(
+                result2["deduplicated_indices"]
             )
+            jaccard = len(common) / len(union) if union else 0.0
             print(f"Jaccard similarity between {name1} and {name2}: {jaccard:.4f}")
 
     print("\n" + "=" * 60)
@@ -124,8 +117,8 @@ def run_benchmark():
     print(f"\nFastest method: {fastest_name} ({fastest_time:.2f}s)")
 
     for i in range(1, len(sorted_results)):
-        name, time = sorted_results[i]
-        speedup = time / fastest_time
+        name, t = sorted_results[i]
+        speedup = t / fastest_time
         print(f"{fastest_name} is {speedup:.2f}x faster than {name}")
 
     print("\n" + "=" * 60)
