@@ -477,7 +477,7 @@ Benchmark dependencies are intentionally installed ad hoc for benchmark runs, th
 uv run --python .venv/bin/python maturin develop --release
 ```
 
-5. **Run the simple benchmark** (core MinHash deduplication on `gretelai/synthetic_text_to_sql`):
+5. **Run the simple benchmark** (threshold-based LSH-style deduplication on `gretelai/synthetic_text_to_sql`):
 
 ```bash
 uv run --python .venv/bin/python python benchmarks/simple_benchmark.py
@@ -490,7 +490,10 @@ uv run --python .venv/bin/python python benchmarks/simple_benchmark.py \
   --dataset gretelai/synthetic_text_to_sql \
   --split train \
   --revision 740ab236e64503fba51be1101df7a1be83bf455d \
+  --text-column sql \
   --num-perm 128 \
+  --lsh-threshold 0.97 \
+  --final-jaccard-threshold 0.95 \
   --warmup-runs 1 \
   --measured-runs 5 \
   --disable-progress \
@@ -502,7 +505,11 @@ Supported `simple_benchmark.py` flags:
 - `--dataset` (default: `gretelai/synthetic_text_to_sql`)
 - `--split` (default: `train`)
 - `--revision` (default: `740ab236e64503fba51be1101df7a1be83bf455d`)
+- `--text-column` (default: `sql`)
 - `--num-perm` (default: `128`)
+- `--lsh-threshold` (default: `0.97`, used for auto band selection)
+- `--num-bands` (optional fixed band count; must divide `num_perm`)
+- `--final-jaccard-threshold` (default: `0.95`)
 - `--warmup-runs` (default: `0`)
 - `--measured-runs` (default: `1`)
 - `--output-json` (optional path)
@@ -515,10 +522,10 @@ Supported `simple_benchmark.py` flags:
 uv run --python .venv/bin/python python benchmarks/validate_benchmark.py \
   --mode absolute \
   --head-json benchmark.json \
-  --min-speedup 10.0 \
-  --min-jaccard-ds-r 1.0 \
-  --min-jaccard-ds-c 0.999 \
-  --min-jaccard-r-c 0.999
+  --min-speedup 40.0 \
+  --min-jaccard-ds-r 0.999 \
+  --min-jaccard-ds-c 0.998 \
+  --min-jaccard-r-c 0.998
 ```
 
 ```bash
@@ -527,11 +534,11 @@ uv run --python .venv/bin/python python benchmarks/validate_benchmark.py \
   --mode compare \
   --head-json head.json \
   --base-json base.json \
-  --min-speedup 10.0 \
+  --min-speedup 40.0 \
   --max-slowdown-fraction 0.10 \
-  --min-jaccard-ds-r 1.0 \
-  --min-jaccard-ds-c 0.999 \
-  --min-jaccard-r-c 0.999
+  --min-jaccard-ds-r 0.999 \
+  --min-jaccard-ds-c 0.998 \
+  --min-jaccard-r-c 0.998
 ```
 
 7. **Run the advanced benchmark** (detailed comparison of RMinHash, CMinHash and Datasketch, uses the dataset `gretelai/synthetic_text_to_sql` with 100K rows):
