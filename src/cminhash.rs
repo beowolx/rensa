@@ -46,6 +46,12 @@ pub struct CMinHash {
 }
 
 impl CMinHash {
+  fn build_pi_precomputed(num_perm: usize, pi_c: u64, pi_d: u64) -> Vec<u64> {
+    (0..num_perm)
+      .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
+      .collect()
+  }
+
   #[inline]
   pub(crate) const fn num_perm(&self) -> usize {
     self.num_perm
@@ -67,9 +73,11 @@ impl CMinHash {
         self.num_perm
       )));
     }
-    if self.pi_precomputed.len() != self.num_perm {
+    if !self.pi_precomputed.is_empty()
+      && self.pi_precomputed.len() != self.num_perm
+    {
       return Err(PyValueError::new_err(format!(
-        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {}",
+        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {} (or be compacted to 0)",
         self.pi_precomputed.len(),
         self.num_perm
       )));
@@ -95,6 +103,17 @@ impl CMinHash {
   #[inline]
   const fn sigma_transform(&self, hash: u64) -> u64 {
     self.sigma_a.wrapping_mul(hash).wrapping_add(self.sigma_b)
+  }
+
+  fn ensure_pi_precomputed(&mut self) {
+    if self.pi_precomputed.len() != self.num_perm {
+      self.pi_precomputed =
+        Self::build_pi_precomputed(self.num_perm, self.pi_c, self.pi_d);
+    }
+  }
+
+  fn release_update_state(&mut self) {
+    self.pi_precomputed = Vec::new();
   }
 
   #[inline]
@@ -173,6 +192,7 @@ impl CMinHash {
   }
 
   fn update_internal(&mut self, items: Vec<String>) {
+    self.ensure_pi_precomputed();
     let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
     for chunk in items.chunks(HASH_BATCH_SIZE) {
@@ -185,6 +205,8 @@ impl CMinHash {
 
       self.apply_sigma_batch(&sigma_batch);
     }
+
+    self.release_update_state();
   }
 
   /// Updates the `CMinHash` with a new set of items from a vector of strings.
@@ -212,11 +234,6 @@ impl CMinHash {
     let pi_c = rng.next_u64() | 1;
     let pi_d = rng.next_u64();
 
-    // Precompute pi_c * k + pi_d for all k values
-    let pi_precomputed: Vec<u64> = (0..num_perm)
-      .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
-      .collect();
-
     Ok(Self {
       num_perm,
       seed,
@@ -225,7 +242,7 @@ impl CMinHash {
       sigma_b,
       pi_c,
       pi_d,
-      pi_precomputed,
+      pi_precomputed: Self::build_pi_precomputed(num_perm, pi_c, pi_d),
     })
   }
 
@@ -241,28 +258,35 @@ impl CMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
-    if let Some(single_hash) = hash_single_bufferlike(&items)? {
-      self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
-      return Ok(());
-    }
+    self.ensure_pi_precomputed();
 
-    let iterator = PyIterator::from_object(&items)?;
-    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
-
-    for item in iterator {
-      let hash = hash_token(&item?)?;
-      sigma_batch.push(self.sigma_transform(hash));
-      if sigma_batch.len() == HASH_BATCH_SIZE {
-        self.apply_sigma_batch(&sigma_batch);
-        sigma_batch.clear();
+    let result = (|| -> PyResult<()> {
+      if let Some(single_hash) = hash_single_bufferlike(&items)? {
+        self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
+        return Ok(());
       }
-    }
 
-    if !sigma_batch.is_empty() {
-      self.apply_sigma_batch(&sigma_batch);
-    }
+      let iterator = PyIterator::from_object(&items)?;
+      let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    Ok(())
+      for item in iterator {
+        let hash = hash_token(&item?)?;
+        sigma_batch.push(self.sigma_transform(hash));
+        if sigma_batch.len() == HASH_BATCH_SIZE {
+          self.apply_sigma_batch(&sigma_batch);
+          sigma_batch.clear();
+        }
+      }
+
+      if !sigma_batch.is_empty() {
+        self.apply_sigma_batch(&sigma_batch);
+      }
+
+      Ok(())
+    })();
+
+    self.release_update_state();
+    result
   }
 
   /// Returns the current `MinHash` digest as u32 values for compatibility.
