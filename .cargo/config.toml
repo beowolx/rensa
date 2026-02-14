@@ -1,0 +1,7 @@
+[target.'cfg(target_os = "macos")']
+rustflags = [
+  "-C",
+  "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/Library/Frameworks",
+  "-C",
+  "link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Library/Frameworks",
+]

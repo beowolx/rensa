@@ -46,6 +46,7 @@ pub struct RMinHash {
   num_perm: usize,
   seed: u64,
   hash_values: Vec<u32>,
+  #[serde(skip, default)]
   permutations: Vec<(u64, u64)>,
 }
 
@@ -120,10 +121,6 @@ impl RMinHash {
     }
   }
 
-  fn release_update_state(&mut self) {
-    self.permutations = Vec::new();
-  }
-
   #[inline]
   pub(crate) fn jaccard_unchecked(&self, other: &Self) -> f64 {
     let mut equal_count = 0usize;
@@ -193,28 +190,39 @@ impl RMinHash {
     }
   }
 
-  fn update_internal(&mut self, items: Vec<String>) {
+  fn update_internal<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
     self.ensure_permutations();
     let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    // Process items in batches for better cache utilization
-    for chunk in items.chunks(HASH_BATCH_SIZE) {
-      hash_batch.clear();
-
-      // First pass: compute all hashes
-      for item in chunk {
-        hash_batch.push(calculate_hash_fast(item.as_bytes()));
+    for item in items {
+      hash_batch.push(calculate_hash_fast(item.as_ref().as_bytes()));
+      if hash_batch.len() == HASH_BATCH_SIZE {
+        self.apply_hash_batch(&hash_batch);
+        hash_batch.clear();
       }
-
-      self.apply_hash_batch(&hash_batch);
     }
 
-    self.release_update_state();
+    if !hash_batch.is_empty() {
+      self.apply_hash_batch(&hash_batch);
+    }
+  }
+
+  /// Updates the `MinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.update_internal(items);
   }
 
   /// Updates the `MinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
-    self.update_internal(items);
+    self.update_iter(items);
   }
 }
 
@@ -226,6 +234,10 @@ impl RMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `num_perm` is zero.
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
@@ -251,33 +263,27 @@ impl RMinHash {
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
     self.ensure_permutations();
+    if let Some(single_hash) = hash_single_bufferlike(&items)? {
+      self.apply_hash_batch(&[single_hash]);
+      return Ok(());
+    }
 
-    let result = (|| -> PyResult<()> {
-      if let Some(single_hash) = hash_single_bufferlike(&items)? {
-        self.apply_hash_batch(&[single_hash]);
-        return Ok(());
-      }
+    let iterator = PyIterator::from_object(&items)?;
+    let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-      let iterator = PyIterator::from_object(&items)?;
-      let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
-
-      for item in iterator {
-        hash_batch.push(hash_token(&item?)?);
-        if hash_batch.len() == HASH_BATCH_SIZE {
-          self.apply_hash_batch(&hash_batch);
-          hash_batch.clear();
-        }
-      }
-
-      if !hash_batch.is_empty() {
+    for item in iterator {
+      hash_batch.push(hash_token(&item?)?);
+      if hash_batch.len() == HASH_BATCH_SIZE {
         self.apply_hash_batch(&hash_batch);
+        hash_batch.clear();
       }
+    }
 
-      Ok(())
-    })();
+    if !hash_batch.is_empty() {
+      self.apply_hash_batch(&hash_batch);
+    }
 
-    self.release_update_state();
-    result
+    Ok(())
   }
 
   /// Returns the current `MinHash` digest.

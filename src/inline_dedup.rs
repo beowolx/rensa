@@ -46,6 +46,9 @@ impl RMinHashDeduplicator {
 impl RMinHashDeduplicator {
   #[new]
   #[pyo3(signature = (threshold, num_perm, use_lsh, num_bands=None))]
+  /// # Errors
+  ///
+  /// Returns an error when `threshold`, `num_perm`, or LSH parameters are invalid.
   pub fn new(
     threshold: f64,
     num_perm: usize,
@@ -96,6 +99,10 @@ impl RMinHashDeduplicator {
   }
 
   /// Add a new item to the deduplicator. Returns true if added (not a duplicate), false if duplicate.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `RMinHash` has an incompatible configuration.
   pub fn add(&mut self, key: String, minhash: &RMinHash) -> PyResult<bool> {
     self.validate_input_minhash(minhash)?;
     if self.is_duplicate(&key, minhash)? {
@@ -117,6 +124,10 @@ impl RMinHashDeduplicator {
   }
 
   /// Check if an item is a duplicate without adding it
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `RMinHash` has an incompatible configuration.
   pub fn is_duplicate(&self, key: &str, minhash: &RMinHash) -> PyResult<bool> {
     self.validate_input_minhash(minhash)?;
     if self.key_to_id.contains_key(key) {
@@ -146,6 +157,10 @@ impl RMinHashDeduplicator {
   }
 
   /// Get duplicate candidates for a given `MinHash`
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `RMinHash` has an incompatible configuration.
   pub fn get_duplicates(&self, minhash: &RMinHash) -> PyResult<Vec<String>> {
     self.validate_input_minhash(minhash)?;
     let mut duplicates = Vec::new();
@@ -238,6 +253,9 @@ impl CMinHashDeduplicator {
 #[pymethods]
 impl CMinHashDeduplicator {
   #[new]
+  /// # Errors
+  ///
+  /// Returns an error when `threshold` is not in the inclusive range `0.0..=1.0`.
   pub fn new(threshold: f64) -> PyResult<Self> {
     validate_threshold(threshold)?;
 
@@ -248,6 +266,9 @@ impl CMinHashDeduplicator {
     })
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `CMinHash` has an incompatible configuration.
   pub fn add(&mut self, key: String, minhash: &CMinHash) -> PyResult<bool> {
     self.validate_input_minhash(minhash)?;
     if self.is_duplicate(&key, minhash)? {
@@ -261,6 +282,9 @@ impl CMinHashDeduplicator {
     Ok(true)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `CMinHash` has an incompatible configuration.
   pub fn is_duplicate(&self, key: &str, minhash: &CMinHash) -> PyResult<bool> {
     self.validate_input_minhash(minhash)?;
     if self.existing_signatures.contains_key(key) {
@@ -276,6 +300,9 @@ impl CMinHashDeduplicator {
     Ok(false)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the supplied `CMinHash` has an incompatible configuration.
   pub fn get_duplicates(&self, minhash: &CMinHash) -> PyResult<Vec<String>> {
     self.validate_input_minhash(minhash)?;
     let mut duplicates = Vec::new();

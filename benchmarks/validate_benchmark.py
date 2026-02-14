@@ -32,30 +32,30 @@ def load_json(path: Path) -> dict[str, object]:
         return json.load(handle)
 
 
-def extract_float(payload: dict[str, object], path: tuple[str, ...]) -> float:
+def _extract_value(payload: dict[str, object], path: tuple[str, ...]) -> object:
     current: object = payload
     for key in path:
         if not isinstance(current, dict) or key not in current:
             dotted = ".".join(path)
             raise KeyError(f"Missing key: {dotted}")
         current = current[key]
-    if not isinstance(current, (int, float)):
+    return current
+
+
+def extract_float(payload: dict[str, object], path: tuple[str, ...]) -> float:
+    value = _extract_value(payload, path)
+    if not isinstance(value, (int, float)):
         dotted = ".".join(path)
-        raise TypeError(f"Expected number at {dotted}, found {type(current).__name__}")
-    return float(current)
+        raise TypeError(f"Expected number at {dotted}, found {type(value).__name__}")
+    return float(value)
 
 
 def extract_bool(payload: dict[str, object], path: tuple[str, ...]) -> bool:
-    current: object = payload
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            dotted = ".".join(path)
-            raise KeyError(f"Missing key: {dotted}")
-        current = current[key]
-    if not isinstance(current, bool):
+    value = _extract_value(payload, path)
+    if not isinstance(value, bool):
         dotted = ".".join(path)
-        raise TypeError(f"Expected bool at {dotted}, found {type(current).__name__}")
-    return current
+        raise TypeError(f"Expected bool at {dotted}, found {type(value).__name__}")
+    return value
 
 
 def format_table_line(check: str, actual: str, expected: str, status: str) -> str:
@@ -216,9 +216,7 @@ def main() -> None:
     )
 
     if args.mode == "compare":
-        base_payload = load_json(args.base_json) if args.base_json is not None else None
-        if base_payload is None:
-            raise ValueError("Base benchmark payload not provided")
+        base_payload = load_json(args.base_json)
         checks.extend(
             validate_compare(
                 head=head_payload,

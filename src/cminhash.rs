@@ -42,6 +42,7 @@ pub struct CMinHash {
   pi_c: u64,
   pi_d: u64,
   // Precomputed pi_c * k + pi_d for k in 0..num_perm
+  #[serde(skip, default)]
   pi_precomputed: Vec<u64>,
 }
 
@@ -110,10 +111,6 @@ impl CMinHash {
       self.pi_precomputed =
         Self::build_pi_precomputed(self.num_perm, self.pi_c, self.pi_d);
     }
-  }
-
-  fn release_update_state(&mut self) {
-    self.pi_precomputed = Vec::new();
   }
 
   #[inline]
@@ -191,27 +188,40 @@ impl CMinHash {
     }
   }
 
-  fn update_internal(&mut self, items: Vec<String>) {
+  fn update_internal<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
     self.ensure_pi_precomputed();
     let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    for chunk in items.chunks(HASH_BATCH_SIZE) {
-      sigma_batch.clear();
-
-      for item in chunk {
-        let h = calculate_hash_fast(item.as_bytes());
-        sigma_batch.push(self.sigma_transform(h));
+    for item in items {
+      let h = calculate_hash_fast(item.as_ref().as_bytes());
+      sigma_batch.push(self.sigma_transform(h));
+      if sigma_batch.len() == HASH_BATCH_SIZE {
+        self.apply_sigma_batch(&sigma_batch);
+        sigma_batch.clear();
       }
-
-      self.apply_sigma_batch(&sigma_batch);
     }
 
-    self.release_update_state();
+    if !sigma_batch.is_empty() {
+      self.apply_sigma_batch(&sigma_batch);
+    }
+  }
+
+  /// Updates the `CMinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.update_internal(items);
   }
 
   /// Updates the `CMinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
-    self.update_internal(items);
+    self.update_iter(items);
   }
 }
 
@@ -223,6 +233,10 @@ impl CMinHash {
   ///
   /// * `num_perm` - The number of permutations to use in the `MinHash` algorithm.
   /// * `seed` - A seed value for the random number generator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `num_perm` is zero.
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
@@ -259,34 +273,28 @@ impl CMinHash {
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
     self.ensure_pi_precomputed();
+    if let Some(single_hash) = hash_single_bufferlike(&items)? {
+      self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
+      return Ok(());
+    }
 
-    let result = (|| -> PyResult<()> {
-      if let Some(single_hash) = hash_single_bufferlike(&items)? {
-        self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
-        return Ok(());
-      }
+    let iterator = PyIterator::from_object(&items)?;
+    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-      let iterator = PyIterator::from_object(&items)?;
-      let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
-
-      for item in iterator {
-        let hash = hash_token(&item?)?;
-        sigma_batch.push(self.sigma_transform(hash));
-        if sigma_batch.len() == HASH_BATCH_SIZE {
-          self.apply_sigma_batch(&sigma_batch);
-          sigma_batch.clear();
-        }
-      }
-
-      if !sigma_batch.is_empty() {
+    for item in iterator {
+      let hash = hash_token(&item?)?;
+      sigma_batch.push(self.sigma_transform(hash));
+      if sigma_batch.len() == HASH_BATCH_SIZE {
         self.apply_sigma_batch(&sigma_batch);
+        sigma_batch.clear();
       }
+    }
 
-      Ok(())
-    })();
+    if !sigma_batch.is_empty() {
+      self.apply_sigma_batch(&sigma_batch);
+    }
 
-    self.release_update_state();
-    result
+    Ok(())
   }
 
   /// Returns the current `MinHash` digest as u32 values for compatibility.
@@ -304,6 +312,10 @@ impl CMinHash {
   }
 
   /// Calculates the Jaccard similarity between this `CMinHash` and another.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when instances have incompatible parameters.
   #[inline]
   pub fn jaccard(&self, other: &Self) -> PyResult<f64> {
     self.ensure_compatible_for_jaccard(other)?;
