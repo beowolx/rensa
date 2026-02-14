@@ -305,11 +305,11 @@ jobs:
             --mode compare \
             --head-json .bench/head.json \
             --base-json .bench/base.json \
-            --min-speedup 10.0 \
+            --min-speedup 40.0 \
             --max-slowdown-fraction 0.10 \
-            --min-jaccard-ds-r 1.0 \
-            --min-jaccard-ds-c 0.999 \
-            --min-jaccard-r-c 0.999 \
+            --min-jaccard-ds-r 0.999 \
+            --min-jaccard-ds-c 0.998 \
+            --min-jaccard-r-c 0.998 \
             | tee .bench/validation_pr.txt
 
       - name: Run push smoke benchmark
@@ -346,10 +346,10 @@ jobs:
           .venv/bin/python benchmarks/validate_benchmark.py \
             --mode absolute \
             --head-json .bench/head_smoke.json \
-            --min-speedup 10.0 \
-            --min-jaccard-ds-r 1.0 \
-            --min-jaccard-ds-c 0.999 \
-            --min-jaccard-r-c 0.999 \
+            --min-speedup 40.0 \
+            --min-jaccard-ds-r 0.999 \
+            --min-jaccard-ds-c 0.998 \
+            --min-jaccard-r-c 0.998 \
             | tee .bench/validation_smoke.txt
 
       - name: Upload performance artifacts

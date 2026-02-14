@@ -184,6 +184,10 @@ impl RMinHashLSH {
   /// * `threshold` - The similarity threshold for considering items as similar.
   /// * `num_perm` - The number of permutations used in the `MinHash` algorithm.
   /// * `num_bands` - The number of bands for the LSH algorithm.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when threshold or banding parameters are invalid.
   #[new]
   pub fn new(
     threshold: f64,
@@ -280,6 +284,10 @@ impl RMinHashLSH {
   /// # Returns
   ///
   /// A boolean indicating whether the `MinHashes` are considered similar.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `MinHash` instances are incompatible.
   pub fn is_similar(
     &self,
     minhash1: &RMinHash,
