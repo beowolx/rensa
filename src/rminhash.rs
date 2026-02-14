@@ -50,6 +50,18 @@ pub struct RMinHash {
 }
 
 impl RMinHash {
+  fn build_permutations(num_perm: usize, seed: u64) -> Vec<(u64, u64)> {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    (0..num_perm)
+      .map(|_| {
+        // Ensure odd multiplier for better distribution
+        let a = rng.next_u64() | 1;
+        let b = rng.next_u64();
+        (a, b)
+      })
+      .collect()
+  }
+
   fn validate_num_perm(num_perm: usize) -> PyResult<()> {
     if num_perm == 0 {
       return Err(PyValueError::new_err("num_perm must be greater than 0"));
@@ -66,9 +78,10 @@ impl RMinHash {
         self.num_perm
       )));
     }
-    if self.permutations.len() != self.num_perm {
+    if !self.permutations.is_empty() && self.permutations.len() != self.num_perm
+    {
       return Err(PyValueError::new_err(format!(
-        "invalid RMinHash state: permutations length {} does not match num_perm {}",
+        "invalid RMinHash state: permutations length {} does not match num_perm {} (or be compacted to 0)",
         self.permutations.len(),
         self.num_perm
       )));
@@ -99,6 +112,16 @@ impl RMinHash {
   #[inline]
   pub(crate) const fn num_perm(&self) -> usize {
     self.num_perm
+  }
+
+  fn ensure_permutations(&mut self) {
+    if self.permutations.len() != self.num_perm {
+      self.permutations = Self::build_permutations(self.num_perm, self.seed);
+    }
+  }
+
+  fn release_update_state(&mut self) {
+    self.permutations = Vec::new();
   }
 
   #[inline]
@@ -171,6 +194,7 @@ impl RMinHash {
   }
 
   fn update_internal(&mut self, items: Vec<String>) {
+    self.ensure_permutations();
     let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
     // Process items in batches for better cache utilization
@@ -184,6 +208,8 @@ impl RMinHash {
 
       self.apply_hash_batch(&hash_batch);
     }
+
+    self.release_update_state();
   }
 
   /// Updates the `MinHash` with a new set of items from a vector of strings.
@@ -204,21 +230,11 @@ impl RMinHash {
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let permutations: Vec<(u64, u64)> = (0..num_perm)
-      .map(|_| {
-        // Ensure odd multiplier for better distribution
-        let a = rng.next_u64() | 1;
-        let b = rng.next_u64();
-        (a, b)
-      })
-      .collect();
-
     Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
-      permutations,
+      permutations: Self::build_permutations(num_perm, seed),
     })
   }
 
@@ -234,27 +250,34 @@ impl RMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
-    if let Some(single_hash) = hash_single_bufferlike(&items)? {
-      self.apply_hash_batch(&[single_hash]);
-      return Ok(());
-    }
+    self.ensure_permutations();
 
-    let iterator = PyIterator::from_object(&items)?;
-    let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
-
-    for item in iterator {
-      hash_batch.push(hash_token(&item?)?);
-      if hash_batch.len() == HASH_BATCH_SIZE {
-        self.apply_hash_batch(&hash_batch);
-        hash_batch.clear();
+    let result = (|| -> PyResult<()> {
+      if let Some(single_hash) = hash_single_bufferlike(&items)? {
+        self.apply_hash_batch(&[single_hash]);
+        return Ok(());
       }
-    }
 
-    if !hash_batch.is_empty() {
-      self.apply_hash_batch(&hash_batch);
-    }
+      let iterator = PyIterator::from_object(&items)?;
+      let mut hash_batch = Vec::with_capacity(HASH_BATCH_SIZE);
 
-    Ok(())
+      for item in iterator {
+        hash_batch.push(hash_token(&item?)?);
+        if hash_batch.len() == HASH_BATCH_SIZE {
+          self.apply_hash_batch(&hash_batch);
+          hash_batch.clear();
+        }
+      }
+
+      if !hash_batch.is_empty() {
+        self.apply_hash_batch(&hash_batch);
+      }
+
+      Ok(())
+    })();
+
+    self.release_update_state();
+    result
   }
 
   /// Returns the current `MinHash` digest.
