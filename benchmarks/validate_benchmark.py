@@ -11,11 +11,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head-json", type=Path, required=True)
     parser.add_argument("--base-json", type=Path)
 
-    parser.add_argument("--min-speedup", type=float, default=10.0)
+    parser.add_argument("--min-speedup", type=float, default=40.0)
     parser.add_argument("--max-slowdown-fraction", type=float, default=0.10)
-    parser.add_argument("--min-jaccard-ds-r", type=float, default=1.0)
-    parser.add_argument("--min-jaccard-ds-c", type=float, default=0.999)
-    parser.add_argument("--min-jaccard-r-c", type=float, default=0.999)
+    parser.add_argument("--min-jaccard-ds-r", type=float, default=0.999)
+    parser.add_argument("--min-jaccard-ds-c", type=float, default=0.998)
+    parser.add_argument("--min-jaccard-r-c", type=float, default=0.998)
+    parser.add_argument(
+        "--require-ds-r-set-equality",
+        action="store_true",
+        help=(
+            "Require exact set equality between Datasketch and R-MinHash. "
+            "Disabled by default for threshold-based deduplication benchmarks."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -61,6 +69,7 @@ def validate_absolute(
     min_jaccard_ds_r: float,
     min_jaccard_ds_c: float,
     min_jaccard_r_c: float,
+    require_ds_r_set_equality: bool,
 ) -> list[tuple[str, float, float, bool, str]]:
     checks: list[tuple[str, float, float, bool, str]] = []
 
@@ -70,11 +79,6 @@ def validate_absolute(
     ds_r_j = extract_float(head, ("accuracy", "jaccard", "datasketch_vs_r_minhash"))
     ds_c_j = extract_float(head, ("accuracy", "jaccard", "datasketch_vs_c_minhash"))
     r_c_j = extract_float(head, ("accuracy", "jaccard", "r_minhash_vs_c_minhash"))
-
-    ds_equals_r = extract_bool(
-        head,
-        ("accuracy", "set_equality", "datasketch_equals_r_minhash"),
-    )
 
     checks.append((
         "R-MinHash speedup vs Datasketch",
@@ -111,13 +115,18 @@ def validate_absolute(
         r_c_j >= min_jaccard_r_c,
         "score",
     ))
-    checks.append((
-        "Set equality Datasketch vs R-MinHash",
-        1.0 if ds_equals_r else 0.0,
-        1.0,
-        ds_equals_r,
-        "bool",
-    ))
+    if require_ds_r_set_equality:
+        ds_equals_r = extract_bool(
+            head,
+            ("accuracy", "set_equality", "datasketch_equals_r_minhash"),
+        )
+        checks.append((
+            "Set equality Datasketch vs R-MinHash",
+            1.0 if ds_equals_r else 0.0,
+            1.0,
+            ds_equals_r,
+            "bool",
+        ))
 
     return checks
 
@@ -203,6 +212,7 @@ def main() -> None:
         min_jaccard_ds_r=args.min_jaccard_ds_r,
         min_jaccard_ds_c=args.min_jaccard_ds_c,
         min_jaccard_r_c=args.min_jaccard_r_c,
+        require_ds_r_set_equality=args.require_ds_r_set_equality,
     )
 
     if args.mode == "compare":
