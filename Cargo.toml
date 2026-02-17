@@ -30,6 +30,7 @@ serde = { version = "1.0", features = ["derive"] }
 rand_xoshiro = "0.7.0"
 rand_core = "0.9.3"
 mimalloc = "0.1.48"
+rayon = "1.11.0"
 
 [profile.release]
 lto = "fat"

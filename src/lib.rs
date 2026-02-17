@@ -15,6 +15,7 @@ mod inline_dedup;
 mod lsh;
 mod py_input;
 mod rminhash;
+mod simd;
 mod utils;
 
 pub use cminhash::CMinHash;
@@ -22,6 +23,7 @@ pub use inline_dedup::CMinHashDeduplicator;
 pub use inline_dedup::RMinHashDeduplicator;
 pub use lsh::RMinHashLSH;
 pub use rminhash::RMinHash;
+pub use rminhash::RMinHashDigestMatrix;
 
 use pyo3::prelude::*;
 
@@ -32,6 +34,7 @@ use pyo3::prelude::*;
 #[pymodule(gil_used = false)]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
+  m.add_class::<RMinHashDigestMatrix>()?;
   m.add_class::<CMinHash>()?;
   m.add_class::<RMinHashLSH>()?;
   m.add_class::<RMinHashDeduplicator>()?;
