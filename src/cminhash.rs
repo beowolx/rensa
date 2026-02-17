@@ -15,11 +15,14 @@
 //! The `update` method processes items in batches to improve cache utilization,
 //! and the Jaccard calculation is optimized using chunked operations.
 
-use crate::py_input::{hash_single_bufferlike, hash_token};
+use crate::py_input::{
+  extend_prehashed_token_values_from_document,
+  extend_token_hashes_from_document,
+};
 use crate::utils::calculate_hash_fast;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyIterator};
+use pyo3::types::{PyBytes, PyIterator, PyList, PyTuple, PyType};
 use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
@@ -61,6 +64,44 @@ impl CMinHash {
   fn validate_num_perm(num_perm: usize) -> PyResult<()> {
     if num_perm == 0 {
       return Err(PyValueError::new_err("num_perm must be greater than 0"));
+    }
+    Ok(())
+  }
+
+  fn token_sets_capacity(token_sets: &Bound<'_, PyAny>) -> usize {
+    if let Ok(py_list) = token_sets.cast::<PyList>() {
+      return py_list.len();
+    }
+    if let Ok(py_tuple) = token_sets.cast::<PyTuple>() {
+      return py_tuple.len();
+    }
+    token_sets.len().unwrap_or_default()
+  }
+
+  fn for_each_document<F>(
+    token_sets: &Bound<'_, PyAny>,
+    mut visitor: F,
+  ) -> PyResult<()>
+  where
+    F: FnMut(Bound<'_, PyAny>) -> PyResult<()>,
+  {
+    if let Ok(py_list) = token_sets.cast::<PyList>() {
+      for document in py_list.iter() {
+        visitor(document)?;
+      }
+      return Ok(());
+    }
+
+    if let Ok(py_tuple) = token_sets.cast::<PyTuple>() {
+      for document in py_tuple.iter() {
+        visitor(document)?;
+      }
+      return Ok(());
+    }
+
+    let iterator = PyIterator::from_object(token_sets)?;
+    for document in iterator {
+      visitor(document?)?;
     }
     Ok(())
   }
@@ -117,13 +158,10 @@ impl CMinHash {
   pub(crate) fn jaccard_unchecked(&self, other: &Self) -> f64 {
     let mut equal_count = 0usize;
 
-    // Process in chunks of 8 for CPU-friendly operations
     let chunks_a = self.hash_values.chunks_exact(8);
     let chunks_b = other.hash_values.chunks_exact(8);
 
-    // Process complete chunks
     for (chunk_a, chunk_b) in chunks_a.zip(chunks_b) {
-      // Unroll manually for better performance
       equal_count += usize::from(chunk_a[0] == chunk_b[0]);
       equal_count += usize::from(chunk_a[1] == chunk_b[1]);
       equal_count += usize::from(chunk_a[2] == chunk_b[2]);
@@ -134,7 +172,6 @@ impl CMinHash {
       equal_count += usize::from(chunk_a[7] == chunk_b[7]);
     }
 
-    // Handle remainder
     let remainder_start = (self.num_perm / 8) * 8;
     if remainder_start < self.num_perm {
       equal_count += self.hash_values[remainder_start..]
@@ -147,18 +184,21 @@ impl CMinHash {
     equal_count as f64 / self.num_perm as f64
   }
 
-  fn apply_sigma_batch(&mut self, sigma_batch: &[u64]) {
-    // Update hash values in blocks of 16 for better vectorization
-    let chunks_iter = self.hash_values.chunks_exact_mut(16);
-    let pi_chunks_iter = self.pi_precomputed.chunks_exact(16);
+  fn apply_sigma_batch_to_values(
+    hash_values: &mut [u64],
+    pi_precomputed: &[u64],
+    pi_c: u64,
+    sigma_batch: &[u64],
+  ) {
+    let chunks_iter = hash_values.chunks_exact_mut(16);
+    let pi_chunks_iter = pi_precomputed.chunks_exact(16);
 
-    // Process complete chunks of 16
     for (hash_chunk, pi_chunk) in chunks_iter.zip(pi_chunks_iter) {
       let mut current = [0u64; 16];
       current.copy_from_slice(hash_chunk);
 
       for &sigma_h in sigma_batch {
-        let base = self.pi_c.wrapping_mul(sigma_h);
+        let base = pi_c.wrapping_mul(sigma_h);
 
         for i in 0..16 {
           let pi_value = base.wrapping_add(pi_chunk[i]);
@@ -169,14 +209,14 @@ impl CMinHash {
       hash_chunk.copy_from_slice(&current);
     }
 
-    // Handle remainder (elements not in chunks of 16)
-    let remainder_start = (self.num_perm / 16) * 16;
-    if remainder_start < self.num_perm {
-      let hash_remainder = &mut self.hash_values[remainder_start..];
-      let pi_remainder = &self.pi_precomputed[remainder_start..];
+    let num_perm = hash_values.len();
+    let remainder_start = (num_perm / 16) * 16;
+    if remainder_start < num_perm {
+      let hash_remainder = &mut hash_values[remainder_start..];
+      let pi_remainder = &pi_precomputed[remainder_start..];
 
       for &sigma_h in sigma_batch {
-        let base = self.pi_c.wrapping_mul(sigma_h);
+        let base = pi_c.wrapping_mul(sigma_h);
 
         for (hash_val, &pi_val) in
           hash_remainder.iter_mut().zip(pi_remainder.iter())
@@ -186,6 +226,75 @@ impl CMinHash {
         }
       }
     }
+  }
+
+  fn apply_sigma_batch(&mut self, sigma_batch: &[u64]) {
+    Self::apply_sigma_batch_to_values(
+      &mut self.hash_values,
+      &self.pi_precomputed,
+      self.pi_c,
+      sigma_batch,
+    );
+  }
+
+  fn apply_token_hashes_to_values(
+    hash_values: &mut [u64],
+    token_hashes: &[u64],
+    sigma_a: u64,
+    sigma_b: u64,
+    pi_c: u64,
+    pi_precomputed: &[u64],
+  ) {
+    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
+    for &token_hash in token_hashes {
+      sigma_batch.push(sigma_a.wrapping_mul(token_hash).wrapping_add(sigma_b));
+      if sigma_batch.len() == HASH_BATCH_SIZE {
+        Self::apply_sigma_batch_to_values(
+          hash_values,
+          pi_precomputed,
+          pi_c,
+          &sigma_batch,
+        );
+        sigma_batch.clear();
+      }
+    }
+    if !sigma_batch.is_empty() {
+      Self::apply_sigma_batch_to_values(
+        hash_values,
+        pi_precomputed,
+        pi_c,
+        &sigma_batch,
+      );
+    }
+  }
+
+  pub(crate) fn compact_from_template(template: &Self) -> Self {
+    Self {
+      num_perm: template.num_perm,
+      seed: template.seed,
+      hash_values: vec![u64::MAX; template.num_perm],
+      sigma_a: template.sigma_a,
+      sigma_b: template.sigma_b,
+      pi_c: template.pi_c,
+      pi_d: template.pi_d,
+      pi_precomputed: Vec::new(),
+    }
+  }
+
+  pub(crate) fn reset_from_token_hashes_with_template(
+    &mut self,
+    token_hashes: &[u64],
+    template: &Self,
+  ) {
+    self.hash_values.fill(u64::MAX);
+    Self::apply_token_hashes_to_values(
+      &mut self.hash_values,
+      token_hashes,
+      template.sigma_a,
+      template.sigma_b,
+      template.pi_c,
+      &template.pi_precomputed,
+    );
   }
 
   fn update_internal<I, S>(&mut self, items: I)
@@ -208,6 +317,18 @@ impl CMinHash {
     if !sigma_batch.is_empty() {
       self.apply_sigma_batch(&sigma_batch);
     }
+  }
+
+  fn update_hashed_tokens(&mut self, token_hashes: &[u64]) {
+    self.ensure_pi_precomputed();
+    Self::apply_token_hashes_to_values(
+      &mut self.hash_values,
+      token_hashes,
+      self.sigma_a,
+      self.sigma_b,
+      self.pi_c,
+      &self.pi_precomputed,
+    );
   }
 
   /// Updates the `CMinHash` with items from any iterable of string-like values.
@@ -260,6 +381,182 @@ impl CMinHash {
     })
   }
 
+  /// Creates `CMinHash` objects from an iterable of token iterables.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero, the outer input is not iterable,
+  /// or any token has an unsupported type.
+  #[classmethod]
+  #[pyo3(signature = (token_sets, num_perm, seed))]
+  pub fn from_token_sets(
+    _cls: &Bound<'_, PyType>,
+    token_sets: Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<Vec<Self>> {
+    Self::validate_num_perm(num_perm)?;
+
+    let capacity = Self::token_sets_capacity(&token_sets);
+    let mut minhashes = Vec::with_capacity(capacity);
+    let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
+    let template = Self::new(num_perm, seed)?;
+    let mut hash_values = vec![u64::MAX; num_perm];
+
+    Self::for_each_document(&token_sets, |document| {
+      token_hashes.clear();
+      extend_token_hashes_from_document(&document, &mut token_hashes)?;
+      hash_values.fill(u64::MAX);
+      Self::apply_token_hashes_to_values(
+        &mut hash_values,
+        &token_hashes,
+        template.sigma_a,
+        template.sigma_b,
+        template.pi_c,
+        &template.pi_precomputed,
+      );
+      minhashes.push(Self {
+        num_perm,
+        seed,
+        hash_values: hash_values.clone(),
+        sigma_a: template.sigma_a,
+        sigma_b: template.sigma_b,
+        pi_c: template.pi_c,
+        pi_d: template.pi_d,
+        pi_precomputed: Vec::new(),
+      });
+      Ok(())
+    })?;
+
+    Ok(minhashes)
+  }
+
+  /// Computes `CMinHash` 32-bit digests from an iterable of token iterables.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero, the outer input is not iterable,
+  /// or any token has an unsupported type.
+  #[classmethod]
+  #[pyo3(signature = (token_sets, num_perm, seed))]
+  pub fn digests_from_token_sets(
+    _cls: &Bound<'_, PyType>,
+    token_sets: Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<Vec<Vec<u32>>> {
+    Self::validate_num_perm(num_perm)?;
+
+    let capacity = Self::token_sets_capacity(&token_sets);
+    let mut digests = Vec::with_capacity(capacity);
+    let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
+    let template = Self::new(num_perm, seed)?;
+    let mut hash_values = vec![u64::MAX; num_perm];
+
+    Self::for_each_document(&token_sets, |document| {
+      token_hashes.clear();
+      extend_token_hashes_from_document(&document, &mut token_hashes)?;
+      hash_values.fill(u64::MAX);
+      Self::apply_token_hashes_to_values(
+        &mut hash_values,
+        &token_hashes,
+        template.sigma_a,
+        template.sigma_b,
+        template.pi_c,
+        &template.pi_precomputed,
+      );
+      digests.push(hash_values.iter().map(|&v| (v >> 32) as u32).collect());
+      Ok(())
+    })?;
+
+    Ok(digests)
+  }
+
+  /// Computes `CMinHash` 64-bit digests from an iterable of token iterables.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero, the outer input is not iterable,
+  /// or any token has an unsupported type.
+  #[classmethod]
+  #[pyo3(signature = (token_sets, num_perm, seed))]
+  pub fn digests64_from_token_sets(
+    _cls: &Bound<'_, PyType>,
+    token_sets: Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<Vec<Vec<u64>>> {
+    Self::validate_num_perm(num_perm)?;
+
+    let capacity = Self::token_sets_capacity(&token_sets);
+    let mut digests = Vec::with_capacity(capacity);
+    let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
+    let template = Self::new(num_perm, seed)?;
+    let mut hash_values = vec![u64::MAX; num_perm];
+
+    Self::for_each_document(&token_sets, |document| {
+      token_hashes.clear();
+      extend_token_hashes_from_document(&document, &mut token_hashes)?;
+      hash_values.fill(u64::MAX);
+      Self::apply_token_hashes_to_values(
+        &mut hash_values,
+        &token_hashes,
+        template.sigma_a,
+        template.sigma_b,
+        template.pi_c,
+        &template.pi_precomputed,
+      );
+      digests.push(hash_values.clone());
+      Ok(())
+    })?;
+
+    Ok(digests)
+  }
+
+  /// Computes `CMinHash` 64-bit digests from pre-hashed token iterables.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `num_perm` is zero, the outer input is not iterable,
+  /// or any token hash is not an unsigned 64-bit integer.
+  #[classmethod]
+  #[pyo3(signature = (token_hash_sets, num_perm, seed))]
+  pub fn digests64_from_token_hash_sets(
+    _cls: &Bound<'_, PyType>,
+    token_hash_sets: Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<Vec<Vec<u64>>> {
+    Self::validate_num_perm(num_perm)?;
+
+    let capacity = Self::token_sets_capacity(&token_hash_sets);
+    let mut digests = Vec::with_capacity(capacity);
+    let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
+    let template = Self::new(num_perm, seed)?;
+    let mut hash_values = vec![u64::MAX; num_perm];
+
+    Self::for_each_document(&token_hash_sets, |document| {
+      token_hashes.clear();
+      extend_prehashed_token_values_from_document(
+        &document,
+        &mut token_hashes,
+      )?;
+      hash_values.fill(u64::MAX);
+      Self::apply_token_hashes_to_values(
+        &mut hash_values,
+        &token_hashes,
+        template.sigma_a,
+        template.sigma_b,
+        template.pi_c,
+        &template.pi_precomputed,
+      );
+      digests.push(hash_values.clone());
+      Ok(())
+    })?;
+
+    Ok(digests)
+  }
+
   /// Updates the `CMinHash` with a new set of items.
   ///
   /// # Arguments
@@ -272,28 +569,9 @@ impl CMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: Bound<'_, PyAny>) -> PyResult<()> {
-    self.ensure_pi_precomputed();
-    if let Some(single_hash) = hash_single_bufferlike(&items)? {
-      self.apply_sigma_batch(&[self.sigma_transform(single_hash)]);
-      return Ok(());
-    }
-
-    let iterator = PyIterator::from_object(&items)?;
-    let mut sigma_batch = Vec::with_capacity(HASH_BATCH_SIZE);
-
-    for item in iterator {
-      let hash = hash_token(&item?)?;
-      sigma_batch.push(self.sigma_transform(hash));
-      if sigma_batch.len() == HASH_BATCH_SIZE {
-        self.apply_sigma_batch(&sigma_batch);
-        sigma_batch.clear();
-      }
-    }
-
-    if !sigma_batch.is_empty() {
-      self.apply_sigma_batch(&sigma_batch);
-    }
-
+    let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
+    extend_token_hashes_from_document(&items, &mut token_hashes)?;
+    self.update_hashed_tokens(&token_hashes);
     Ok(())
   }
 

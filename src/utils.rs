@@ -1,31 +1,119 @@
-use rustc_hash::FxHasher;
-use std::hash::Hasher;
+#[cfg(target_pointer_width = "64")]
+const K: usize = 0xf135_7aea_2e62_a9c5;
+#[cfg(target_pointer_width = "32")]
+const K: usize = 0x93d7_65dd;
+
+#[cfg(target_pointer_width = "64")]
+const ROTATE: u32 = 26;
+#[cfg(target_pointer_width = "32")]
+const ROTATE: u32 = 15;
+
+const SEED1: u64 = 0x243f_6a88_85a3_08d3;
+const SEED2: u64 = 0x1319_8a2e_0370_7344;
+const PREVENT_TRIVIAL_ZERO_COLLAPSE: u64 = 0xa409_3822_299f_31d0;
+
+#[allow(clippy::missing_const_for_fn)]
+#[inline]
+fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
+  // SAFETY: callers guarantee `offset + 8 <= bytes.len()`.
+  unsafe {
+    u64::from_le(std::ptr::read_unaligned(
+      bytes.as_ptr().add(offset).cast::<u64>(),
+    ))
+  }
+}
+
+#[allow(clippy::missing_const_for_fn)]
+#[inline]
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+  // SAFETY: callers guarantee `offset + 4 <= bytes.len()`.
+  unsafe {
+    u32::from_le(std::ptr::read_unaligned(
+      bytes.as_ptr().add(offset).cast::<u32>(),
+    ))
+  }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+#[inline]
+fn multiply_mix(x: u64, y: u64) -> u64 {
+  #[cfg(target_pointer_width = "64")]
+  {
+    let full = u128::from(x) * u128::from(y);
+    let lo = full as u64;
+    let hi = (full >> 64) as u64;
+    lo ^ hi
+  }
+
+  #[cfg(target_pointer_width = "32")]
+  {
+    let lx = x as u32;
+    let ly = y as u32;
+    let hx = (x >> 32) as u32;
+    let hy = (y >> 32) as u32;
+    let afull = (lx as u64) * (hy as u64);
+    let bfull = (hx as u64) * (ly as u64);
+    afull ^ bfull.rotate_right(32)
+  }
+}
+
+#[inline]
+fn hash_bytes(bytes: &[u8]) -> u64 {
+  let len = bytes.len();
+  let mut s0 = SEED1;
+  let mut s1 = SEED2;
+
+  if len <= 16 {
+    if len >= 8 {
+      s0 ^= read_u64_le(bytes, 0);
+      s1 ^= read_u64_le(bytes, len - 8);
+    } else if len >= 4 {
+      s0 ^= u64::from(read_u32_le(bytes, 0));
+      s1 ^= u64::from(read_u32_le(bytes, len - 4));
+    } else if len > 0 {
+      let lo = bytes[0];
+      let mid = bytes[len / 2];
+      let hi = bytes[len - 1];
+      s0 ^= u64::from(lo);
+      s1 ^= (u64::from(hi) << 8) | u64::from(mid);
+    }
+  } else {
+    let mut off = 0usize;
+    while off < len - 16 {
+      let x = read_u64_le(bytes, off);
+      let y = read_u64_le(bytes, off + 8);
+      let t = multiply_mix(s0 ^ x, PREVENT_TRIVIAL_ZERO_COLLAPSE ^ y);
+      s0 = s1;
+      s1 = t;
+      off += 16;
+    }
+
+    let suffix_off = len - 16;
+    s0 ^= read_u64_le(bytes, suffix_off);
+    s1 ^= read_u64_le(bytes, suffix_off + 8);
+  }
+
+  multiply_mix(s0, s1) ^ (len as u64)
+}
 
 /// Fast hash function for byte arrays
 #[inline]
 pub fn calculate_hash_fast(data: &[u8]) -> u64 {
-  // Use a simplified version of FxHash for byte arrays
-  let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-
-  // Process 8 bytes at a time
-  let chunks = data.chunks_exact(8);
-  let remainder = chunks.remainder();
-
-  for chunk in chunks {
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(chunk);
-    let val = u64::from_le_bytes(bytes);
-    hash = hash.wrapping_mul(0x0100_0000_01b3).wrapping_add(val);
+  let compressed = hash_bytes(data);
+  #[cfg(target_pointer_width = "64")]
+  {
+    let hash = compressed.wrapping_mul(K as u64);
+    hash.rotate_left(ROTATE)
   }
 
-  // Handle remainder bytes
-  for &byte in remainder {
+  #[cfg(target_pointer_width = "32")]
+  {
+    let mut hash = (compressed as usize).wrapping_mul(K);
     hash = hash
-      .wrapping_mul(0x0100_0000_01b3)
-      .wrapping_add(u64::from(byte));
+      .wrapping_add((compressed >> 32) as usize)
+      .wrapping_mul(K);
+    (hash.rotate_left(ROTATE)) as u64
   }
-
-  hash
 }
 
 /// Applies a permutation to a hash value.
@@ -35,28 +123,38 @@ pub const fn permute_hash(hash: u64, a: u64, b: u64) -> u32 {
 }
 
 /// Calculates a hash value for a band of `MinHash` values.
+#[allow(clippy::cast_possible_truncation)]
 #[inline]
 pub fn calculate_band_hash(band: &[u32]) -> u64 {
-  let mut hasher = FxHasher::default();
+  let mut hash = 0_usize;
+  let mut index = 0_usize;
 
-  // Process 4 u32s at a time for better throughput
-  let chunks = band.chunks_exact(4);
-  let remainder = chunks.remainder();
+  while index + 4 <= band.len() {
+    let val1 = u64::from(band[index]) | (u64::from(band[index + 1]) << 32);
+    let val2 = u64::from(band[index + 2]) | (u64::from(band[index + 3]) << 32);
 
-  for chunk in chunks {
-    // Process as two u64s for better performance
-    let val1 = u64::from(chunk[0]) | (u64::from(chunk[1]) << 32);
-    let val2 = u64::from(chunk[2]) | (u64::from(chunk[3]) << 32);
-    hasher.write_u64(val1);
-    hasher.write_u64(val2);
+    // Mirror `rustc_hash::FxHasher`'s specialized integer hashing, but without
+    // the trait dispatch overhead.
+    hash = hash.wrapping_add(val1 as usize).wrapping_mul(K);
+    #[cfg(target_pointer_width = "32")]
+    {
+      hash = hash.wrapping_add((val1 >> 32) as usize).wrapping_mul(K);
+    }
+
+    hash = hash.wrapping_add(val2 as usize).wrapping_mul(K);
+    #[cfg(target_pointer_width = "32")]
+    {
+      hash = hash.wrapping_add((val2 >> 32) as usize).wrapping_mul(K);
+    }
+
+    index += 4;
   }
 
-  // Handle remainder
-  for &value in remainder {
-    hasher.write_u32(value);
+  for &value in &band[index..] {
+    hash = hash.wrapping_add(value as usize).wrapping_mul(K);
   }
 
-  hasher.finish()
+  hash.rotate_left(ROTATE) as u64
 }
 
 #[cfg(test)]
@@ -66,25 +164,9 @@ mod tests {
   use std::hash::Hasher;
 
   fn reference_hash_fast(data: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut index = 0_usize;
-
-    while index + 8 <= data.len() {
-      let mut bytes = [0_u8; 8];
-      bytes.copy_from_slice(&data[index..index + 8]);
-      hash = hash
-        .wrapping_mul(0x0100_0000_01b3)
-        .wrapping_add(u64::from_le_bytes(bytes));
-      index += 8;
-    }
-
-    for &byte in &data[index..] {
-      hash = hash
-        .wrapping_mul(0x0100_0000_01b3)
-        .wrapping_add(u64::from(byte));
-    }
-
-    hash
+    let mut hasher = FxHasher::default();
+    hasher.write(data);
+    hasher.finish()
   }
 
   fn reference_band_hash(band: &[u32]) -> u64 {
