@@ -1,18 +1,10 @@
-use crate::simd::dispatch::PermutationSoA;
+use crate::simd::dispatch::{split_u64_words, PermutationSoA};
 use crate::utils::permute_hash;
 use core::arch::aarch64::{
   uint32x2_t, uint64x2_t, vaddq_u64, vandq_u64, vcombine_u32, vdup_n_u32,
   vdupq_n_u64, vget_high_u32, vget_low_u32, vld1q_u32, vminq_u32, vmovl_u32,
   vmovn_u64, vmull_u32, vshrq_n_u64, vst1q_u32,
 };
-
-#[inline]
-const fn split_u64_words(value: u64) -> (u32, u32) {
-  let bytes = value.to_le_bytes();
-  let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-  let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-  (low, high)
-}
 
 #[inline]
 fn combine_u32_words(low: u32, high: u32) -> u64 {
@@ -44,7 +36,7 @@ unsafe fn permute_two_lanes(
   unsafe { vmovn_u64(hi_with_carry) }
 }
 
-pub fn apply_hash_batch_to_values_neon(
+pub(super) fn apply_hash_batch_to_values_neon(
   hash_values: &mut [u32],
   permutations_soa: &PermutationSoA,
   hash_batch: &[u64],
@@ -67,17 +59,16 @@ pub fn apply_hash_batch_to_values_neon(
 }
 
 #[target_feature(enable = "neon")]
-#[allow(clippy::too_many_lines)]
 unsafe fn apply_hash_batch_to_values_neon_impl(
   hash_values: &mut [u32],
   permutations_soa: &PermutationSoA,
   hash_batch: &[u64],
 ) {
   let perm_len = permutations_soa.len().min(hash_values.len());
-  let a_hi = &permutations_soa.a_hi;
-  let a_lo = &permutations_soa.a_lo;
-  let b_hi = &permutations_soa.b_hi;
-  let b_lo = &permutations_soa.b_lo;
+  let a_hi = permutations_soa.a_hi();
+  let a_lo = permutations_soa.a_lo();
+  let b_hi = permutations_soa.b_hi();
+  let b_lo = permutations_soa.b_lo();
   let mask32 = vdupq_n_u64(0xffff_ffff);
 
   let mut index = 0usize;

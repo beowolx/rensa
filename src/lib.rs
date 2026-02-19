@@ -1,9 +1,6 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-#![allow(clippy::unsafe_derive_deserialize)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::needless_pass_by_value)]
 
 use mimalloc::MiMalloc;
 
@@ -11,6 +8,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 mod cminhash;
+mod env;
 mod inline_dedup;
 mod lsh;
 mod py_input;

@@ -9,7 +9,7 @@ use core::arch::x86_64::{
   __m256i, _mm256_loadu_si256, _mm256_min_epu32, _mm256_storeu_si256,
 };
 
-pub(crate) fn apply_hash_batch_to_values_avx2(
+pub(super) fn apply_hash_batch_to_values_avx2(
   hash_values: &mut [u32],
   permutations: &[(u64, u64)],
   hash_batch: &[u64],

@@ -1,6 +1,6 @@
 # Rensa
 
-High-performance MinHash in Rust with Python bindings. 50x+ faster than datasketch in benchmarked deduplication workloads, with near-identical results.
+High-performance MinHash in Rust with Python bindings. On the latest full benchmark suite, Rensa is 608.52x faster than datasketch and 11.92x faster than FastSketch, with near-identical results.
 
 ## What is Rensa?
 
@@ -15,21 +15,21 @@ It ships two MinHash variants:
 
 ## Performance
 
-Benchmarked against datasketch on `gretelai/synthetic_text_to_sql` (100K rows, 128 permutations, threshold 0.95):
+Numbers below come from the latest full benchmark run (`benchmarks/full_benchmark.py`) over 7 datasets and 2 thread lanes (`threads=1,8`), 128 permutations, threshold 0.8, and 8 bands.
 
-![Deduplication speed: 100K rows](./assets/bench_time_100k.png)
+![Deduplication speed: full benchmark suite](./assets/bench_time_full_suite.png)
 
-| Method        | Median Time | Speedup    | Accuracy vs Datasketch |
-| ------------- | ----------- | ---------- | ---------------------- |
-| Datasketch    | 42.95s      | —          | —                      |
-| **R-MinHash** | **0.83s**   | **52.04x** | 0.9999 Jaccard         |
-| **C-MinHash** | **0.94s**   | **45.77x** | 0.9992 Jaccard         |
+| Comparison | Average speedup |
+| ---------- | --------------- |
+| **Rensa vs Datasketch** | **608.52x faster** |
+| **Rensa vs FastSketch** | **11.92x faster** |
 
-The accuracy column is the Jaccard similarity between each method's set of deduplicated rows and datasketch's. A score like 0.9999 means R-MinHash and datasketch agree on virtually every row, but not necessarily all rows.
+| Accuracy vs Datasketch | Value |
+| ---------------------- | ----- |
+| Mean Jaccard of kept sets | 0.987219 |
+| Mean duplicate-flag mismatch rate | 0.010717 |
 
-R-MinHash also uses less memory. On the same 100K-row workload, one measured run dropped peak traced memory from about 778 MB (`datasketch`) to about 493 MB (`R-MinHash`), roughly 37% lower.
-
-![Memory usage comparison](./assets/bench_memory.png)
+These accuracy metrics are from the same full benchmark run as the speed numbers above.
 
 ## How R-MinHash works
 
