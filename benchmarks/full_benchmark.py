@@ -247,6 +247,18 @@ def dataset_cache_path(
     return cache_dir / filename
 
 
+def cached_row_count_from_cache_path(cache_path: Path) -> int | None:
+    suffix_marker = "__rows_"
+    name = cache_path.name
+    marker_index = name.rfind(suffix_marker)
+    if marker_index == -1:
+        return None
+    suffix = name[marker_index + len(suffix_marker) :]
+    if suffix.endswith(".pkl"):
+        suffix = suffix[: -len(".pkl")]
+    return int(suffix) if suffix.isdigit() else None
+
+
 def sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as handle:
@@ -341,9 +353,12 @@ def load_or_prepare_token_cache(
     cache_path = dataset_cache_path(cache_dir, spec, max_rows, ngram_size)
 
     if cache_path.exists():
-        with cache_path.open("rb") as handle:
-            token_sets = pickle.load(handle)
-        return cache_path, len(token_sets), sha256_file(cache_path)
+        row_count = cached_row_count_from_cache_path(cache_path)
+        if row_count is None:
+            with cache_path.open("rb") as handle:
+                token_sets = pickle.load(handle)
+            row_count = len(token_sets)
+        return cache_path, row_count, sha256_file(cache_path)
 
     token_sets = load_token_sets_from_hf(spec, max_rows, ngram_size)
     with cache_path.open("wb") as handle:
