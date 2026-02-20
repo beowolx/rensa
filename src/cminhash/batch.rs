@@ -1,4 +1,4 @@
-use crate::cminhash::{CMinHash, HASH_BATCH_SIZE};
+use crate::cminhash::{CMinHash, CMinHashParams, HASH_BATCH_SIZE};
 use crate::py_input::{
   extend_prehashed_token_values_from_document,
   extend_token_hashes_from_document,
@@ -15,14 +15,14 @@ impl CMinHash {
     mut map: F,
   ) -> PyResult<Vec<T>>
   where
-    F: FnMut(&[u64], &Self) -> T,
+    F: FnMut(&[u64]) -> T,
   {
     Self::validate_num_perm(num_perm)?;
 
     let capacity = Self::token_sets_capacity(token_sets);
     let mut outputs = Vec::with_capacity(capacity);
     let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
-    let template = Self::new(num_perm, seed)?;
+    let params = CMinHashParams::new(num_perm, seed);
     let mut hash_values = vec![u64::MAX; num_perm];
 
     Self::for_each_document(token_sets, |document| {
@@ -33,13 +33,13 @@ impl CMinHash {
       Self::apply_token_hashes_to_values(
         &mut hash_values,
         &token_hashes,
-        template.sigma_a,
-        template.sigma_b,
-        template.pi_c,
-        &template.pi_precomputed,
+        params.sigma_a,
+        params.sigma_b,
+        params.pi_c,
+        &params.pi_precomputed,
       );
 
-      outputs.push(map(&hash_values, &template));
+      outputs.push(map(&hash_values));
       Ok(())
     })?;
 
@@ -54,14 +54,14 @@ impl CMinHash {
     mut map: F,
   ) -> PyResult<Vec<T>>
   where
-    F: FnMut(Vec<u64>, &Self) -> T,
+    F: FnMut(Vec<u64>, &CMinHashParams) -> T,
   {
     Self::validate_num_perm(num_perm)?;
 
     let capacity = Self::token_sets_capacity(token_sets);
     let mut outputs = Vec::with_capacity(capacity);
     let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
-    let template = Self::new(num_perm, seed)?;
+    let params = CMinHashParams::new(num_perm, seed);
 
     Self::for_each_document(token_sets, |document| {
       token_hashes.clear();
@@ -71,13 +71,13 @@ impl CMinHash {
       Self::apply_token_hashes_to_values(
         &mut hash_values,
         &token_hashes,
-        template.sigma_a,
-        template.sigma_b,
-        template.pi_c,
-        &template.pi_precomputed,
+        params.sigma_a,
+        params.sigma_b,
+        params.pi_c,
+        &params.pi_precomputed,
       );
 
-      outputs.push(map(hash_values, &template));
+      outputs.push(map(hash_values, &params));
       Ok(())
     })?;
 
@@ -134,14 +134,14 @@ impl CMinHash {
       num_perm,
       seed,
       extend_token_hashes_from_document,
-      |hash_values, template| Self {
+      |hash_values, params| Self {
         num_perm,
         seed,
         hash_values,
-        sigma_a: template.sigma_a,
-        sigma_b: template.sigma_b,
-        pi_c: template.pi_c,
-        pi_d: template.pi_d,
+        sigma_a: params.sigma_a,
+        sigma_b: params.sigma_b,
+        pi_c: params.pi_c,
+        pi_d: params.pi_d,
         pi_precomputed: Vec::new(),
       },
     )
@@ -157,9 +157,7 @@ impl CMinHash {
       num_perm,
       seed,
       extend_token_hashes_from_document,
-      |hash_values, _template| {
-        hash_values.iter().map(|&v| (v >> 32) as u32).collect()
-      },
+      |hash_values| hash_values.iter().map(|&v| (v >> 32) as u32).collect(),
     )
   }
 
@@ -173,7 +171,7 @@ impl CMinHash {
       num_perm,
       seed,
       extend_token_hashes_from_document,
-      |hash_values, _template| hash_values,
+      |hash_values, _params| hash_values,
     )
   }
 
@@ -187,7 +185,7 @@ impl CMinHash {
       num_perm,
       seed,
       extend_prehashed_token_values_from_document,
-      |hash_values, _template| hash_values,
+      |hash_values, _params| hash_values,
     )
   }
 }

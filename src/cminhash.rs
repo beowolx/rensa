@@ -16,6 +16,8 @@
 //! and the Jaccard calculation is optimized using chunked operations.
 
 use pyo3::prelude::*;
+use rand_core::{RngCore, SeedableRng};
+use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Deserializer, Serialize};
 
 mod batch;
@@ -53,6 +55,34 @@ struct CMinHashState {
   sigma_b: u64,
   pi_c: u64,
   pi_d: u64,
+}
+
+#[derive(Clone)]
+pub(in crate::cminhash) struct CMinHashParams {
+  pub(in crate::cminhash) sigma_a: u64,
+  pub(in crate::cminhash) sigma_b: u64,
+  pub(in crate::cminhash) pi_c: u64,
+  pub(in crate::cminhash) pi_d: u64,
+  pub(in crate::cminhash) pi_precomputed: Vec<u64>,
+}
+
+impl CMinHashParams {
+  pub(in crate::cminhash) fn new(num_perm: usize, seed: u64) -> Self {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let sigma_a = rng.next_u64() | 1;
+    let sigma_b = rng.next_u64();
+    let pi_c = rng.next_u64() | 1;
+    let pi_d = rng.next_u64();
+    let pi_precomputed = CMinHash::build_pi_precomputed(num_perm, pi_c, pi_d);
+
+    Self {
+      sigma_a,
+      sigma_b,
+      pi_c,
+      pi_d,
+      pi_precomputed,
+    }
+  }
 }
 
 impl<'de> Deserialize<'de> for CMinHash {
