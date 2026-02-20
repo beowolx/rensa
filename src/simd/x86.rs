@@ -17,6 +17,14 @@ pub(super) fn apply_hash_batch_to_values_avx2(
   if hash_values.is_empty() || hash_batch.is_empty() {
     return;
   }
+
+  let perm_len = hash_values.len().min(permutations.len());
+  if perm_len == 0 {
+    return;
+  }
+  let hash_values = &mut hash_values[..perm_len];
+  let permutations = &permutations[..perm_len];
+
   // SAFETY: dispatch only calls this function when AVX2 is available.
   unsafe {
     apply_hash_batch_to_values_avx2_impl(hash_values, permutations, hash_batch);
