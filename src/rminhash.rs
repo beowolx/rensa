@@ -249,6 +249,11 @@ impl RMinHash {
     self.num_perm
   }
 
+  #[inline]
+  pub(crate) const fn seed(&self) -> u64 {
+    self.seed
+  }
+
   fn ensure_permutations(&mut self) {
     if self.permutations.len() != self.num_perm {
       self.permutations = Self::build_permutations(self.num_perm, self.seed);

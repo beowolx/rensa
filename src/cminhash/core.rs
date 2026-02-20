@@ -50,6 +50,11 @@ impl CMinHash {
     self.num_perm
   }
 
+  #[inline]
+  pub(crate) const fn seed(&self) -> u64 {
+    self.seed
+  }
+
   pub(in crate::cminhash) fn validate_num_perm(
     num_perm: usize,
   ) -> PyResult<()> {

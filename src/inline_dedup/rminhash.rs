@@ -9,6 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyTuple};
 use rustc_hash::FxHashMap;
 
+const TOKEN_SET_TEMPLATE_ERROR: &str =
+  "internal error: token-set template initialization failed";
+
 fn default_lsh_bands(threshold: f64, num_perm: usize) -> usize {
   if threshold >= 0.9 {
     4
@@ -44,6 +47,49 @@ fn select_lsh_bands(
   requested
 }
 
+#[derive(Default)]
+struct RMinHashTokenScratch {
+  permutations: Option<Vec<(u64, u64)>>,
+  permutations_soa: Option<PermutationSoA>,
+  scratch: Option<RMinHash>,
+}
+
+impl RMinHashTokenScratch {
+  fn reset_from_document(
+    &mut self,
+    document: &Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+    token_hashes: &mut Vec<u64>,
+  ) -> PyResult<&RMinHash> {
+    if self.permutations.is_none() {
+      let built = RMinHash::build_permutations(num_perm, seed);
+      self.permutations_soa = Some(PermutationSoA::from_permutations(&built));
+      self.permutations = Some(built);
+      self.scratch = Some(RMinHash::new_compact(num_perm, seed)?);
+    }
+
+    token_hashes.clear();
+    extend_token_hashes_from_document(document, token_hashes)?;
+
+    let Some(permutations_ref) = self.permutations.as_ref() else {
+      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
+    };
+    let Some(permutations_soa_ref) = self.permutations_soa.as_ref() else {
+      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
+    };
+    let Some(scratch_ref) = self.scratch.as_mut() else {
+      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
+    };
+    scratch_ref.reset_from_token_hashes_with_permutations(
+      token_hashes,
+      permutations_ref,
+      permutations_soa_ref,
+    );
+    Ok(scratch_ref)
+  }
+}
+
 fn map_rminhash_pairs<T, F>(
   entries: &Bound<'_, PyAny>,
   num_perm: usize,
@@ -55,9 +101,7 @@ where
 {
   let capacity = entries.len().unwrap_or_default();
   let iterator = PyIterator::from_object(entries)?;
-  let permutations = RMinHash::build_permutations(num_perm, seed);
-  let permutations_soa = PermutationSoA::from_permutations(&permutations);
-  let mut scratch = RMinHash::new_compact(num_perm, seed)?;
+  let mut token_scratch = RMinHashTokenScratch::default();
   let mut token_hashes = Vec::with_capacity(32);
   let mut outcomes = Vec::with_capacity(capacity);
 
@@ -77,14 +121,13 @@ where
       continue;
     }
 
-    token_hashes.clear();
-    extend_token_hashes_from_document(&value, &mut token_hashes)?;
-    scratch.reset_from_token_hashes_with_permutations(
-      &token_hashes,
-      &permutations,
-      &permutations_soa,
-    );
-    outcomes.push(handler(key, &scratch)?);
+    let scratch = token_scratch.reset_from_document(
+      &value,
+      num_perm,
+      seed,
+      &mut token_hashes,
+    )?;
+    outcomes.push(handler(key, scratch)?);
   }
 
   Ok(outcomes)
@@ -101,9 +144,7 @@ where
 {
   let capacity = values.len().unwrap_or_default();
   let iterator = PyIterator::from_object(values)?;
-  let permutations = RMinHash::build_permutations(num_perm, seed);
-  let permutations_soa = PermutationSoA::from_permutations(&permutations);
-  let mut scratch = RMinHash::new_compact(num_perm, seed)?;
+  let mut token_scratch = RMinHashTokenScratch::default();
   let mut token_hashes = Vec::with_capacity(32);
   let mut outcomes = Vec::with_capacity(capacity);
 
@@ -114,21 +155,28 @@ where
       continue;
     }
 
-    token_hashes.clear();
-    extend_token_hashes_from_document(&value, &mut token_hashes)?;
-    scratch.reset_from_token_hashes_with_permutations(
-      &token_hashes,
-      &permutations,
-      &permutations_soa,
-    );
-    outcomes.push(handler(&scratch)?);
+    let scratch = token_scratch.reset_from_document(
+      &value,
+      num_perm,
+      seed,
+      &mut token_hashes,
+    )?;
+    outcomes.push(handler(scratch)?);
   }
 
   Ok(outcomes)
 }
 
 impl RMinHashDeduplicator {
+  #[inline]
   fn validate_input_minhash(&self, minhash: &RMinHash) -> PyResult<()> {
+    if minhash.seed() != self.seed {
+      return Err(PyValueError::new_err(format!(
+        "seed mismatch: deduplicator expects {}, received {}",
+        self.seed,
+        minhash.seed()
+      )));
+    }
     if minhash.num_perm() != self.num_perm {
       return Err(PyValueError::new_err(format!(
         "num_perm mismatch: deduplicator expects {}, received {}",

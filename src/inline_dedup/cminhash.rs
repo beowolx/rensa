@@ -138,7 +138,15 @@ where
 }
 
 impl CMinHashDeduplicator {
+  #[inline]
   fn validate_input_minhash(&self, minhash: &CMinHash) -> PyResult<()> {
+    if minhash.seed() != self.seed {
+      return Err(PyValueError::new_err(format!(
+        "seed mismatch: deduplicator expects {}, received {}",
+        self.seed,
+        minhash.seed()
+      )));
+    }
     if let Some(expected_num_perm) = self.num_perm {
       if minhash.num_perm() != expected_num_perm {
         return Err(PyValueError::new_err(format!(

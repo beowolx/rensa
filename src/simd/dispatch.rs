@@ -26,10 +26,7 @@ pub struct PermutationSoA {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub(super) const fn split_u64_words(value: u64) -> (u32, u32) {
-  let bytes = value.to_le_bytes();
-  let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-  let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-  (low, high)
+  ((value & 0xffff_ffff) as u32, ((value >> 32) & 0xffff_ffff) as u32)
 }
 
 impl PermutationSoA {
@@ -192,6 +189,10 @@ pub fn apply_hash_batch_to_values(
   if hash_batch.is_empty() || hash_values.is_empty() {
     return;
   }
+  debug_assert!(
+    permutations_soa.is_empty() || permutations_soa.len() == permutations.len(),
+    "permutations_soa length must match permutations length",
+  );
 
   match kernel_kind() {
     KernelKind::Scalar => {
@@ -223,6 +224,8 @@ fn scalar_apply_hash_batch_to_values(
   hash_batch: &[u64],
 ) {
   let perm_len = hash_values.len().min(permutations.len());
+  debug_assert!(perm_len <= permutations.len());
+  debug_assert!(perm_len <= hash_values.len());
   let permutations_ptr = permutations.as_ptr();
   let values_ptr = hash_values.as_mut_ptr();
   let mut index = 0usize;
