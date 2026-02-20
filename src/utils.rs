@@ -59,15 +59,10 @@ fn multiply_mix(x: u64, y: u64) -> u64 {
   #[cfg(target_pointer_width = "64")]
   {
     let full = u128::from(x) * u128::from(y);
-    let bytes = full.to_le_bytes();
-    let lo = u64::from_le_bytes([
-      bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-      bytes[7],
-    ]);
-    let hi = u64::from_le_bytes([
-      bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
-      bytes[14], bytes[15],
-    ]);
+    #[allow(clippy::cast_possible_truncation)]
+    let lo = full as u64;
+    #[allow(clippy::cast_possible_truncation)]
+    let hi = (full >> 64) as u64;
     lo ^ hi
   }
 

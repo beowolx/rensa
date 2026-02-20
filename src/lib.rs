@@ -2,8 +2,10 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+#[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -29,7 +31,7 @@ use pyo3::prelude::*;
 ///
 /// # Errors
 /// Returns an error if the module initialization fails or classes cannot be added
-#[pymodule(gil_used = false)]
+#[pymodule(gil_used = true)]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<RMinHash>()?;
   m.add_class::<RMinHashDigestMatrix>()?;

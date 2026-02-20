@@ -1,10 +1,29 @@
-use crate::cminhash::{CMinHash, ReduceResult, HASH_BATCH_SIZE};
+use crate::cminhash::{
+  CMinHash, CMinHashParams, ReduceResult, HASH_BATCH_SIZE,
+};
 use crate::py_input::extend_token_hashes_from_document;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyType};
-use rand_core::{RngCore, SeedableRng};
-use rand_xoshiro::Xoshiro256PlusPlus;
+use std::cell::RefCell;
+
+thread_local! {
+  static TOKEN_HASH_SCRATCH: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+fn update_with_token_hash_buffer(
+  minhash: &mut CMinHash,
+  items: &Bound<'_, PyAny>,
+  token_hashes: &mut Vec<u64>,
+) -> PyResult<()> {
+  token_hashes.clear();
+  if token_hashes.capacity() < HASH_BATCH_SIZE {
+    token_hashes.reserve(HASH_BATCH_SIZE - token_hashes.capacity());
+  }
+  extend_token_hashes_from_document(items, token_hashes)?;
+  minhash.update_hashed_tokens(token_hashes);
+  Ok(())
+}
 
 #[pymethods]
 impl CMinHash {
@@ -22,22 +41,17 @@ impl CMinHash {
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-
-    let sigma_a = rng.next_u64() | 1;
-    let sigma_b = rng.next_u64();
-    let pi_c = rng.next_u64() | 1;
-    let pi_d = rng.next_u64();
+    let params = CMinHashParams::new(num_perm, seed);
 
     Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u64::MAX; num_perm],
-      sigma_a,
-      sigma_b,
-      pi_c,
-      pi_d,
-      pi_precomputed: Self::build_pi_precomputed(num_perm, pi_c, pi_d),
+      sigma_a: params.sigma_a,
+      sigma_b: params.sigma_b,
+      pi_c: params.pi_c,
+      pi_d: params.pi_d,
+      pi_precomputed: params.pi_precomputed,
     })
   }
 
@@ -121,10 +135,21 @@ impl CMinHash {
   /// nor an iterable of supported token types.
   #[pyo3(signature = (items))]
   pub fn update(&mut self, items: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Some(result) = TOKEN_HASH_SCRATCH.with(|scratch| {
+      let Ok(mut token_hashes) = scratch.try_borrow_mut() else {
+        return None;
+      };
+      Some(update_with_token_hash_buffer(
+        self,
+        items,
+        &mut token_hashes,
+      ))
+    }) {
+      return result;
+    }
+
     let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
-    extend_token_hashes_from_document(items, &mut token_hashes)?;
-    self.update_hashed_tokens(&token_hashes);
-    Ok(())
+    update_with_token_hash_buffer(self, items, &mut token_hashes)
   }
 
   /// Returns the current `MinHash` digest as u32 values for compatibility.
@@ -180,11 +205,9 @@ impl CMinHash {
     (self.num_perm, self.seed)
   }
 
-  fn __reduce__(&self) -> PyResult<ReduceResult> {
-    Python::attach(|py| {
-      let type_obj = py.get_type::<Self>().into();
-      let state = self.__getstate__(py)?.into();
-      Ok((type_obj, (self.num_perm, self.seed), state))
-    })
+  fn __reduce__(&self, py: Python<'_>) -> PyResult<ReduceResult> {
+    let type_obj = py.get_type::<Self>().into();
+    let state = self.__getstate__(py)?.into();
+    Ok((type_obj, (self.num_perm, self.seed), state))
   }
 }
