@@ -147,7 +147,7 @@ impl RMinHashLSH {
           flags[offset] = true;
           if keys.len() == 1 && first_key >= start_key {
             let other_offset = first_key - start_key;
-            if other_offset < rows {
+            if other_offset < offset {
               flags[other_offset] = true;
             }
           }

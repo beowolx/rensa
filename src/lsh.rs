@@ -63,6 +63,8 @@ pub struct RMinHashLSH {
   num_perm: usize,
   num_bands: usize,
   band_size: usize,
+  // These maps are keyed by internal band hashes / numeric IDs, not
+  // attacker-controlled strings, so FxHasher is chosen for speed.
   hash_tables: Vec<HashMap<u64, Vec<usize>, BuildHasherDefault<FxHasher>>>,
   #[serde(default)]
   key_bands: HashMap<usize, Vec<u64>, BuildHasherDefault<FxHasher>>,

@@ -17,13 +17,13 @@ fn folded_band_hash_matches_direct_hashing() {
   fn u64_to_usize(value: u64) -> usize {
     #[cfg(target_pointer_width = "64")]
     {
-      usize::from_ne_bytes(value.to_ne_bytes())
+      usize::try_from(value).unwrap_or_default()
     }
     #[cfg(target_pointer_width = "32")]
     {
-      let bytes = value.to_ne_bytes();
-      let low = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-      usize::try_from(low).unwrap_or(usize::MAX)
+      let low_bits = value & u64::from(u32::MAX);
+      let low = u32::try_from(low_bits).unwrap_or_default();
+      usize::try_from(low).unwrap_or_default()
     }
   }
 

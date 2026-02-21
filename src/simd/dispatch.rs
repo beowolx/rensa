@@ -26,7 +26,10 @@ pub struct PermutationSoA {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub(super) const fn split_u64_words(value: u64) -> (u32, u32) {
-  ((value & 0xffff_ffff) as u32, ((value >> 32) & 0xffff_ffff) as u32)
+  (
+    (value & 0xffff_ffff) as u32,
+    ((value >> 32) & 0xffff_ffff) as u32,
+  )
 }
 
 impl PermutationSoA {

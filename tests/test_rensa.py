@@ -773,6 +773,36 @@ def test_rminhashlsh_matrix_methods_match_object_methods():
         assert lsh_objects.query(minhash) == lsh_matrix.query(minhash)
 
 
+def test_rminhashlsh_insert_matrix_and_query_duplicate_flags_ignores_future_overlap_key():
+    num_perm = 64
+    seed = 42
+    start_key = 10
+    overlapping_key = start_key + 2
+    shared_tokens = [f"shared_{idx}" for idx in range(32)]
+
+    matrix = RMinHash.digest_matrix_from_token_sets(
+        [
+            shared_tokens,
+            [f"row1_{idx}" for idx in range(32)],
+            [f"row2_{idx}" for idx in range(32)],
+        ],
+        num_perm=num_perm,
+        seed=seed,
+    )
+
+    existing = RMinHash(num_perm=num_perm, seed=seed)
+    existing.update(shared_tokens)
+
+    lsh = RMinHashLSH(threshold=0.8, num_perm=num_perm, num_bands=1)
+    lsh.insert(overlapping_key, existing)
+
+    assert lsh.insert_matrix_and_query_duplicate_flags(matrix, start_key=start_key) == [
+        True,
+        False,
+        False,
+    ]
+
+
 def test_rminhashlsh_one_shot_exposes_sparse_verify_stats():
     token_sets = [[f"tok{idx % 97}"] for idx in range(128)]
     matrix = RMinHash.digest_matrix_from_token_sets_rho(

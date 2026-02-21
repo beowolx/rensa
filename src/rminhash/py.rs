@@ -134,7 +134,6 @@ impl RMinHash {
       token_sets,
       num_perm,
       seed,
-      "tokens",
       extend_token_hashes_from_document,
     )?;
     Ok(Self::from_matrix(&matrix, seed))
@@ -159,7 +158,6 @@ impl RMinHash {
       token_sets,
       num_perm,
       seed,
-      "tokens",
       extend_token_hashes_from_document,
     )?;
     Ok(Self::digest_rows_from_matrix(&matrix))
@@ -205,7 +203,6 @@ impl RMinHash {
       token_sets,
       num_perm,
       seed,
-      "tokens",
       extend_token_hashes_from_document,
     )
   }
@@ -263,7 +260,6 @@ impl RMinHash {
       token_hash_sets,
       num_perm,
       seed,
-      "token_hashes",
       extend_prehashed_token_values_from_document,
     )
   }
@@ -366,7 +362,6 @@ impl RMinHash {
       token_byte_sets,
       num_perm,
       seed,
-      "token_bytes",
       extend_byte_token_hashes_from_document,
     )
   }

@@ -1,5 +1,4 @@
 use crate::py_input::extend_prehashed_token_values_from_document;
-use crate::rminhash::cache::digest_cache_key_env;
 use crate::rminhash::permutation_cache::AdaptivePermutationCache;
 use crate::rminhash::send_ptr::SendPtr;
 use crate::rminhash::{
@@ -618,39 +617,17 @@ impl RMinHash {
     token_sets: &Bound<'_, PyAny>,
     num_perm: usize,
     seed: u64,
-    cache_domain: &str,
     document_hasher: fn(&Bound<'_, PyAny>, &mut Vec<u64>) -> PyResult<()>,
   ) -> PyResult<RMinHashDigestMatrix> {
-    let cache_key = digest_cache_key_env();
-    if let Some(cache_key_value) = cache_key.as_deref() {
-      if let Some(matrix) = Self::try_load_cached_digest_matrix(
-        cache_key_value,
-        cache_domain,
-        num_perm,
-        seed,
-      ) {
-        return Ok(matrix);
-      }
-    }
     let permutations = Self::build_permutations(num_perm, seed);
     let permutations_soa = PermutationSoA::from_permutations(&permutations);
-    let matrix = Self::build_digest_matrix_data(
+    Self::build_digest_matrix_data(
       token_sets,
       num_perm,
       &permutations,
       &permutations_soa,
       document_hasher,
-    )?;
-    if let Some(cache_key_value) = cache_key.as_deref() {
-      Self::store_cached_digest_matrix(
-        cache_key_value,
-        cache_domain,
-        num_perm,
-        seed,
-        &matrix,
-      );
-    }
-    Ok(matrix)
+    )
   }
 
   pub(in crate::rminhash) fn digest_rows_from_matrix(
