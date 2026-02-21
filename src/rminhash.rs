@@ -36,7 +36,6 @@ use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Deserializer, Serialize};
 
-mod cache;
 mod config;
 mod matrix;
 mod permutation_cache;

@@ -272,7 +272,8 @@ impl RMinHashLSH {
     let num_bands = self.num_bands;
     let band_size = self.band_size;
 
-    let mut hashes = vec![0u64; rows.saturating_mul(num_bands)];
+    let total_hashes = rows.checked_mul(num_bands)?;
+    let mut hashes = vec![0u64; total_hashes];
     for row_index in 0..rows {
       let row = digest_matrix.row(row_index);
       for band_idx in 0..num_bands {
@@ -346,11 +347,8 @@ impl RMinHashLSH {
     let mut collisions_by_hash: FxHashMap<u64, Vec<usize>> =
       FxHashMap::default();
 
-    for (row_index, band_match_count) in state
-      .band_match_counts
-      .iter_mut()
-      .enumerate()
-      .take(ctx.rows)
+    for (row_index, band_match_count) in
+      state.band_match_counts.iter_mut().enumerate()
     {
       let band_hash = Self::effective_band_hash(
         self,
