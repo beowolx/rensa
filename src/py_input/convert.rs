@@ -2,7 +2,8 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 
-#[inline]
+#[cold]
+#[inline(never)]
 pub fn py_err_to_type_error(message: &'static str) -> PyErr {
   PyTypeError::new_err(message)
 }

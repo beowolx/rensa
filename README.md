@@ -51,7 +51,7 @@ This choice has a useful side effect: since the output is naturally 32 bits, sig
 
 On top of the algorithm, Rensa applies several low-level optimizations.
 
-Input elements are hashed with an FNV-1a variant that processes 8 bytes per step. MinHash needs uniform distribution, not collision resistance, so there's no reason to pay for a cryptographic hash function.
+Input elements are hashed with a fast non-cryptographic hash that mirrors `rustc_hash::FxHasher` semantics while avoiding trait dispatch in the hot path. MinHash needs uniform distribution, not collision resistance, so there's no reason to pay for a cryptographic hash function.
 
 Elements are hashed in groups of 32. Permutations are applied to each batch in chunks of 16, using a fixed-size temporary array (`[u32; 16]`) that is register-friendly. This gives the compiler room to optimize tight loops and keeps working data cache-local.
 

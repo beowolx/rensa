@@ -1,12 +1,13 @@
 use crate::utils::calculate_hash_fast;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyTypeError;
+use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyMemoryView};
+use pyo3::types::PyAny;
 
 #[inline]
 pub fn has_buffer_protocol(item: &Bound<'_, PyAny>) -> bool {
-  PyMemoryView::from(item).is_ok()
+  unsafe { ffi::PyObject_CheckBuffer(item.as_ptr()) != 0 }
 }
 
 pub fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
