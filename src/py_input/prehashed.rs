@@ -30,12 +30,17 @@ pub fn try_extend_prehashed_u64_buffer(
       crate::py_input::PREHASHED_TOKEN_TYPE_ERROR,
     ));
   }
-  let values = unsafe {
-    std::slice::from_raw_parts(
-      buffer.buf_ptr().cast::<u64>(),
-      buffer.item_count(),
-    )
-  };
+  let item_count = buffer.item_count();
+  if item_count == 0 {
+    return Ok(true);
+  }
+  let data_ptr = buffer.buf_ptr().cast::<u64>();
+  if data_ptr.is_null() {
+    return Err(crate::py_input::convert::py_err_to_type_error(
+      crate::py_input::PREHASHED_TOKEN_TYPE_ERROR,
+    ));
+  }
+  let values = unsafe { std::slice::from_raw_parts(data_ptr, item_count) };
   output.extend_from_slice(values);
   Ok(true)
 }

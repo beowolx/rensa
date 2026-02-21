@@ -132,11 +132,11 @@ pub fn extend_prehashed_token_values_from_document(
   }
 
   if let Ok(py_list) = document.cast::<PyList>() {
-    output.reserve(py_list.len());
     // SAFETY: list access is guarded by CPython list checks and GIL.
     unsafe {
-      let object_ptr = document.as_ptr();
+      let object_ptr = py_list.as_ptr();
       let length = ffi::PyList_GET_SIZE(object_ptr);
+      output.reserve(convert::py_ssize_to_usize(length)?);
       let mut index: ffi::Py_ssize_t = 0;
       while index < length {
         let item_ptr = ffi::PyList_GET_ITEM(object_ptr, index);
@@ -148,11 +148,11 @@ pub fn extend_prehashed_token_values_from_document(
   }
 
   if let Ok(py_tuple) = document.cast::<PyTuple>() {
-    output.reserve(py_tuple.len());
     // SAFETY: tuple access is guarded by CPython tuple checks and GIL.
     unsafe {
-      let object_ptr = document.as_ptr();
+      let object_ptr = py_tuple.as_ptr();
       let length = ffi::PyTuple_GET_SIZE(object_ptr);
+      output.reserve(convert::py_ssize_to_usize(length)?);
       let mut index: ffi::Py_ssize_t = 0;
       while index < length {
         let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
