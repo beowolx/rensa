@@ -43,15 +43,13 @@ const fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
 #[cfg(target_pointer_width = "32")]
 #[inline]
 const fn low_u32(value: u64) -> u32 {
-  let bytes = value.to_le_bytes();
-  u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+  value as u32
 }
 
 #[cfg(target_pointer_width = "32")]
 #[inline]
 const fn high_u32(value: u64) -> u32 {
-  let bytes = value.to_le_bytes();
-  u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+  (value >> 32) as u32
 }
 
 #[inline]
@@ -79,12 +77,11 @@ fn multiply_mix(x: u64, y: u64) -> u64 {
 }
 
 #[inline]
+#[allow(clippy::cast_possible_truncation)]
 const fn hash_add_u64(mut hash: usize, value: u64) -> usize {
   #[cfg(target_pointer_width = "64")]
   {
-    hash = hash
-      .wrapping_add(usize::from_ne_bytes(value.to_ne_bytes()))
-      .wrapping_mul(K_USIZE);
+    hash = hash.wrapping_add(value as usize).wrapping_mul(K_USIZE);
   }
 
   #[cfg(target_pointer_width = "32")]
@@ -92,21 +89,15 @@ const fn hash_add_u64(mut hash: usize, value: u64) -> usize {
     let bytes = value.to_ne_bytes();
     let low = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let high = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    hash = hash
-      .wrapping_add(usize::try_from(low).unwrap_or(usize::MAX))
-      .wrapping_mul(K_USIZE);
-    hash = hash
-      .wrapping_add(usize::try_from(high).unwrap_or(usize::MAX))
-      .wrapping_mul(K_USIZE);
+    hash = hash.wrapping_add(low as usize).wrapping_mul(K_USIZE);
+    hash = hash.wrapping_add(high as usize).wrapping_mul(K_USIZE);
   }
   hash
 }
 
 #[inline]
-fn hash_add_u32(hash: usize, value: u32) -> usize {
-  hash
-    .wrapping_add(usize::try_from(value).unwrap_or(usize::MAX))
-    .wrapping_mul(K_USIZE)
+const fn hash_add_u32(hash: usize, value: u32) -> usize {
+  hash.wrapping_add(value as usize).wrapping_mul(K_USIZE)
 }
 
 #[inline]
@@ -185,13 +176,11 @@ pub fn calculate_hash_fast(data: &[u8]) -> u64 {
 
   #[cfg(target_pointer_width = "32")]
   {
-    let mut hash = usize::try_from(low_u32(compressed))
-      .unwrap_or(usize::MAX)
-      .wrapping_mul(K_USIZE);
+    let mut hash = (low_u32(compressed) as usize).wrapping_mul(K_USIZE);
     hash = hash
-      .wrapping_add(usize::try_from(high_u32(compressed)).unwrap_or(usize::MAX))
+      .wrapping_add(high_u32(compressed) as usize)
       .wrapping_mul(K_USIZE);
-    u64::from(u32::from_ne_bytes(hash.rotate_left(ROTATE).to_ne_bytes()))
+    hash.rotate_left(ROTATE) as u64
   }
 }
 
@@ -225,11 +214,11 @@ pub fn calculate_band_hash(band: &[u32]) -> u64 {
 
   #[cfg(target_pointer_width = "64")]
   {
-    u64::from_ne_bytes(hash.rotate_left(ROTATE).to_ne_bytes())
+    hash.rotate_left(ROTATE) as u64
   }
   #[cfg(target_pointer_width = "32")]
   {
-    u64::from(u32::from_ne_bytes(hash.rotate_left(ROTATE).to_ne_bytes()))
+    hash.rotate_left(ROTATE) as u64
   }
 }
 
