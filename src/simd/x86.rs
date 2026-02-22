@@ -41,6 +41,7 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
   let mut perm_chunks = permutations.chunks_exact(8);
 
   for (values, perms) in value_chunks.by_ref().zip(perm_chunks.by_ref()) {
+    // SAFETY: `values` comes from `chunks_exact_mut(8)`, so it has exactly 8 lanes.
     let mut current = unsafe { load_u32x8(values.as_ptr()) };
     for &item_hash in hash_batch {
       let permuted = [
@@ -53,9 +54,11 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
         permute_hash(item_hash, perms[6].0, perms[6].1),
         permute_hash(item_hash, perms[7].0, perms[7].1),
       ];
+      // SAFETY: `permuted` is a local `[u32; 8]`, valid for an 8-lane load.
       let permuted_vec = unsafe { load_u32x8(permuted.as_ptr()) };
       current = _mm256_min_epu32(current, permuted_vec);
     }
+    // SAFETY: `values` is still a valid mutable 8-lane chunk here.
     unsafe { store_u32x8(values.as_mut_ptr(), current) };
   }
 
@@ -74,10 +77,12 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
 
 #[inline]
 unsafe fn load_u32x8(ptr: *const u32) -> __m256i {
+  // SAFETY: caller guarantees `ptr` is valid for 8 contiguous `u32` values.
   unsafe { _mm256_loadu_si256(ptr.cast::<__m256i>()) }
 }
 
 #[inline]
 unsafe fn store_u32x8(ptr: *mut u32, value: __m256i) {
+  // SAFETY: caller guarantees `ptr` is valid for 8 contiguous mutable `u32` values.
   unsafe { _mm256_storeu_si256(ptr.cast::<__m256i>(), value) };
 }

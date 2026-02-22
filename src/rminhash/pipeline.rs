@@ -26,6 +26,14 @@ fn new_permutation_cache(
   ))
 }
 
+fn checked_matrix_len(rows: usize, num_perm: usize) -> PyResult<usize> {
+  rows.checked_mul(num_perm).ok_or_else(|| {
+    PyValueError::new_err(format!(
+      "digest matrix size overflow: rows={rows}, num_perm={num_perm}"
+    ))
+  })
+}
+
 struct DigestChunkJob {
   flat: Vec<u64>,
   ranges: Vec<(usize, usize)>,
@@ -48,7 +56,7 @@ impl RMinHash {
     permutations: &[(u64, u64)],
     permutations_soa: &PermutationSoA,
   ) {
-    digest_row.fill(u32::MAX);
+    // Callers pre-initialize matrix rows to u32::MAX.
     Self::apply_token_hashes_to_values(
       digest_row,
       permutations,
@@ -294,7 +302,8 @@ impl RMinHash {
     let permutations = Self::build_permutations(num_perm, seed);
     let permutations_soa = PermutationSoA::from_permutations(&permutations);
     let config = DigestBuildConfig::from_env();
-    let mut matrix_data = vec![u32::MAX; rows.saturating_mul(num_perm)];
+    let matrix_len = checked_matrix_len(rows, num_perm)?;
+    let mut matrix_data = vec![u32::MAX; matrix_len];
 
     Python::attach(|py| {
       py.detach(|| {
@@ -369,7 +378,8 @@ impl RMinHash {
     I: Iterator<Item = Bound<'py, PyAny>>,
   {
     let config = DigestBuildConfig::from_env();
-    let mut matrix_data = vec![u32::MAX; rows.saturating_mul(num_perm)];
+    let matrix_len = checked_matrix_len(rows, num_perm)?;
+    let mut matrix_data = vec![u32::MAX; matrix_len];
     let mut token_hashes_chunk = Vec::new();
     let mut token_hash_ranges = Vec::with_capacity(config.doc_chunk_size);
     let mut chunk_row_start = 0usize;
@@ -563,7 +573,8 @@ impl RMinHash {
     }
 
     let capacity = Self::token_sets_capacity(token_sets);
-    let mut matrix_data = Vec::with_capacity(capacity.saturating_mul(num_perm));
+    let matrix_capacity = checked_matrix_len(capacity, num_perm)?;
+    let mut matrix_data = Vec::with_capacity(matrix_capacity);
     let mut token_hashes_chunk = Vec::new();
     let mut token_hash_ranges = Vec::with_capacity(config.doc_chunk_size);
     let context = DigestComputeContext {

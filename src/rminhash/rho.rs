@@ -97,6 +97,14 @@ fn saturating_u16(value: usize) -> u16 {
   u16::try_from(value).unwrap_or(u16::MAX)
 }
 
+fn checked_len_mul(left: usize, right: usize, label: &str) -> PyResult<usize> {
+  left.checked_mul(right).ok_or_else(|| {
+    PyValueError::new_err(format!(
+      "{label} size overflow: left={left}, right={right}"
+    ))
+  })
+}
+
 const fn rho_adaptive_token_budget_for_row(
   source_token_count: Option<usize>,
   default_budget: Option<usize>,
@@ -389,123 +397,71 @@ fn collect_token_refs_from_sequence(
   }
 }
 
-#[inline]
-unsafe fn collect_token_refs_from_list(
-  py: Python<'_>,
-  list_ptr: *mut ffi::PyObject,
-  token_len: usize,
-  take: usize,
-  token_refs: &mut Vec<TokenBytesRef>,
-) -> PyResult<bool> {
-  let first_item_ptr = unsafe { ffi::PyList_GET_ITEM(list_ptr, 0) };
-  let (first_is_unicode, first_is_bytes, first_type_ptr) = unsafe {
-    (
-      ffi::PyUnicode_Check(first_item_ptr) != 0,
-      ffi::PyBytes_Check(first_item_ptr) != 0,
-      ffi::Py_TYPE(first_item_ptr),
-    )
-  };
-
-  let collect = |index: usize| -> PyResult<Option<TokenBytesRef>> {
-    debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
-    #[allow(clippy::cast_possible_wrap)]
-    let index_ssize = index as ffi::Py_ssize_t;
-    let item_ptr = unsafe { ffi::PyList_GET_ITEM(list_ptr, index_ssize) };
-    if first_is_unicode {
-      let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
-      if item_type_ptr == first_type_ptr {
-        return unsafe { token_bytes_ref_from_unicode_ptr(py, item_ptr) }
-          .map(Some);
-      }
-    } else if first_is_bytes {
-      let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
-      if item_type_ptr == first_type_ptr {
-        return unsafe { token_bytes_ref_from_bytes_ptr(py, item_ptr) }
-          .map(Some);
-      }
-    }
-    token_bytes_ref_from_token_ptr(py, item_ptr)
-  };
-
-  if take == token_len {
-    for index in 0..take {
-      let Some(token_ref) = collect(index)? else {
-        return Ok(true);
+macro_rules! impl_collect_token_refs {
+  ($name:ident, $get_item:ident) => {
+    #[inline]
+    unsafe fn $name(
+      py: Python<'_>,
+      sequence_ptr: *mut ffi::PyObject,
+      token_len: usize,
+      take: usize,
+      token_refs: &mut Vec<TokenBytesRef>,
+    ) -> PyResult<bool> {
+      let first_item_ptr = unsafe { ffi::$get_item(sequence_ptr, 0) };
+      let (first_is_unicode, first_is_bytes, first_type_ptr) = unsafe {
+        (
+          ffi::PyUnicode_Check(first_item_ptr) != 0,
+          ffi::PyBytes_Check(first_item_ptr) != 0,
+          ffi::Py_TYPE(first_item_ptr),
+        )
       };
-      token_refs.push(token_ref);
-    }
-    return Ok(false);
-  }
 
-  let mut sampler = MidpointSampler::new(token_len, take);
-  for _ in 0..take {
-    let index = sampler.next();
-    let Some(token_ref) = collect(index)? else {
-      return Ok(true);
-    };
-    token_refs.push(token_ref);
-  }
-  Ok(false)
+      let collect = |index: usize| -> PyResult<Option<TokenBytesRef>> {
+        debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
+        #[allow(clippy::cast_possible_wrap)]
+        let index_ssize = index as ffi::Py_ssize_t;
+        let item_ptr = unsafe { ffi::$get_item(sequence_ptr, index_ssize) };
+        if first_is_unicode {
+          let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
+          if item_type_ptr == first_type_ptr {
+            return unsafe { token_bytes_ref_from_unicode_ptr(py, item_ptr) }
+              .map(Some);
+          }
+        } else if first_is_bytes {
+          let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
+          if item_type_ptr == first_type_ptr {
+            return unsafe { token_bytes_ref_from_bytes_ptr(py, item_ptr) }
+              .map(Some);
+          }
+        }
+        token_bytes_ref_from_token_ptr(py, item_ptr)
+      };
+
+      if take == token_len {
+        for index in 0..take {
+          let Some(token_ref) = collect(index)? else {
+            return Ok(true);
+          };
+          token_refs.push(token_ref);
+        }
+        return Ok(false);
+      }
+
+      let mut sampler = MidpointSampler::new(token_len, take);
+      for _ in 0..take {
+        let index = sampler.next();
+        let Some(token_ref) = collect(index)? else {
+          return Ok(true);
+        };
+        token_refs.push(token_ref);
+      }
+      Ok(false)
+    }
+  };
 }
 
-#[inline]
-unsafe fn collect_token_refs_from_tuple(
-  py: Python<'_>,
-  tuple_ptr: *mut ffi::PyObject,
-  token_len: usize,
-  take: usize,
-  token_refs: &mut Vec<TokenBytesRef>,
-) -> PyResult<bool> {
-  let first_item_ptr = unsafe { ffi::PyTuple_GET_ITEM(tuple_ptr, 0) };
-  let (first_is_unicode, first_is_bytes, first_type_ptr) = unsafe {
-    (
-      ffi::PyUnicode_Check(first_item_ptr) != 0,
-      ffi::PyBytes_Check(first_item_ptr) != 0,
-      ffi::Py_TYPE(first_item_ptr),
-    )
-  };
-
-  let collect = |index: usize| -> PyResult<Option<TokenBytesRef>> {
-    debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
-    #[allow(clippy::cast_possible_wrap)]
-    let index_ssize = index as ffi::Py_ssize_t;
-    let item_ptr = unsafe { ffi::PyTuple_GET_ITEM(tuple_ptr, index_ssize) };
-    if first_is_unicode {
-      let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
-      if item_type_ptr == first_type_ptr {
-        return unsafe { token_bytes_ref_from_unicode_ptr(py, item_ptr) }
-          .map(Some);
-      }
-    } else if first_is_bytes {
-      let item_type_ptr = unsafe { ffi::Py_TYPE(item_ptr) };
-      if item_type_ptr == first_type_ptr {
-        return unsafe { token_bytes_ref_from_bytes_ptr(py, item_ptr) }
-          .map(Some);
-      }
-    }
-    token_bytes_ref_from_token_ptr(py, item_ptr)
-  };
-
-  if take == token_len {
-    for index in 0..take {
-      let Some(token_ref) = collect(index)? else {
-        return Ok(true);
-      };
-      token_refs.push(token_ref);
-    }
-    return Ok(false);
-  }
-
-  let mut sampler = MidpointSampler::new(token_len, take);
-  for _ in 0..take {
-    let index = sampler.next();
-    let Some(token_ref) = collect(index)? else {
-      return Ok(true);
-    };
-    token_refs.push(token_ref);
-  }
-  Ok(false)
-}
+impl_collect_token_refs!(collect_token_refs_from_list, PyList_GET_ITEM);
+impl_collect_token_refs!(collect_token_refs_from_tuple, PyTuple_GET_ITEM);
 
 fn append_sparse_sidecar_for_row(
   non_empty_count: usize,
@@ -664,7 +620,7 @@ impl RMinHash {
     token_budget: Option<usize>,
     densify_enabled: bool,
   ) {
-    digest_row.fill(EMPTY_BUCKET);
+    // Callers pre-initialize rows with EMPTY_BUCKET.
     if digest_row.is_empty() || token_hashes.is_empty() {
       return;
     }
@@ -710,7 +666,6 @@ impl RMinHash {
     probes: usize,
     densify_enabled: bool,
   ) -> usize {
-    row.fill(EMPTY_BUCKET);
     token_hashes.clear();
     let num_perm_u64 = row.len() as u64;
     let is_power_of_two = row.len().is_power_of_two();
@@ -775,14 +730,14 @@ impl RMinHash {
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
 
-    let matrix_len = rows.saturating_mul(num_perm);
-    let mut matrix_data = Vec::<u32>::with_capacity(matrix_len);
-
-    let mut non_empty_counts = Vec::<u16>::with_capacity(rows);
-
-    let mut source_token_counts = Vec::<u16>::with_capacity(rows);
+    let matrix_len = checked_len_mul(rows, num_perm, "rho matrix")?;
+    let mut matrix_data = vec![EMPTY_BUCKET; matrix_len];
+    let mut non_empty_counts = vec![0u16; rows];
+    let mut source_token_counts = vec![0u16; rows];
     let mut sparse_verify_signatures = if sparse_verify_perm > 0 {
-      vec![u32::MAX; rows.saturating_mul(sparse_verify_perm)]
+      let sparse_sig_len =
+        checked_len_mul(rows, sparse_verify_perm, "rho sparse verify")?;
+      vec![u32::MAX; sparse_sig_len]
     } else {
       Vec::new()
     };
@@ -817,16 +772,16 @@ impl RMinHash {
 
     let worker = thread::spawn(move || {
       for chunk in work_rx {
-        let row_count = chunk.row_end.saturating_sub(chunk.row_start);
+        let row_count = chunk.row_end - chunk.row_start;
+        let matrix_offset = chunk.row_start * num_perm;
+        let matrix_chunk_len = row_count * num_perm;
 
         // SAFETY: output pointers refer to preallocated vectors which remain alive
         // until the worker thread is joined. Each chunk writes to a disjoint row range.
         let matrix_chunk = unsafe {
           std::slice::from_raw_parts_mut(
-            output_ptrs
-              .matrix
-              .add(chunk.row_start.saturating_mul(num_perm)),
-            row_count.saturating_mul(num_perm),
+            output_ptrs.matrix.add(matrix_offset),
+            matrix_chunk_len,
           )
         };
         let non_empty_chunk = unsafe {
@@ -885,9 +840,8 @@ impl RMinHash {
           };
           let sparse_sig_chunk = unsafe {
             std::slice::from_raw_parts_mut(
-              sparse_sig_ptr
-                .add(chunk.row_start.saturating_mul(sparse_verify_perm)),
-              row_count.saturating_mul(sparse_verify_perm),
+              sparse_sig_ptr.add(chunk.row_start * sparse_verify_perm),
+              row_count * sparse_verify_perm,
             )
           };
 
@@ -952,18 +906,26 @@ impl RMinHash {
     while row_start < rows {
       let row_end = (row_start + chunk_size).min(rows);
 
-      let chunk_rows = row_end.saturating_sub(row_start);
+      let chunk_rows = row_end - row_start;
       let max_take_per_row = default_token_budget
         .unwrap_or(0)
         .max(DEFAULT_RHO_SHORT_FULL_TOKEN_THRESHOLD)
         .max(medium_token_budget);
-      let mut token_refs =
-        Vec::with_capacity(chunk_rows.saturating_mul(max_take_per_row));
-      let mut row_token_offsets =
-        Vec::with_capacity(row_end.saturating_sub(row_start) + 1);
+      let token_ref_capacity = match checked_len_mul(
+        chunk_rows,
+        max_take_per_row,
+        "rho token refs chunk",
+      ) {
+        Ok(value) => value,
+        Err(err) => {
+          extraction_error = Some(err);
+          break;
+        }
+      };
+      let mut token_refs = Vec::with_capacity(token_ref_capacity);
+      let mut row_token_offsets = Vec::with_capacity(chunk_rows + 1);
       row_token_offsets.push(0);
-      let mut chunk_source_counts =
-        Vec::with_capacity(row_end.saturating_sub(row_start));
+      let mut chunk_source_counts = Vec::with_capacity(chunk_rows);
 
       for row_index in row_start..row_end {
         // SAFETY: row indices come from a CPython `Py_ssize_t` length.
@@ -1073,12 +1035,6 @@ impl RMinHash {
     if should_fallback {
       return Ok(None);
     }
-    // SAFETY: each slot is written by the worker before reaching this point.
-    unsafe {
-      matrix_data.set_len(matrix_len);
-      non_empty_counts.set_len(rows);
-      source_token_counts.set_len(rows);
-    }
 
     let rho_sidecar = RhoDigestSidecar {
       non_empty_counts,
@@ -1104,7 +1060,9 @@ impl RMinHash {
     probes: usize,
   ) -> PyResult<RMinHashDigestMatrix> {
     let capacity = Self::token_sets_capacity(token_sets);
-    let mut matrix_data = Vec::with_capacity(capacity.saturating_mul(num_perm));
+    let matrix_capacity =
+      checked_len_mul(capacity, num_perm, "rho matrix capacity")?;
+    let mut matrix_data = Vec::with_capacity(matrix_capacity);
     let mut rows = 0usize;
     let sketch = RhoSketchConfig::from_env(num_perm, probes);
     let probes = sketch.probes;
@@ -1118,8 +1076,13 @@ impl RMinHash {
     let mut token_hashes = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
     let mut source_token_counts = Vec::with_capacity(capacity);
+    let sparse_verify_capacity = checked_len_mul(
+      capacity,
+      sparse_verify_perm,
+      "rho sparse verify capacity",
+    )?;
     let mut sparse_verify_signatures =
-      Vec::with_capacity(capacity.saturating_mul(sparse_verify_perm));
+      Vec::with_capacity(sparse_verify_capacity);
     let mut sparse_verify_active = Vec::with_capacity(capacity);
 
     Self::for_each_document(token_sets, |document| {
@@ -1192,7 +1155,9 @@ impl RMinHash {
     probes: usize,
   ) -> PyResult<RMinHashDigestMatrix> {
     let capacity = Self::token_sets_capacity(token_hash_sets);
-    let mut matrix_data = Vec::with_capacity(capacity.saturating_mul(num_perm));
+    let matrix_capacity =
+      checked_len_mul(capacity, num_perm, "rho matrix capacity")?;
+    let mut matrix_data = Vec::with_capacity(matrix_capacity);
     let mut rows = 0usize;
     let sketch = RhoSketchConfig::from_env(num_perm, probes);
     let probes = sketch.probes;
@@ -1206,8 +1171,13 @@ impl RMinHash {
     let mut token_hashes = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
     let mut source_token_counts = Vec::with_capacity(capacity);
+    let sparse_verify_capacity = checked_len_mul(
+      capacity,
+      sparse_verify_perm,
+      "rho sparse verify capacity",
+    )?;
     let mut sparse_verify_signatures =
-      Vec::with_capacity(capacity.saturating_mul(sparse_verify_perm));
+      Vec::with_capacity(sparse_verify_capacity);
     let mut sparse_verify_active = Vec::with_capacity(capacity);
 
     Self::for_each_document(token_hash_sets, |document| {
@@ -1278,7 +1248,8 @@ impl RMinHash {
   ) -> PyResult<RMinHashDigestMatrix> {
     Self::validate_flat_row_offsets(row_offsets, token_hashes.len())?;
     let rows = row_offsets.len().saturating_sub(1);
-    let mut matrix_data = vec![EMPTY_BUCKET; rows.saturating_mul(num_perm)];
+    let matrix_len = checked_len_mul(rows, num_perm, "rho matrix")?;
+    let mut matrix_data = vec![EMPTY_BUCKET; matrix_len];
     let sketch = RhoSketchConfig::from_env(num_perm, probes);
     let probes = sketch.probes;
     let default_token_budget = sketch.default_token_budget;
@@ -1290,8 +1261,10 @@ impl RMinHash {
     let densify_enabled = sketch.densify_enabled;
     let mut non_empty_counts = Vec::with_capacity(rows);
     let mut source_token_counts = Vec::with_capacity(rows);
+    let sparse_verify_capacity =
+      checked_len_mul(rows, sparse_verify_perm, "rho sparse verify capacity")?;
     let mut sparse_verify_signatures =
-      Vec::with_capacity(rows.saturating_mul(sparse_verify_perm));
+      Vec::with_capacity(sparse_verify_capacity);
     let mut sparse_verify_active = Vec::with_capacity(rows);
     for (row_index, row) in matrix_data.chunks_exact_mut(num_perm).enumerate() {
       let start = row_offsets[row_index];

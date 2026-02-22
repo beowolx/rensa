@@ -25,11 +25,9 @@ pub struct PermutationSoA {
 
 #[cfg(target_arch = "aarch64")]
 #[inline]
+#[allow(clippy::cast_possible_truncation)]
 pub(super) const fn split_u64_words(value: u64) -> (u32, u32) {
-  (
-    (value & 0xffff_ffff) as u32,
-    ((value >> 32) & 0xffff_ffff) as u32,
-  )
+  (value as u32, (value >> 32) as u32)
 }
 
 impl PermutationSoA {
@@ -131,10 +129,23 @@ const fn kernel_kind_name(kind: KernelKind) -> &'static str {
 fn detect_kernel_kind() -> KernelKind {
   if let Some(value) = std::env::var_os("RENSA_FORCE_KERNEL") {
     if let Some(kind) = parse_forced_kernel(&value.to_string_lossy()) {
-      return kind;
+      if forced_kernel_supported(kind) {
+        return kind;
+      }
     }
   }
   default_kernel_kind()
+}
+
+#[inline]
+fn forced_kernel_supported(kind: KernelKind) -> bool {
+  match kind {
+    KernelKind::Scalar => true,
+    #[cfg(target_arch = "aarch64")]
+    KernelKind::Neon => std::arch::is_aarch64_feature_detected!("neon"),
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx2 => std::arch::is_x86_feature_detected!("avx2"),
+  }
 }
 
 fn parse_forced_kernel(value: &str) -> Option<KernelKind> {
@@ -231,9 +242,12 @@ fn scalar_apply_hash_batch_to_values(
   debug_assert!(perm_len <= hash_values.len());
   let permutations_ptr = permutations.as_ptr();
   let values_ptr = hash_values.as_mut_ptr();
+  let hash_ptr = hash_batch.as_ptr();
+  let hash_len = hash_batch.len();
   let mut index = 0usize;
 
   while index + 8 <= perm_len {
+    // SAFETY: `index + 7 < perm_len <= permutations.len()` in this loop.
     let (a0, b0) = unsafe { *permutations_ptr.add(index) };
     let (a1, b1) = unsafe { *permutations_ptr.add(index + 1) };
     let (a2, b2) = unsafe { *permutations_ptr.add(index + 2) };
@@ -252,10 +266,9 @@ fn scalar_apply_hash_batch_to_values(
     let mut min6 = unsafe { *values_ptr.add(index + 6) };
     let mut min7 = unsafe { *values_ptr.add(index + 7) };
 
-    let hash_ptr = hash_batch.as_ptr();
-    let hash_len = hash_batch.len();
     let mut hash_index = 0usize;
     while hash_index + 1 < hash_len {
+      // SAFETY: `hash_index + 1 < hash_len == hash_batch.len()` in this loop.
       let item_hash0 = unsafe { *hash_ptr.add(hash_index) };
       let item_hash1 = unsafe { *hash_ptr.add(hash_index + 1) };
 
@@ -280,6 +293,7 @@ fn scalar_apply_hash_batch_to_values(
     }
 
     if hash_index < hash_len {
+      // SAFETY: `hash_index < hash_len == hash_batch.len()`.
       let item_hash = unsafe { *hash_ptr.add(hash_index) };
       min0 = min0.min(permute_hash(item_hash, a0, b0));
       min1 = min1.min(permute_hash(item_hash, a1, b1));
@@ -305,12 +319,13 @@ fn scalar_apply_hash_batch_to_values(
   }
 
   while index < perm_len {
+    // SAFETY: `index < perm_len <= permutations.len()`.
     let (a, b) = unsafe { *permutations_ptr.add(index) };
+    // SAFETY: `index < perm_len <= hash_values.len()`.
     let mut min_value = unsafe { *values_ptr.add(index) };
-    let hash_ptr = hash_batch.as_ptr();
-    let hash_len = hash_batch.len();
     let mut hash_index = 0usize;
     while hash_index + 1 < hash_len {
+      // SAFETY: `hash_index + 1 < hash_len == hash_batch.len()`.
       let item_hash0 = unsafe { *hash_ptr.add(hash_index) };
       let item_hash1 = unsafe { *hash_ptr.add(hash_index + 1) };
       min_value = min_value.min(permute_hash(item_hash0, a, b));
@@ -318,6 +333,7 @@ fn scalar_apply_hash_batch_to_values(
       hash_index += 2;
     }
     if hash_index < hash_len {
+      // SAFETY: `hash_index < hash_len == hash_batch.len()`.
       let item_hash = unsafe { *hash_ptr.add(hash_index) };
       min_value = min_value.min(permute_hash(item_hash, a, b));
     }
@@ -331,8 +347,8 @@ fn scalar_apply_hash_batch_to_values(
 #[cfg(test)]
 mod tests {
   use crate::simd::dispatch::{
-    kernel_kind_name, parse_forced_kernel, scalar_apply_hash_batch_to_values,
-    KernelKind, PermutationSoA,
+    forced_kernel_supported, kernel_kind_name, parse_forced_kernel,
+    scalar_apply_hash_batch_to_values, KernelKind, PermutationSoA,
   };
   use crate::utils::permute_hash;
   use rand_core::{RngCore, SeedableRng};
@@ -373,6 +389,21 @@ mod tests {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     assert_eq!(parse_forced_kernel("avx2"), Some(KernelKind::Avx2));
     assert_eq!(parse_forced_kernel("unknown"), None);
+  }
+
+  #[test]
+  fn forced_kernel_support_mapping_matches_runtime() {
+    assert!(forced_kernel_supported(KernelKind::Scalar));
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(
+      forced_kernel_supported(KernelKind::Neon),
+      std::arch::is_aarch64_feature_detected!("neon")
+    );
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(
+      forced_kernel_supported(KernelKind::Avx2),
+      std::arch::is_x86_feature_detected!("avx2")
+    );
   }
 
   #[test]
