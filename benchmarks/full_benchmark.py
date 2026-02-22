@@ -12,6 +12,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping
@@ -122,7 +123,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Fair full benchmark across Datasketch, FastSketch, and Rensa. "
-            "Uses per-engine process isolation, randomized engine order per repetition, "
+            "Uses per-run process isolation (all engines in one subprocess), "
+            "randomized engine order per repetition, "
             "and explicit single-thread plus multi-thread lanes."
         ),
     )
@@ -374,6 +376,27 @@ def thread_env(threads: int) -> dict[str, str]:
     return env
 
 
+def resolve_package_version(
+    package_name: str,
+    module_name: str | None = None,
+) -> str | None:
+    try:
+        return importlib_metadata.version(package_name)
+    except importlib_metadata.PackageNotFoundError:
+        if module_name is None:
+            return None
+    try:
+        module = __import__(module_name if module_name is not None else package_name)
+    except Exception:
+        return None
+    version = getattr(module, "__version__", None)
+    return str(version) if version is not None else None
+
+
+def current_rensa_env() -> dict[str, str]:
+    return {key: value for key, value in sorted(os.environ.items()) if key.startswith("RENSA_")}
+
+
 def run_datasketch(
     token_sets: list[list[str]],
     num_perm: int,
@@ -382,33 +405,40 @@ def run_datasketch(
     seed: int,
 ) -> tuple[dict[str, Any], list[bool]]:
     rows_per_band = num_perm // num_bands
+    _ = threshold  # `params=(b, r)` controls banding for datasketch in this benchmark.
 
+    # Datasketch's batch APIs reuse initialized state and avoid repeated setup.
     sketch_start = perf_counter()
-    minhashes: list[MinHash] = []
-    for tokens in token_sets:
-        minhash = MinHash(num_perm=num_perm, seed=seed)
-        minhash.update_batch(token.encode("utf-8") for token in tokens)
-        minhashes.append(minhash)
+    if hasattr(MinHash, "generator"):
+        byte_sets = ([token.encode("utf-8") for token in tokens] for tokens in token_sets)
+        minhashes: list[MinHash] = list(
+            MinHash.generator(byte_sets, num_perm=num_perm, seed=seed)
+        )
+    else:
+        minhashes = []
+        for tokens in token_sets:
+            minhash = MinHash(num_perm=num_perm, seed=seed)
+            minhash.update_batch(token.encode("utf-8") for token in tokens)
+            minhashes.append(minhash)
     sketch_elapsed = perf_counter() - sketch_start
 
     lsh = MinHashLSH(
-        threshold=threshold,
         num_perm=num_perm,
         params=(num_bands, rows_per_band),
     )
 
     build_start = perf_counter()
     for index, minhash in enumerate(minhashes):
-        lsh.insert(str(index), minhash)
+        lsh.insert(index, minhash, check_duplication=False)
     build_elapsed = perf_counter() - build_start
 
     query_start = perf_counter()
     duplicate_flags: list[bool] = []
     total_candidates = 0
-    for minhash in minhashes:
+    for index, minhash in enumerate(minhashes):
         candidates = lsh.query(minhash)
         total_candidates += len(candidates)
-        duplicate_flags.append(len(candidates) > 1)
+        duplicate_flags.append(any(candidate != index for candidate in candidates))
     query_elapsed = perf_counter() - query_start
 
     rows = len(token_sets)
@@ -986,6 +1016,12 @@ def main(args: argparse.Namespace) -> None:
     )
     print(f"Datasets: {dataset_keys}")
     print(f"Thread modes: {thread_modes}")
+    if args.warmup_runs == 0 and args.repetitions == 1:
+        print(
+            "Stability note: warmup_runs=0 and repetitions=1 is the fastest config "
+            "but can be noisy. For publication-grade comparisons, prefer warmup_runs>=1 "
+            "and repetitions>=3."
+        )
     print(
         "Datasketch lane note: Datasketch does not expose an explicit thread count API; "
         "lane thread env vars are still pinned for symmetry."
@@ -1064,6 +1100,14 @@ def main(args: argparse.Namespace) -> None:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
+            "library_versions": {
+                "datasketch": resolve_package_version("datasketch"),
+                "datasets": resolve_package_version("datasets"),
+                "rensa": resolve_package_version("rensa", module_name="rensa"),
+                "fastsketch": resolve_package_version(
+                    "FastSketchLSH", module_name="FastSketchLSH"
+                ),
+            },
         },
         "config": {
             "datasets": dataset_keys,
@@ -1079,6 +1123,7 @@ def main(args: argparse.Namespace) -> None:
             "max_rows": global_max_rows,
             "dataset_max_rows": dataset_max_rows_overrides,
             "cache_dir": str(args.cache_dir),
+            "rensa_env": current_rensa_env(),
             "datasketch_threading_note": (
                 "Datasketch does not expose explicit thread count controls; "
                 "lane env vars are pinned for process symmetry."
