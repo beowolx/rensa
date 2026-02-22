@@ -37,6 +37,9 @@ pub fn hash_single_bufferlike(
     if ffi::PyByteArray_Check(object_ptr) != 0 {
       return ptr_hash::hash_bytearray_ptr(items.py(), object_ptr).map(Some);
     }
+    if ffi::PyMemoryView_Check(object_ptr) != 0 {
+      return buffer::hash_buffer_like(items).map(Some);
+    }
   }
 
   if buffer::has_buffer_protocol(items) {
