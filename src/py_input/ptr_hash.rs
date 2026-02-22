@@ -89,6 +89,9 @@ pub fn hash_token_ptr(
     if ffi::PyByteArray_Check(object_ptr) != 0 {
       return hash_bytearray_ptr(py, object_ptr);
     }
+    if ffi::PyMemoryView_Check(object_ptr) != 0 {
+      return hash_buffer_like(&item);
+    }
     if has_buffer_protocol(&item) {
       return hash_buffer_like(&item);
     }
@@ -108,6 +111,9 @@ pub fn hash_byte_token_ptr(
     }
     if ffi::PyByteArray_Check(object_ptr) != 0 {
       return hash_bytearray_ptr(py, object_ptr);
+    }
+    if ffi::PyMemoryView_Check(object_ptr) != 0 {
+      return hash_buffer_like(&item);
     }
     if has_buffer_protocol(&item) {
       return hash_buffer_like(&item);

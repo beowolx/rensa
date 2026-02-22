@@ -136,14 +136,14 @@ def test_cminhash_top_level_bytes_and_memoryview_are_single_tokens():
 def test_rminhash_rejects_non_contiguous_memoryview():
     m = RMinHash(num_perm=32, seed=42)
     non_contiguous = memoryview(bytearray(b"abcd"))[::2]
-    with pytest.raises(TypeError, match="C-contiguous and byte-sized"):
+    with pytest.raises(TypeError, match="C-contiguous"):
         m.update(non_contiguous)
 
 
 def test_cminhash_rejects_non_contiguous_memoryview():
     m = CMinHash(num_perm=32, seed=42)
     non_contiguous = memoryview(bytearray(b"abcd"))[::2]
-    with pytest.raises(TypeError, match="C-contiguous and byte-sized"):
+    with pytest.raises(TypeError, match="C-contiguous"):
         m.update(non_contiguous)
 
 

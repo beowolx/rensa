@@ -8,15 +8,20 @@ use pyo3::types::PyAny;
 #[inline]
 pub fn has_buffer_protocol(item: &Bound<'_, PyAny>) -> bool {
   // Probe buffer capability portably (works for CPython and PyPy).
+  // Try broad buffer flags first so non-contiguous exporters are still detected.
   unsafe {
-    let mut view = ffi::Py_buffer::new();
-    let result =
-      ffi::PyObject_GetBuffer(item.as_ptr(), &raw mut view, ffi::PyBUF_SIMPLE);
-    if result == 0 {
-      ffi::PyBuffer_Release(&raw mut view);
+    let object_ptr = item.as_ptr();
+    if ffi::PyMemoryView_Check(object_ptr) != 0 {
       return true;
     }
-    ffi::PyErr_Clear();
+    for flags in [ffi::PyBUF_STRIDES, ffi::PyBUF_ND, ffi::PyBUF_SIMPLE] {
+      let mut view = ffi::Py_buffer::new();
+      if ffi::PyObject_GetBuffer(object_ptr, &raw mut view, flags) == 0 {
+        ffi::PyBuffer_Release(&raw mut view);
+        return true;
+      }
+      ffi::PyErr_Clear();
+    }
     false
   }
 }
