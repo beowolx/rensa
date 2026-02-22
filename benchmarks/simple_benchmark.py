@@ -20,9 +20,11 @@ from full_benchmark import (
     DEFAULT_SEED,
     DEFAULT_THRESHOLD,
     THREAD_ENV_VARS,
+    current_rensa_env,
     jaccard_similarity,
     load_or_prepare_token_cache,
     mismatch_stats,
+    resolve_package_version,
     resolve_max_rows,
     run_datasketch,
     run_fastsketch,
@@ -43,7 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Simple single-thread benchmark comparing Datasketch, FastSketch, "
-            "Rensa R-MinHash, and Rensa C-MinHash on one dataset preset."
+            "Rensa R-MinHash, and Rensa C-MinHash on one dataset preset. "
+            "Accuracy comparisons are reported only for batch/query-all engines."
         )
     )
     parser.add_argument(
@@ -199,24 +202,20 @@ def run_once(
                 "datasketch_vs_rensa_r": jaccard_similarity(
                     kept_sets["datasketch"], kept_sets["rensa_r"]
                 ),
-                "datasketch_vs_rensa_c": jaccard_similarity(
-                    kept_sets["datasketch"], kept_sets["rensa_c"]
-                ),
-                "rensa_r_vs_rensa_c": jaccard_similarity(
-                    kept_sets["rensa_r"], kept_sets["rensa_c"]
-                ),
                 "rensa_r_vs_fastsketch": jaccard_similarity(
                     kept_sets["rensa_r"], kept_sets["fastsketch"]
-                ),
-                "rensa_c_vs_fastsketch": jaccard_similarity(
-                    kept_sets["rensa_c"], kept_sets["fastsketch"]
                 ),
             },
             "mismatch_vs_datasketch": {
                 "fastsketch": mismatch_stats(datasketch_flags, flags_by_engine["fastsketch"]),
                 "rensa_r": mismatch_stats(datasketch_flags, flags_by_engine["rensa_r"]),
-                "rensa_c": mismatch_stats(datasketch_flags, flags_by_engine["rensa_c"]),
             },
+            "notes": [
+                (
+                    "rensa_c uses streaming add-if-unique semantics in this benchmark and "
+                    "is excluded from batch/query-all accuracy comparisons."
+                )
+            ],
         },
     }
     return payload
@@ -257,12 +256,9 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     jaccard_keys = (
         "datasketch_vs_fastsketch",
         "datasketch_vs_rensa_r",
-        "datasketch_vs_rensa_c",
-        "rensa_r_vs_rensa_c",
         "rensa_r_vs_fastsketch",
-        "rensa_c_vs_fastsketch",
     )
-    mismatch_keys = ("fastsketch", "rensa_r", "rensa_c")
+    mismatch_keys = ("fastsketch", "rensa_r")
 
     return {
         "engine_medians": engine_summary,
@@ -340,7 +336,7 @@ def print_summary(summary: dict[str, Any]) -> None:
         print(f"  {key}: {value:.6f}")
 
     print("\nMismatch vs Datasketch duplicate flags (median):")
-    for engine in ("fastsketch", "rensa_r", "rensa_c"):
+    for engine in ("fastsketch", "rensa_r"):
         mismatch = summary["accuracy"]["mismatch_vs_datasketch"][engine]
         print(
             f"  {engine}: count={mismatch['median_count']} "
@@ -436,6 +432,14 @@ def main(args: argparse.Namespace) -> None:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
+            "library_versions": {
+                "datasketch": resolve_package_version("datasketch"),
+                "datasets": resolve_package_version("datasets"),
+                "rensa": resolve_package_version("rensa", module_name="rensa"),
+                "fastsketch": resolve_package_version(
+                    "FastSketchLSH", module_name="FastSketchLSH"
+                ),
+            },
         },
         "config": {
             "dataset": spec.key,
@@ -460,6 +464,7 @@ def main(args: argparse.Namespace) -> None:
             "thread_env": thread_env,
             "token_cache": str(token_cache),
             "token_cache_sha256": token_cache_sha256,
+            "rensa_env": current_rensa_env(),
         },
         "runs": measured_runs,
         "summary": summary,

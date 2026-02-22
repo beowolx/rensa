@@ -257,7 +257,9 @@ uv run python benchmarks/full_benchmark.py
 `benchmarks/` now contains two scripts:
 
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
-- `benchmarks/full_benchmark.py`: fair process-isolated benchmark across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
+- `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
+
+`simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 
 ## Contributing
 
