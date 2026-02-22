@@ -199,12 +199,12 @@ unsafe fn for_each_token_hash_in_tuple<F>(
 where
   F: FnMut(u64) -> PyResult<()>,
 {
-  let length = ffi::PyTuple_GET_SIZE(object_ptr);
+  let length = ffi::PyTuple_Size(object_ptr);
   if length == 0 {
     return Ok(());
   }
 
-  let first_item = ffi::PyTuple_GET_ITEM(object_ptr, 0);
+  let first_item = ffi::PyTuple_GetItem(object_ptr, 0);
   let mode = TokenHashMode::from_first_item(first_item);
   let first_type_ptr = ffi::Py_TYPE(first_item);
 
@@ -212,7 +212,7 @@ where
   match mode {
     TokenHashMode::Unicode => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         visitor(if item_type_ptr == first_type_ptr {
           hash_unicode_ptr(py, item_ptr)?
@@ -224,7 +224,7 @@ where
     }
     TokenHashMode::Bytes => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         visitor(if item_type_ptr == first_type_ptr {
           hash_bytes_ptr(py, item_ptr)?
@@ -236,7 +236,7 @@ where
     }
     TokenHashMode::ByteArray => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         visitor(if item_type_ptr == first_type_ptr {
           hash_bytearray_ptr(py, item_ptr)?
@@ -248,7 +248,7 @@ where
     }
     TokenHashMode::Generic => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         visitor(hash_token_ptr(py, item_ptr)?)?;
         index += 1;
       }
@@ -340,13 +340,13 @@ unsafe fn extend_tokens_from_tuple(
   object_ptr: *mut ffi::PyObject,
   output: &mut Vec<u64>,
 ) -> PyResult<()> {
-  let length = ffi::PyTuple_GET_SIZE(object_ptr);
+  let length = ffi::PyTuple_Size(object_ptr);
   output.reserve(py_ssize_to_usize(length)?);
   if length == 0 {
     return Ok(());
   }
 
-  let first_item = ffi::PyTuple_GET_ITEM(object_ptr, 0);
+  let first_item = ffi::PyTuple_GetItem(object_ptr, 0);
   let mode = TokenHashMode::from_first_item(first_item);
   let first_type_ptr = ffi::Py_TYPE(first_item);
 
@@ -354,7 +354,7 @@ unsafe fn extend_tokens_from_tuple(
   match mode {
     TokenHashMode::Unicode => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_unicode_ptr(py, item_ptr)?
@@ -366,7 +366,7 @@ unsafe fn extend_tokens_from_tuple(
     }
     TokenHashMode::Bytes => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytes_ptr(py, item_ptr)?
@@ -378,7 +378,7 @@ unsafe fn extend_tokens_from_tuple(
     }
     TokenHashMode::ByteArray => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytearray_ptr(py, item_ptr)?
@@ -390,7 +390,7 @@ unsafe fn extend_tokens_from_tuple(
     }
     TokenHashMode::Generic => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         output.push(hash_token_ptr(py, item_ptr)?);
         index += 1;
       }
@@ -576,7 +576,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
   output: &mut Vec<u64>,
   max_tokens: usize,
 ) -> PyResult<()> {
-  let length = ffi::PyTuple_GET_SIZE(object_ptr);
+  let length = ffi::PyTuple_Size(object_ptr);
   let length_usize = py_ssize_to_usize(length)?;
   output.reserve(length_usize.min(max_tokens));
   if length_usize == 0 {
@@ -586,7 +586,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
     return extend_tokens_from_tuple(py, object_ptr, output);
   }
 
-  let first_item = ffi::PyTuple_GET_ITEM(object_ptr, 0);
+  let first_item = ffi::PyTuple_GetItem(object_ptr, 0);
   let mode = TokenHashMode::from_first_item(first_item);
   let first_type_ptr = ffi::Py_TYPE(first_item);
   let mut sampler = MidpointSampler::new(length_usize, max_tokens);
@@ -597,7 +597,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
         debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
         #[allow(clippy::cast_possible_wrap)]
         let index_ssize = index as ffi::Py_ssize_t;
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index_ssize);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index_ssize);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_unicode_ptr(py, item_ptr)?
@@ -612,7 +612,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
         debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
         #[allow(clippy::cast_possible_wrap)]
         let index_ssize = index as ffi::Py_ssize_t;
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index_ssize);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index_ssize);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytes_ptr(py, item_ptr)?
@@ -627,7 +627,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
         debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
         #[allow(clippy::cast_possible_wrap)]
         let index_ssize = index as ffi::Py_ssize_t;
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index_ssize);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index_ssize);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytearray_ptr(py, item_ptr)?
@@ -642,7 +642,7 @@ unsafe fn extend_tokens_from_tuple_sampled(
         debug_assert!(index <= ffi::Py_ssize_t::MAX as usize);
         #[allow(clippy::cast_possible_wrap)]
         let index_ssize = index as ffi::Py_ssize_t;
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index_ssize);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index_ssize);
         output.push(hash_token_ptr(py, item_ptr)?);
       }
     }
@@ -741,13 +741,13 @@ unsafe fn extend_byte_tokens_from_tuple(
   object_ptr: *mut ffi::PyObject,
   output: &mut Vec<u64>,
 ) -> PyResult<()> {
-  let length = ffi::PyTuple_GET_SIZE(object_ptr);
+  let length = ffi::PyTuple_Size(object_ptr);
   output.reserve(py_ssize_to_usize(length)?);
   if length == 0 {
     return Ok(());
   }
 
-  let first_item = ffi::PyTuple_GET_ITEM(object_ptr, 0);
+  let first_item = ffi::PyTuple_GetItem(object_ptr, 0);
   let mode = ByteTokenHashMode::from_first_item(first_item);
   let first_type_ptr = ffi::Py_TYPE(first_item);
 
@@ -755,7 +755,7 @@ unsafe fn extend_byte_tokens_from_tuple(
   match mode {
     ByteTokenHashMode::Bytes => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytes_ptr(py, item_ptr)?
@@ -767,7 +767,7 @@ unsafe fn extend_byte_tokens_from_tuple(
     }
     ByteTokenHashMode::ByteArray => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         let item_type_ptr = ffi::Py_TYPE(item_ptr);
         output.push(if item_type_ptr == first_type_ptr {
           hash_bytearray_ptr(py, item_ptr)?
@@ -779,7 +779,7 @@ unsafe fn extend_byte_tokens_from_tuple(
     }
     ByteTokenHashMode::Generic => {
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         output.push(hash_byte_token_ptr(py, item_ptr)?);
         index += 1;
       }
@@ -800,7 +800,7 @@ pub fn fast_sequence_length(
     };
     let length = match kind {
       FastSequenceKind::List => ffi::PyList_GET_SIZE(object_ptr),
-      FastSequenceKind::Tuple => ffi::PyTuple_GET_SIZE(object_ptr),
+      FastSequenceKind::Tuple => ffi::PyTuple_Size(object_ptr),
     };
     py_ssize_to_usize(length).map(Some)
   }

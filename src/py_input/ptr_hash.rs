@@ -1,4 +1,4 @@
-use crate::py_input::buffer::hash_buffer_like;
+use crate::py_input::buffer::{has_buffer_protocol, hash_buffer_like};
 use crate::py_input::convert::py_err_to_type_error;
 use crate::utils::calculate_hash_fast;
 use pyo3::ffi;
@@ -79,6 +79,7 @@ pub fn hash_token_ptr(
 ) -> PyResult<u64> {
   // SAFETY: object_ptr is a borrowed Python object pointer under GIL.
   unsafe {
+    let item = Bound::from_borrowed_ptr(py, object_ptr);
     if ffi::PyUnicode_Check(object_ptr) != 0 {
       return hash_unicode_ptr(py, object_ptr);
     }
@@ -88,8 +89,7 @@ pub fn hash_token_ptr(
     if ffi::PyByteArray_Check(object_ptr) != 0 {
       return hash_bytearray_ptr(py, object_ptr);
     }
-    if ffi::PyObject_CheckBuffer(object_ptr) != 0 {
-      let item = Bound::from_borrowed_ptr(py, object_ptr);
+    if has_buffer_protocol(&item) {
       return hash_buffer_like(&item);
     }
   }
@@ -102,14 +102,14 @@ pub fn hash_byte_token_ptr(
 ) -> PyResult<u64> {
   // SAFETY: object_ptr is a borrowed Python object pointer under GIL.
   unsafe {
+    let item = Bound::from_borrowed_ptr(py, object_ptr);
     if ffi::PyBytes_Check(object_ptr) != 0 {
       return hash_bytes_ptr(py, object_ptr);
     }
     if ffi::PyByteArray_Check(object_ptr) != 0 {
       return hash_bytearray_ptr(py, object_ptr);
     }
-    if ffi::PyObject_CheckBuffer(object_ptr) != 0 {
-      let item = Bound::from_borrowed_ptr(py, object_ptr);
+    if has_buffer_protocol(&item) {
       return hash_buffer_like(&item);
     }
   }
