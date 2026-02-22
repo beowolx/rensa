@@ -357,7 +357,7 @@ unsafe fn sequence_len(
   if is_list {
     unsafe { ffi::PyList_GET_SIZE(sequence_ptr) }
   } else {
-    unsafe { ffi::PyTuple_GET_SIZE(sequence_ptr) }
+    unsafe { ffi::PyTuple_Size(sequence_ptr) }
   }
 }
 
@@ -461,7 +461,7 @@ macro_rules! impl_collect_token_refs {
 }
 
 impl_collect_token_refs!(collect_token_refs_from_list, PyList_GET_ITEM);
-impl_collect_token_refs!(collect_token_refs_from_tuple, PyTuple_GET_ITEM);
+impl_collect_token_refs!(collect_token_refs_from_tuple, PyTuple_GetItem);
 
 fn append_sparse_sidecar_for_row(
   non_empty_count: usize,
@@ -937,7 +937,7 @@ impl RMinHash {
           if outer_is_list {
             ffi::PyList_GET_ITEM(object_ptr, row_index_ssize)
           } else {
-            ffi::PyTuple_GET_ITEM(object_ptr, row_index_ssize)
+            ffi::PyTuple_GetItem(object_ptr, row_index_ssize)
           }
         };
 

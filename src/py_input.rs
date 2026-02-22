@@ -151,11 +151,11 @@ pub fn extend_prehashed_token_values_from_document(
     // SAFETY: tuple access is guarded by CPython tuple checks and GIL.
     unsafe {
       let object_ptr = py_tuple.as_ptr();
-      let length = ffi::PyTuple_GET_SIZE(object_ptr);
+      let length = ffi::PyTuple_Size(object_ptr);
       output.reserve(convert::py_ssize_to_usize(length)?);
       let mut index: ffi::Py_ssize_t = 0;
       while index < length {
-        let item_ptr = ffi::PyTuple_GET_ITEM(object_ptr, index);
+        let item_ptr = ffi::PyTuple_GetItem(object_ptr, index);
         output.push(prehashed::extract_prehashed_u64_ptr(item_ptr)?);
         index += 1;
       }

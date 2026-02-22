@@ -7,7 +7,18 @@ use pyo3::types::PyAny;
 
 #[inline]
 pub fn has_buffer_protocol(item: &Bound<'_, PyAny>) -> bool {
-  unsafe { ffi::PyObject_CheckBuffer(item.as_ptr()) != 0 }
+  // Probe buffer capability portably (works for CPython and PyPy).
+  unsafe {
+    let mut view = ffi::Py_buffer::new();
+    let result =
+      ffi::PyObject_GetBuffer(item.as_ptr(), &raw mut view, ffi::PyBUF_SIMPLE);
+    if result == 0 {
+      ffi::PyBuffer_Release(&raw mut view);
+      return true;
+    }
+    ffi::PyErr_Clear();
+    false
+  }
 }
 
 pub fn hash_buffer_like(item: &Bound<'_, PyAny>) -> PyResult<u64> {
