@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry;
 #[cfg(target_pointer_width = "64")]
 const USIZE_MASK_U64: u64 = u64::MAX;
 #[cfg(target_pointer_width = "32")]
-const USIZE_MASK_U64: u64 = u64::from(u32::MAX);
+const USIZE_MASK_U64: u64 = u32::MAX as u64;
 
 #[inline]
 fn u64_to_usize_lowbits(value: u64) -> usize {
@@ -24,7 +24,7 @@ const fn usize_to_u64_lowbits(value: usize) -> u64 {
   }
   #[cfg(target_pointer_width = "32")]
   {
-    u64::from(value as u32)
+    value as u32 as u64
   }
 }
 

@@ -562,7 +562,7 @@ digests = RMinHash.digests_from_token_sets(token_sets, num_perm=64, seed=42)
 print(json.dumps(digests))
 """
 
-    def run_with_kernel(kernel: str | None) -> list[list[int]]:
+    def run_with_kernel(kernel) -> list[list[int]]:
         env = os.environ.copy()
         if kernel is None:
             env.pop("RENSA_FORCE_KERNEL", None)

@@ -95,8 +95,37 @@ def run_rensa_c(
     entries = [(str(index), tokens) for index, tokens in enumerate(token_sets)]
 
     start = perf_counter()
-    deduper = CMinHashDeduplicator(threshold=threshold, num_perm=num_perm, seed=seed)
-    inserted_flags = [bool(value) for value in deduper.add_pairs(entries)]
+    constructor_variants = (
+        {"threshold": threshold, "num_perm": num_perm, "seed": seed},
+        {"threshold": threshold, "seed": seed},
+        {"threshold": threshold},
+    )
+    deduper = None
+    last_error: TypeError | None = None
+    for kwargs in constructor_variants:
+        try:
+            deduper = CMinHashDeduplicator(**kwargs)
+            break
+        except TypeError as err:
+            # Compatibility fallback for older branch checkouts in CI perf comparisons.
+            if "unexpected keyword argument" not in str(err):
+                raise
+            last_error = err
+    if deduper is None:
+        raise RuntimeError(
+            "Unsupported CMinHashDeduplicator constructor across benchmarked revisions"
+        ) from last_error
+    if hasattr(deduper, "add_pairs"):
+        inserted_flags = [bool(value) for value in deduper.add_pairs(entries)]
+    else:
+        # Compatibility fallback for older branch checkouts in CI perf comparisons.
+        from rensa import CMinHash  # type: ignore
+
+        inserted_flags = []
+        for index, tokens in enumerate(token_sets):
+            minhash = CMinHash(num_perm=num_perm, seed=seed)
+            minhash.update(tokens)
+            inserted_flags.append(bool(deduper.add(str(index), minhash)))
     elapsed = perf_counter() - start
 
     duplicate_flags = [not inserted for inserted in inserted_flags]

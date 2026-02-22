@@ -12,27 +12,8 @@ pub unsafe fn hash_unicode_ptr(
   py: Python<'_>,
   object_ptr: *mut ffi::PyObject,
 ) -> PyResult<u64> {
-  // SAFETY: caller ensures `object_ptr` points to a unicode object.
-  if unsafe { ffi::PyUnicode_IS_READY(object_ptr) } == 0
-    && unsafe { ffi::PyUnicode_READY(object_ptr) } == -1
-  {
-    return Err(PyErr::fetch(py));
-  }
-
-  // SAFETY: unicode object is ready.
-  if unsafe { ffi::PyUnicode_IS_ASCII(object_ptr) } != 0 {
-    // SAFETY: pointer/length are valid for ready unicode object.
-    let length_ssize = unsafe { ffi::PyUnicode_GET_LENGTH(object_ptr) };
-    debug_assert!(length_ssize >= 0);
-    let length = length_ssize as usize;
-    let data = unsafe { ffi::PyUnicode_1BYTE_DATA(object_ptr) }.cast::<u8>();
-    // SAFETY: pointer returned by CPython stays valid while object is alive.
-    let bytes = unsafe { std::slice::from_raw_parts(data, length) };
-    return Ok(calculate_hash_fast(bytes));
-  }
-
   let mut length: ffi::Py_ssize_t = 0;
-  // SAFETY: unicode object is valid.
+  // SAFETY: caller ensures `object_ptr` points to a unicode object.
   let utf8_ptr =
     unsafe { ffi::PyUnicode_AsUTF8AndSize(object_ptr, &raw mut length) };
   if utf8_ptr.is_null() {

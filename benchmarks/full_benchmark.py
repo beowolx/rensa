@@ -99,6 +99,8 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=37_777,
+        # JSON source can fail with non-streaming pyarrow parsing on some snapshots.
+        streaming=True,
     ),
     "bookcorpusopen": DatasetSpec(
         key="bookcorpusopen",
@@ -508,6 +510,8 @@ def run_rensa(
 ) -> tuple[dict[str, Any], list[bool]]:
     from rensa import RMinHash, RMinHashLSH  # type: ignore
 
+    matrix: Any | None = None
+    minhashes: list[Any] | None = None
     sketch_start = perf_counter()
     if hasattr(RMinHash, "digest_matrix_from_token_sets_rho"):
         probes = int(os.environ.get("RENSA_RHO_PROBES", "4"))
@@ -517,29 +521,38 @@ def run_rensa(
             seed=seed,
             probes=probes,
         )
-    else:
+    elif hasattr(RMinHash, "digest_matrix_from_token_sets"):
         matrix = RMinHash.digest_matrix_from_token_sets(
             token_sets,
             num_perm=num_perm,
             seed=seed,
         )
+    else:
+        # Compatibility fallback for older branch checkouts in CI perf comparisons.
+        minhashes = []
+        for tokens in token_sets:
+            minhash = RMinHash(num_perm=num_perm, seed=seed)
+            minhash.update(tokens)
+            minhashes.append(minhash)
     sketch_elapsed = perf_counter() - sketch_start
 
     lsh = RMinHashLSH(threshold=threshold, num_perm=num_perm, num_bands=num_bands)
 
     query_elapsed = 0.0
-    if hasattr(lsh, "query_duplicate_flags_matrix_one_shot"):
+    if matrix is not None and hasattr(lsh, "query_duplicate_flags_matrix_one_shot"):
         build_start = perf_counter()
-        duplicate_flags = [bool(value) for value in lsh.query_duplicate_flags_matrix_one_shot(matrix)]
+        duplicate_flags = [
+            bool(value) for value in lsh.query_duplicate_flags_matrix_one_shot(matrix)
+        ]
         build_elapsed = perf_counter() - build_start
-    elif hasattr(lsh, "insert_matrix_and_query_duplicate_flags"):
+    elif matrix is not None and hasattr(lsh, "insert_matrix_and_query_duplicate_flags"):
         build_start = perf_counter()
         duplicate_flags = [
             bool(value)
             for value in lsh.insert_matrix_and_query_duplicate_flags(matrix, start_key=0)
         ]
         build_elapsed = perf_counter() - build_start
-    else:
+    elif matrix is not None and hasattr(lsh, "insert_matrix") and hasattr(lsh, "query_duplicate_flags_matrix"):
         build_start = perf_counter()
         lsh.insert_matrix(matrix, start_key=0)
         build_elapsed = perf_counter() - build_start
@@ -547,6 +560,22 @@ def run_rensa(
         query_start = perf_counter()
         duplicate_flags = [bool(value) for value in lsh.query_duplicate_flags_matrix(matrix)]
         query_elapsed = perf_counter() - query_start
+    elif minhashes is not None:
+        build_start = perf_counter()
+        for index, minhash in enumerate(minhashes):
+            lsh.insert(index, minhash)
+        build_elapsed = perf_counter() - build_start
+
+        query_start = perf_counter()
+        duplicate_flags = []
+        for minhash in minhashes:
+            candidates = lsh.query(minhash)
+            duplicate_flags.append(len(candidates) > 1)
+        query_elapsed = perf_counter() - query_start
+    else:
+        raise RuntimeError(
+            "Unsupported rensa API shape: no compatible matrix or per-item benchmark path"
+        )
 
     rows = len(duplicate_flags)
     rows_removed = sum(1 for is_duplicate in duplicate_flags if is_duplicate)
