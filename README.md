@@ -1,6 +1,6 @@
 # Rensa
 
-High-performance MinHash in Rust with Python bindings. 50x+ faster than datasketch in benchmarked deduplication workloads, with near-identical results.
+High-performance MinHash in Rust with Python bindings. On the latest full benchmark suite, Rensa is 608.52x faster than datasketch and 11.92x faster than FastSketch, with near-identical results.
 
 ## What is Rensa?
 
@@ -15,21 +15,21 @@ It ships two MinHash variants:
 
 ## Performance
 
-Benchmarked against datasketch on `gretelai/synthetic_text_to_sql` (100K rows, 128 permutations, threshold 0.95):
+Numbers below come from the latest full benchmark run (`benchmarks/full_benchmark.py`) over 7 datasets and 2 thread lanes (`threads=1,8`), 128 permutations, threshold 0.8, and 8 bands.
 
-![Deduplication speed: 100K rows](./assets/bench_time_100k.png)
+![Deduplication speed: full benchmark suite](./assets/bench_time_full_suite.png)
 
-| Method        | Median Time | Speedup    | Accuracy vs Datasketch |
-| ------------- | ----------- | ---------- | ---------------------- |
-| Datasketch    | 42.95s      | —          | —                      |
-| **R-MinHash** | **0.83s**   | **52.04x** | 0.9999 Jaccard         |
-| **C-MinHash** | **0.94s**   | **45.77x** | 0.9992 Jaccard         |
+| Comparison | Average speedup |
+| ---------- | --------------- |
+| **Rensa vs Datasketch** | **608.52x faster** |
+| **Rensa vs FastSketch** | **11.92x faster** |
 
-The accuracy column is the Jaccard similarity between each method's set of deduplicated rows and datasketch's. A score like 0.9999 means R-MinHash and datasketch agree on virtually every row, but not necessarily all rows.
+| Accuracy vs Datasketch | Value |
+| ---------------------- | ----- |
+| Mean Jaccard of kept sets | 0.987219 |
+| Mean duplicate-flag mismatch rate | 0.010717 |
 
-R-MinHash also uses less memory. On the same 100K-row workload, one measured run dropped peak traced memory from about 778 MB (`datasketch`) to about 493 MB (`R-MinHash`), roughly 37% lower.
-
-![Memory usage comparison](./assets/bench_memory.png)
+These accuracy metrics are from the same full benchmark run as the speed numbers above.
 
 ## How R-MinHash works
 
@@ -51,7 +51,7 @@ This choice has a useful side effect: since the output is naturally 32 bits, sig
 
 On top of the algorithm, Rensa applies several low-level optimizations.
 
-Input elements are hashed with an FNV-1a variant that processes 8 bytes per step. MinHash needs uniform distribution, not collision resistance, so there's no reason to pay for a cryptographic hash function.
+Input elements are hashed with a fast non-cryptographic hash that mirrors `rustc_hash::FxHasher` semantics while avoiding trait dispatch in the hot path. MinHash needs uniform distribution, not collision resistance, so there's no reason to pay for a cryptographic hash function.
 
 Elements are hashed in groups of 32. Permutations are applied to each batch in chunks of 16, using a fixed-size temporary array (`[u32; 16]`) that is register-friendly. This gives the compiler room to optimize tight loops and keeps working data cache-local.
 
@@ -122,6 +122,59 @@ for doc_id, mh in minhashes.items():
 print(f"Removed {len(to_remove)} duplicates from {len(dataset)} rows")
 ```
 
+### Batch APIs
+
+For large batches, build and query in bulk to reduce Python call overhead:
+
+```python
+from rensa import RMinHash, RMinHashLSH, RMinHashDeduplicator
+
+token_sets = [
+    "select id from users".split(),
+    "select name from users".split(),
+    "select id from users".split(),
+]
+keys = [f"doc-{idx}" for idx in range(len(token_sets))]
+
+minhashes = RMinHash.from_token_sets(token_sets, num_perm=128, seed=42)
+digests = RMinHash.digests_from_token_sets(token_sets, num_perm=128, seed=42)
+
+lsh = RMinHashLSH(threshold=0.8, num_perm=128, num_bands=8)
+lsh.insert_pairs(enumerate(minhashes))
+candidates_per_doc = lsh.query_all(minhashes)
+
+dedup = RMinHashDeduplicator(threshold=0.8, num_perm=128, use_lsh=True, num_bands=8)
+added_flags = dedup.add_pairs(zip(keys, minhashes))
+is_dup_flags = dedup.is_duplicate_pairs(zip(keys, minhashes))
+duplicate_sets = dedup.get_duplicate_sets(minhashes)
+```
+
+`CMinHash` supports the same batch constructors, plus `digests64_from_token_sets(...)`.
+
+For expert throughput paths (when you already have hashed tokens or byte tokens):
+
+```python
+from rensa import CMinHash, RMinHash
+
+token_sets = [
+    "select id from users".split(),
+    "select name from users".split(),
+]
+token_hash_sets = RMinHash.hash_token_sets(token_sets)
+
+r_matrix = RMinHash.digest_matrix_from_token_hash_sets(
+    token_hash_sets, num_perm=128, seed=42
+)
+byte_matrix = RMinHash.digest_matrix_from_token_byte_sets(
+    [[b"alpha", b"beta"], [b"gamma", b"delta"]],
+    num_perm=128,
+    seed=42,
+)
+c_digests64 = CMinHash.digests64_from_token_hash_sets(
+    token_hash_sets, num_perm=128, seed=42
+)
+```
+
 ### Streaming deduplication
 
 For continuous data streams, use the built-in deduplicator:
@@ -144,12 +197,20 @@ for doc in document_stream:
 
 ### RMinHash / CMinHash
 
-| Method                     | Description                                                |
-| -------------------------- | ---------------------------------------------------------- |
-| `__init__(num_perm, seed)` | Create a MinHash with `num_perm` permutations              |
-| `update(items)`            | Add items (list of strings, bytes, or iterables)           |
-| `jaccard(other)`           | Estimate Jaccard similarity (requires matching `num_perm`) |
-| `digest()`                 | Return the signature as a list of integers                 |
+| Method                           | Description                                                |
+| -------------------------------- | ---------------------------------------------------------- |
+| `__init__(num_perm, seed)`       | Create a MinHash with `num_perm` permutations              |
+| `update(items)`                  | Add items (list of strings, bytes, or iterables)           |
+| `jaccard(other)`                 | Estimate Jaccard similarity (requires matching `num_perm`) |
+| `digest()`                       | Return the signature as a list of integers                 |
+| `from_token_sets(...)`           | Build many MinHash objects from token iterables            |
+| `digests_from_token_sets(...)`   | Compute many digests in one call                           |
+| `hash_token_sets(...)`           | Hash token sets to reusable `u64` token hashes             |
+| `digest_matrix_from_token_sets(...)` | Build compact row-major digest matrix                  |
+| `digest_matrix_from_token_hash_sets(...)` | Build compact digest matrix from pre-hashed `u64` tokens |
+| `digest_matrix_from_token_byte_sets(...)` | Build compact digest matrix from bytes-like tokens |
+| `digests64_from_token_sets(...)` | `CMinHash` only, returns `u64`-precision digests           |
+| `digests64_from_token_hash_sets(...)` | `CMinHash` only, uses pre-hashed `u64` tokens         |
 
 ### RMinHashLSH
 
@@ -159,17 +220,24 @@ for doc in document_stream:
 | `insert(key, minhash)`                     | Add a document to the index                                    |
 | `query(minhash)`                           | Return candidate similar document keys                         |
 | `remove(key)`                              | Remove a document from the index                               |
+| `insert_pairs(entries)`                    | Insert many `(key, minhash)` pairs                             |
+| `insert_many(minhashes, start_key=0)`      | Insert many `minhashes` with sequential keys                   |
+| `query_all(minhashes)`                     | Query many minhashes in one call                               |
+| `query_duplicate_flags(minhashes)`         | Return `len(query(minhash)) > 1` flags for many minhashes      |
 
 ### RMinHashDeduplicator / CMinHashDeduplicator
 
 | Method                                                               | Description                                 |
 | -------------------------------------------------------------------- | ------------------------------------------- |
-| `RMinHashDeduplicator(threshold, num_perm, use_lsh, num_bands=None)` | R-MinHash streaming deduplicator            |
-| `CMinHashDeduplicator(threshold)`                                    | C-MinHash streaming deduplicator            |
+| `RMinHashDeduplicator(threshold, num_perm, use_lsh, num_bands=None, seed=42)` | R-MinHash streaming deduplicator            |
+| `CMinHashDeduplicator(threshold, num_perm=None, seed=42)`           | C-MinHash streaming deduplicator            |
 | `add(key, minhash) -> bool`                                          | Add if unique, returns whether it was added |
 | `is_duplicate(key, minhash) -> bool`                                 | Check without adding                        |
 | `get_duplicates(minhash) -> list[str]`                               | Find keys of similar stored items           |
 | `remove(key)` / `clear()`                                            | Manage stored items                         |
+| `add_pairs(entries) -> list[bool]`                                   | Batch add `(key, minhash)` or `(key, token_set)` pairs |
+| `is_duplicate_pairs(entries) -> list[bool]`                          | Batch duplicate checks for minhash or token-set pairs  |
+| `get_duplicate_sets(minhashes) -> list[list[str]]`                   | Batch duplicate candidate lookup (minhash or token-set inputs) |
 
 ## Running Benchmarks
 
@@ -180,7 +248,18 @@ uv run maturin develop --release
 uv run python benchmarks/simple_benchmark.py
 ```
 
-See `benchmarks/` for the full suite, including the 1.8M-row wikitext benchmark.
+Run the full cross-library benchmark (single-thread + multi-thread lanes):
+
+```bash
+uv run python benchmarks/full_benchmark.py
+```
+
+`benchmarks/` now contains two scripts:
+
+- `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
+- `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
+
+`simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 
 ## Contributing
 

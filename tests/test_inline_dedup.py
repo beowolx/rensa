@@ -216,3 +216,184 @@ class TestInlineDeduplication:
 
         with pytest.raises(ValueError, match="num_perm mismatch"):
             dedup.add("doc2", c64)
+
+    def test_rminhash_batch_methods_match_scalar_methods(self):
+        entries = []
+        for idx, words in enumerate(
+            (["alpha", "beta"], ["alpha", "beta", "gamma"], ["x", "y"])
+        ):
+            minhash = RMinHash(num_perm=64, seed=42)
+            minhash.update(words)
+            entries.append((f"doc{idx}", minhash))
+
+        scalar = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+        scalar_add = [scalar.add(key, minhash) for key, minhash in entries]
+        scalar_dup = [scalar.is_duplicate(key, minhash) for key, minhash in entries]
+        scalar_sets = [scalar.get_duplicates(minhash) for _, minhash in entries]
+
+        batch = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+        batch_add = batch.add_pairs(entries)
+        batch_dup = batch.is_duplicate_pairs(entries)
+        batch_sets = batch.get_duplicate_sets([minhash for _, minhash in entries])
+
+        assert batch_add == scalar_add
+        assert batch_dup == scalar_dup
+        assert batch_sets == scalar_sets
+
+    def test_cminhash_batch_methods_match_scalar_methods(self):
+        entries = []
+        for idx, words in enumerate(
+            (["alpha", "beta"], ["alpha", "beta", "gamma"], ["x", "y"])
+        ):
+            minhash = CMinHash(num_perm=64, seed=42)
+            minhash.update(words)
+            entries.append((f"doc{idx}", minhash))
+
+        scalar = CMinHashDeduplicator(threshold=0.8)
+        scalar_add = [scalar.add(key, minhash) for key, minhash in entries]
+        scalar_dup = [scalar.is_duplicate(key, minhash) for key, minhash in entries]
+        scalar_sets = [scalar.get_duplicates(minhash) for _, minhash in entries]
+
+        batch = CMinHashDeduplicator(threshold=0.8)
+        batch_add = batch.add_pairs(entries)
+        batch_dup = batch.is_duplicate_pairs(entries)
+        batch_sets = batch.get_duplicate_sets([minhash for _, minhash in entries])
+
+        assert batch_add == scalar_add
+        assert batch_dup == scalar_dup
+        assert batch_sets == scalar_sets
+
+    def test_rminhash_batch_methods_reject_malformed_entries(self):
+        dedup = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+        minhash = RMinHash(num_perm=64, seed=42)
+        minhash.update(["alpha", "beta"])
+
+        with pytest.raises(TypeError):
+            dedup.add_pairs([(1, minhash)])
+
+        with pytest.raises(TypeError):
+            dedup.is_duplicate_pairs([(1, minhash)])
+
+    def test_rminhash_batch_methods_reject_num_perm_mismatch(self):
+        dedup = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+        good = RMinHash(num_perm=64, seed=42)
+        good.update(["alpha", "beta"])
+        bad = RMinHash(num_perm=32, seed=42)
+        bad.update(["alpha", "beta"])
+
+        assert dedup.add_pairs([("doc-good", good)]) == [True]
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.add_pairs([("doc-bad", bad)])
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.is_duplicate_pairs([("doc-bad", bad)])
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.get_duplicate_sets([bad])
+
+    def test_rminhash_token_set_batch_entries_match_object_batch(self):
+        token_entries = [
+            ("doc0", ["alpha", "beta"]),
+            ("doc1", ["alpha", "beta", "gamma"]),
+            ("doc2", ["x", "y"]),
+        ]
+        minhash_entries = []
+        for key, tokens in token_entries:
+            minhash = RMinHash(num_perm=64, seed=42)
+            minhash.update(tokens)
+            minhash_entries.append((key, minhash))
+
+        object_dedup = RMinHashDeduplicator(
+            threshold=0.8, num_perm=64, use_lsh=False
+        )
+        object_add = object_dedup.add_pairs(minhash_entries)
+        object_dup = object_dedup.is_duplicate_pairs(minhash_entries)
+
+        token_dedup = RMinHashDeduplicator(
+            threshold=0.8, num_perm=64, use_lsh=False
+        )
+        token_add = token_dedup.add_pairs(token_entries)
+        token_dup = token_dedup.is_duplicate_pairs(token_entries)
+
+        assert token_add == object_add
+        assert token_dup == object_dup
+
+    def test_rminhash_token_set_batch_entries_reject_malformed_tokens(self):
+        dedup = RMinHashDeduplicator(threshold=0.8, num_perm=64, use_lsh=False)
+
+        with pytest.raises(TypeError):
+            dedup.add_pairs([("doc0", [123])])
+
+        with pytest.raises(TypeError):
+            dedup.is_duplicate_pairs([("doc0", [123])])
+
+    def test_cminhash_batch_methods_reject_malformed_entries(self):
+        dedup = CMinHashDeduplicator(threshold=0.8)
+        minhash = CMinHash(num_perm=64, seed=42)
+        minhash.update(["alpha", "beta"])
+
+        with pytest.raises(TypeError):
+            dedup.add_pairs([(1, minhash)])
+
+        with pytest.raises(TypeError):
+            dedup.is_duplicate_pairs([(1, minhash)])
+
+    def test_cminhash_batch_methods_reject_num_perm_mismatch(self):
+        dedup = CMinHashDeduplicator(threshold=0.8)
+        good = CMinHash(num_perm=64, seed=42)
+        good.update(["alpha", "beta"])
+        bad = CMinHash(num_perm=32, seed=42)
+        bad.update(["alpha", "beta"])
+
+        assert dedup.add_pairs([("doc-good", good)]) == [True]
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.add_pairs([("doc-bad", bad)])
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.is_duplicate_pairs([("doc-bad", bad)])
+
+        with pytest.raises(ValueError, match="num_perm mismatch"):
+            dedup.get_duplicate_sets([bad])
+
+    def test_cminhash_token_set_batch_entries_match_object_batch(self):
+        token_entries = [
+            ("doc0", ["alpha", "beta"]),
+            ("doc1", ["alpha", "beta", "gamma"]),
+            ("doc2", ["x", "y"]),
+        ]
+        minhash_entries = []
+        for key, tokens in token_entries:
+            minhash = CMinHash(num_perm=64, seed=42)
+            minhash.update(tokens)
+            minhash_entries.append((key, minhash))
+
+        object_dedup = CMinHashDeduplicator(threshold=0.8)
+        object_add = object_dedup.add_pairs(minhash_entries)
+        object_dup = object_dedup.is_duplicate_pairs(minhash_entries)
+
+        token_dedup = CMinHashDeduplicator(threshold=0.8, num_perm=64, seed=42)
+        token_add = token_dedup.add_pairs(token_entries)
+        token_dup = token_dedup.is_duplicate_pairs(token_entries)
+
+        assert token_add == object_add
+        assert token_dup == object_dup
+
+    def test_cminhash_token_set_batch_entries_reject_malformed_tokens(self):
+        dedup = CMinHashDeduplicator(threshold=0.8, num_perm=64, seed=42)
+
+        with pytest.raises(TypeError):
+            dedup.add_pairs([("doc0", [123])])
+
+        with pytest.raises(TypeError):
+            dedup.is_duplicate_pairs([("doc0", [123])])
+
+    def test_cminhash_token_set_batch_entries_require_num_perm(self):
+        dedup = CMinHashDeduplicator(threshold=0.8)
+
+        with pytest.raises(ValueError, match="num_perm is not configured"):
+            dedup.add_pairs([("doc0", ["alpha", "beta"])])
+
+        with pytest.raises(ValueError, match="num_perm is not configured"):
+            dedup.is_duplicate_pairs([("doc0", ["alpha", "beta"])])
