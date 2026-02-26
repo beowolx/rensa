@@ -66,7 +66,7 @@ Rensa also includes C-MinHash, based on the [C-MinHash paper](https://arxiv.org/
 ## Installation
 
 ```bash
-pip install rensa
+uv add rensa
 ```
 
 Works on Linux, macOS, and Windows. Python >= 3.8.
