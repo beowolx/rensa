@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "rensa"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "mimalloc",
  "postcard",
