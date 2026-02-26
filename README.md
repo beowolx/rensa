@@ -1,6 +1,6 @@
 # Rensa
 
-High-performance MinHash in Rust with Python bindings. On the latest full benchmark suite, Rensa is 608.52x faster than datasketch and 11.92x faster than FastSketch, with near-identical results.
+High-performance MinHash in Rust with Python bindings. On a reference full benchmark suite, Rensa is 608.52x faster than datasketch and 11.92x faster than FastSketch, with near-identical results.
 
 ## What is Rensa?
 
@@ -15,7 +15,7 @@ It ships two MinHash variants:
 
 ## Performance
 
-Numbers below come from the latest full benchmark run (`benchmarks/full_benchmark.py`) over 7 datasets and 2 thread lanes (`threads=1,8`), 128 permutations, threshold 0.8, and 8 bands.
+Numbers below come from a reference full benchmark run (`benchmarks/full_benchmark.py`) over 7 datasets and 2 thread lanes (`threads=1,8`), 128 permutations, threshold 0.8, and 8 bands.
 
 ![Deduplication speed: full benchmark suite](./assets/bench_time_full_suite.png)
 
