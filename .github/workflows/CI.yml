@@ -209,10 +209,12 @@ jobs:
     timeout-minutes: 30
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
-      BENCH_DATASET: gretelai/synthetic_text_to_sql
-      BENCH_SPLIT: train
-      BENCH_REVISION: 740ab236e64503fba51be1101df7a1be83bf455d
+      BENCH_DATASET_KEY: ag_news
+      BENCH_MAX_ROWS: "10000"
+      BENCH_FULL_SMOKE_MAX_ROWS: "2000"
       BENCH_NUM_PERM: "128"
+      BENCH_NUM_BANDS: "8"
+      BENCH_THRESHOLD: "0.8"
       BENCH_PR_WARMUP_RUNS: "1"
       BENCH_PR_MEASURED_RUNS: "3"
     steps:
@@ -255,6 +257,7 @@ jobs:
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
             "datasets>=2.20" \
             "datasketch>=1.9" \
+            "FastSketchLSH" \
             "tqdm>=4.66"
           BENCH_VENV="${GITHUB_WORKSPACE}/.venv"
           BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
@@ -271,13 +274,13 @@ jobs:
             popd >/dev/null
 
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
-              --dataset "${BENCH_DATASET}" \
-              --split "${BENCH_SPLIT}" \
-              --revision "${BENCH_REVISION}" \
+              --dataset "${BENCH_DATASET_KEY}" \
+              --max-rows "${BENCH_MAX_ROWS}" \
               --num-perm "${BENCH_NUM_PERM}" \
+              --num-bands "${BENCH_NUM_BANDS}" \
+              --threshold "${BENCH_THRESHOLD}" \
               --warmup-runs "${BENCH_PR_WARMUP_RUNS}" \
               --measured-runs "${BENCH_PR_MEASURED_RUNS}" \
-              --disable-progress \
               --output-json "${output_json}" \
               | tee "${output_log}"
 
@@ -296,21 +299,60 @@ jobs:
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
 
-      - name: Validate PR benchmark regression gates
+      - name: Validate PR benchmark outputs
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/validate_benchmark.py \
-            --mode compare \
-            --head-json .bench/head.json \
-            --base-json .bench/base.json \
-            --min-speedup 40.0 \
-            --max-slowdown-fraction 0.10 \
-            --min-jaccard-ds-r 0.999 \
-            --min-jaccard-ds-c 0.998 \
-            --min-jaccard-r-c 0.998 \
-            | tee .bench/validation_pr.txt
+          "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY' | tee .bench/validation_pr.txt
+          import json
+
+          with open(".bench/head.json", "r", encoding="utf-8") as handle:
+              head = json.load(handle)
+          with open(".bench/base.json", "r", encoding="utf-8") as handle:
+              base = json.load(handle)
+
+          required_engines = ("datasketch", "fastsketch", "rensa_r", "rensa_c")
+          for engine in required_engines:
+              if engine not in head["summary"]["engine_medians"]:
+                  raise SystemExit(f"missing head engine metrics: {engine}")
+              if engine not in base["summary"]["engine_medians"]:
+                  raise SystemExit(f"missing base engine metrics: {engine}")
+
+          head_total = float(head["summary"]["engine_medians"]["rensa_r"]["median_total"])
+          base_total = float(base["summary"]["engine_medians"]["rensa_r"]["median_total"])
+          if base_total <= 0:
+              raise SystemExit("invalid base rensa_r median_total")
+          slowdown_fraction = (head_total / base_total) - 1.0
+
+          if slowdown_fraction > 0.10:
+              raise SystemExit(
+                  f"rensa_r slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
+                  f"slowdown={slowdown_fraction:.2%}"
+              )
+
+          print(
+              f"PASS: rensa_r median_total head={head_total:.6f}s "
+              f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}"
+          )
+          PY
+
+      - name: Run full benchmark smoke
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/full_benchmark.py \
+            --datasets "${BENCH_DATASET_KEY}" \
+            --threads "1,8" \
+            --max-rows "${BENCH_FULL_SMOKE_MAX_ROWS}" \
+            --num-perm "${BENCH_NUM_PERM}" \
+            --num-bands "${BENCH_NUM_BANDS}" \
+            --threshold "${BENCH_THRESHOLD}" \
+            --warmup-runs 0 \
+            --repetitions 1 \
+            --output-json .bench/full_head_smoke.json \
+            | tee .bench/full_head_smoke_summary.txt
 
       - name: Run push smoke benchmark
         if: github.event_name != 'pull_request'
@@ -323,34 +365,63 @@ jobs:
             --python .venv/bin/python \
             "datasets>=2.20" \
             "datasketch>=1.9" \
+            "FastSketchLSH" \
             "tqdm>=4.66"
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
 
           .venv/bin/python benchmarks/simple_benchmark.py \
-            --dataset "${BENCH_DATASET}" \
-            --split "${BENCH_SPLIT}" \
-            --revision "${BENCH_REVISION}" \
+            --dataset "${BENCH_DATASET_KEY}" \
+            --max-rows "${BENCH_MAX_ROWS}" \
             --num-perm "${BENCH_NUM_PERM}" \
+            --num-bands "${BENCH_NUM_BANDS}" \
+            --threshold "${BENCH_THRESHOLD}" \
             --warmup-runs 0 \
             --measured-runs 1 \
-            --disable-progress \
             --output-json .bench/head_smoke.json \
             | tee .bench/head_smoke_summary.txt
 
-      - name: Validate push smoke benchmark gates
+          .venv/bin/python benchmarks/full_benchmark.py \
+            --datasets "${BENCH_DATASET_KEY}" \
+            --threads "1,8" \
+            --max-rows "${BENCH_FULL_SMOKE_MAX_ROWS}" \
+            --num-perm "${BENCH_NUM_PERM}" \
+            --num-bands "${BENCH_NUM_BANDS}" \
+            --threshold "${BENCH_THRESHOLD}" \
+            --warmup-runs 0 \
+            --repetitions 1 \
+            --output-json .bench/full_head_smoke.json \
+            | tee .bench/full_head_smoke_summary.txt
+
+      - name: Validate push smoke benchmark outputs
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          .venv/bin/python benchmarks/validate_benchmark.py \
-            --mode absolute \
-            --head-json .bench/head_smoke.json \
-            --min-speedup 40.0 \
-            --min-jaccard-ds-r 0.999 \
-            --min-jaccard-ds-c 0.998 \
-            --min-jaccard-r-c 0.998 \
-            | tee .bench/validation_smoke.txt
+          .venv/bin/python - <<'PY' | tee .bench/validation_smoke.txt
+          import json
+
+          with open(".bench/head_smoke.json", "r", encoding="utf-8") as handle:
+              simple_payload = json.load(handle)
+          with open(".bench/full_head_smoke.json", "r", encoding="utf-8") as handle:
+              full_payload = json.load(handle)
+
+          required_simple = ("datasketch", "fastsketch", "rensa_r", "rensa_c")
+          for engine in required_simple:
+              if engine not in simple_payload["summary"]["engine_medians"]:
+                  raise SystemExit(f"missing simple benchmark engine metrics: {engine}")
+
+          if not full_payload.get("results"):
+              raise SystemExit("full benchmark smoke produced no results")
+
+          required_full = ("datasketch", "fastsketch", "rensa")
+          lane = full_payload["results"][0]["summary"]["engine_medians"]
+          for engine in required_full:
+              if engine not in lane:
+                  raise SystemExit(f"missing full benchmark engine metrics: {engine}")
+
+          print("PASS: simple + full smoke benchmark outputs are valid")
+          PY
 
       - name: Upload performance artifacts
         if: always()

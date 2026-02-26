@@ -34,20 +34,48 @@
 //! This LSH implementation is particularly useful for tasks such as near-duplicate detection,
 //! document clustering, etc.
 
-use crate::rminhash::RMinHash;
-use crate::utils::calculate_band_hash;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 use rustc_hash::FxHasher;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 
+mod config;
+mod index;
+mod one_shot;
+mod py;
+
+#[cfg(target_pointer_width = "64")]
+const FX_POLY_K: usize = 0xf135_7aea_2e62_a9c5;
+#[cfg(target_pointer_width = "32")]
+const FX_POLY_K: usize = 0x93d7_65dd;
+
+#[cfg(target_pointer_width = "64")]
+const FX_FINISH_ROTATE: u32 = 26;
+#[cfg(target_pointer_width = "32")]
+const FX_FINISH_ROTATE: u32 = 15;
+
 /// `RMinHashLSH` implements Locality-Sensitive Hashing using `MinHash` for efficient similarity search.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[pyclass(module = "rensa")]
 pub struct RMinHashLSH {
+  threshold: f64,
+  num_perm: usize,
+  num_bands: usize,
+  band_size: usize,
+  // These maps are keyed by internal band hashes / numeric IDs, not
+  // attacker-controlled strings, so FxHasher is chosen for speed.
+  hash_tables: Vec<HashMap<u64, Vec<usize>, BuildHasherDefault<FxHasher>>>,
+  #[serde(default)]
+  key_bands: HashMap<usize, Vec<u64>, BuildHasherDefault<FxHasher>>,
+  #[serde(skip, default)]
+  last_one_shot_sparse_verify_checks: usize,
+  #[serde(skip, default)]
+  last_one_shot_sparse_verify_passes: usize,
+}
+
+#[derive(Deserialize)]
+struct RMinHashLSHState {
   threshold: f64,
   num_perm: usize,
   num_bands: usize,
@@ -57,282 +85,42 @@ pub struct RMinHashLSH {
   key_bands: HashMap<usize, Vec<u64>, BuildHasherDefault<FxHasher>>,
 }
 
-impl RMinHashLSH {
-  fn validate_threshold(threshold: f64) -> PyResult<()> {
-    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-      return Err(PyValueError::new_err(
-        "threshold must be a finite value between 0.0 and 1.0",
-      ));
-    }
-    Ok(())
-  }
-
-  fn validate_params(
-    threshold: f64,
-    num_perm: usize,
-    num_bands: usize,
-  ) -> PyResult<usize> {
-    Self::validate_threshold(threshold)?;
-    if num_perm == 0 {
-      return Err(PyValueError::new_err("num_perm must be greater than 0"));
-    }
-    if num_bands == 0 {
-      return Err(PyValueError::new_err("num_bands must be greater than 0"));
-    }
-    if num_bands > num_perm {
-      return Err(PyValueError::new_err(format!(
-        "num_bands ({num_bands}) must be less than or equal to num_perm ({num_perm})"
-      )));
-    }
-    if num_perm % num_bands != 0 {
-      return Err(PyValueError::new_err(format!(
-        "num_perm ({num_perm}) must be divisible by num_bands ({num_bands})"
-      )));
-    }
-
-    Ok(num_perm / num_bands)
-  }
-
-  pub(crate) fn from_validated(
-    threshold: f64,
-    num_perm: usize,
-    num_bands: usize,
-  ) -> Self {
-    let hasher = BuildHasherDefault::<FxHasher>::default();
-    let hash_tables = (0..num_bands)
-      .map(|_| HashMap::with_hasher(hasher.clone()))
-      .collect();
-
-    Self {
-      threshold,
-      num_perm,
-      num_bands,
-      band_size: num_perm / num_bands,
-      hash_tables,
-      key_bands: HashMap::with_hasher(hasher),
-    }
-  }
-
-  fn validate_state(&self) -> PyResult<()> {
-    let expected_band_size =
-      Self::validate_params(self.threshold, self.num_perm, self.num_bands)?;
-    if self.band_size != expected_band_size {
-      return Err(PyValueError::new_err(format!(
-        "invalid RMinHashLSH state: band_size {} does not match expected {}",
-        self.band_size, expected_band_size
-      )));
-    }
-    if self.hash_tables.len() != self.num_bands {
-      return Err(PyValueError::new_err(format!(
-        "invalid RMinHashLSH state: hash_tables length {} does not match num_bands {}",
-        self.hash_tables.len(),
-        self.num_bands
-      )));
-    }
-    for (key, band_hashes) in &self.key_bands {
-      if band_hashes.len() != self.num_bands {
-        return Err(PyValueError::new_err(format!(
-          "invalid RMinHashLSH state: key {key} stores {} band hashes, expected {}",
-          band_hashes.len(),
-          self.num_bands
-        )));
-      }
-    }
-    Ok(())
-  }
-
-  fn ensure_digest_len(&self, digest_len: usize) -> PyResult<()> {
-    if digest_len != self.num_perm {
-      return Err(PyValueError::new_err(format!(
-        "MinHash has {digest_len} permutations but LSH expects {}",
-        self.num_perm
-      )));
-    }
-    Ok(())
-  }
-
-  fn digest_band_hashes(&self, digest: &[u32]) -> Vec<u64> {
-    let mut band_hashes = Vec::with_capacity(self.num_bands);
-    for i in 0..self.num_bands {
-      band_hashes.push(calculate_band_hash(
-        &digest[i * self.band_size..(i + 1) * self.band_size],
-      ));
-    }
-    band_hashes
-  }
-
-  fn remove_key_from_bands(&mut self, key: usize, band_hashes: &[u64]) {
-    for (table, &band_hash) in
-      self.hash_tables.iter_mut().zip(band_hashes.iter())
-    {
-      if let Some(keys) = table.get_mut(&band_hash) {
-        keys.retain(|&stored_key| stored_key != key);
-        if keys.is_empty() {
-          table.remove(&band_hash);
-        }
-      }
-    }
+impl<'de> Deserialize<'de> for RMinHashLSH {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let state = RMinHashLSHState::deserialize(deserializer)?;
+    Ok(Self {
+      threshold: state.threshold,
+      num_perm: state.num_perm,
+      num_bands: state.num_bands,
+      band_size: state.band_size,
+      hash_tables: state.hash_tables,
+      key_bands: state.key_bands,
+      last_one_shot_sparse_verify_checks: 0,
+      last_one_shot_sparse_verify_passes: 0,
+    })
   }
 }
 
-#[pymethods]
 impl RMinHashLSH {
-  /// Creates a new `RMinHashLSH` instance.
-  ///
-  /// # Arguments
-  ///
-  /// * `threshold` - The similarity threshold for considering items as similar.
-  /// * `num_perm` - The number of permutations used in the `MinHash` algorithm.
-  /// * `num_bands` - The number of bands for the LSH algorithm.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error when threshold or banding parameters are invalid.
-  #[new]
-  pub fn new(
-    threshold: f64,
-    num_perm: usize,
-    num_bands: usize,
-  ) -> PyResult<Self> {
-    Self::validate_params(threshold, num_perm, num_bands)?;
-    Ok(Self::from_validated(threshold, num_perm, num_bands))
+  #[inline]
+  const fn fx_poly_steps(len_u32: usize) -> usize {
+    // `calculate_band_hash` packs 4x u32 into 2x u64 writes, then writes any
+    // remainder u32 values. The polynomial state multiplies by K per write.
+    (len_u32 / 4) * 2 + (len_u32 % 4)
   }
 
-  /// Inserts a `MinHash` into the LSH index.
-  ///
-  /// # Arguments
-  ///
-  /// * `key` - A unique identifier for the `MinHash`.
-  /// * `minhash` - The `RMinHash` instance to be inserted.
-  ///
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the supplied `MinHash` has a different number of permutations.
-  pub fn insert(&mut self, key: usize, minhash: &RMinHash) -> PyResult<()> {
-    let digest = minhash.hash_values();
-    self.ensure_digest_len(digest.len())?;
-
-    if let Some(previous_band_hashes) = self.key_bands.get(&key).cloned() {
-      self.remove_key_from_bands(key, &previous_band_hashes);
+  #[inline]
+  fn fx_poly_k_pow(steps: usize) -> usize {
+    let mut result = 1_usize;
+    for _ in 0..steps {
+      result = result.wrapping_mul(FX_POLY_K);
     }
-
-    let band_hashes = self.digest_band_hashes(digest);
-    for (table, &band_hash) in
-      self.hash_tables.iter_mut().zip(band_hashes.iter())
-    {
-      table.entry(band_hash).or_default().push(key);
-    }
-
-    self.key_bands.insert(key, band_hashes);
-    Ok(())
-  }
-
-  /// Removes a key from all LSH bands.
-  ///
-  /// # Returns
-  ///
-  /// `true` if the key existed and was removed, `false` otherwise.
-  pub fn remove(&mut self, key: usize) -> bool {
-    let Some(band_hashes) = self.key_bands.remove(&key) else {
-      return false;
-    };
-
-    self.remove_key_from_bands(key, &band_hashes);
-    true
-  }
-
-  /// Queries the LSH index for similar items.
-  ///
-  /// # Arguments
-  ///
-  /// * `minhash` - The `RMinHash` instance to query for.
-  ///
-  /// # Returns
-  ///
-  /// A vector of keys (usize) of potentially similar items.
-  ///
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the supplied `MinHash` has a different number of permutations.
-  pub fn query(&self, minhash: &RMinHash) -> PyResult<Vec<usize>> {
-    let digest = minhash.hash_values();
-    self.ensure_digest_len(digest.len())?;
-
-    let mut candidates = Vec::new();
-    for (i, table) in self.hash_tables.iter().enumerate() {
-      if let Some(keys) = table.get(&calculate_band_hash(
-        &digest[i * self.band_size..(i + 1) * self.band_size],
-      )) {
-        candidates.extend(keys);
-      }
-    }
-
-    candidates.sort_unstable();
-    candidates.dedup();
-    Ok(candidates)
-  }
-
-  /// Checks if two `MinHashes` are similar based on the LSH threshold.
-  ///
-  /// # Arguments
-  ///
-  /// * `minhash1` - The first `RMinHash` instance.
-  /// * `minhash2` - The second `RMinHash` instance.
-  ///
-  /// # Returns
-  ///
-  /// A boolean indicating whether the `MinHashes` are considered similar.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error when the `MinHash` instances are incompatible.
-  pub fn is_similar(
-    &self,
-    minhash1: &RMinHash,
-    minhash2: &RMinHash,
-  ) -> PyResult<bool> {
-    Ok(minhash1.jaccard(minhash2)? >= self.threshold)
-  }
-
-  /// Returns the number of permutations used in the LSH index.
-  #[must_use]
-  pub const fn get_num_perm(&self) -> usize {
-    self.num_perm
-  }
-
-  /// Returns the number of bands used in the LSH index.
-  #[must_use]
-  pub const fn get_num_bands(&self) -> usize {
-    self.num_bands
-  }
-
-  fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
-    let decoded: Self =
-      postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize RMinHashLSH state: {err}"
-        ))
-      })?;
-    decoded.validate_state()?;
-    *self = decoded;
-    Ok(())
-  }
-
-  fn __getstate__<'py>(
-    &self,
-    py: Python<'py>,
-  ) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = postcard::to_allocvec(self).map_err(|err| {
-      PyValueError::new_err(format!(
-        "failed to serialize RMinHashLSH state: {err}"
-      ))
-    })?;
-    Ok(PyBytes::new(py, &encoded))
-  }
-
-  const fn __getnewargs__(&self) -> (f64, usize, usize) {
-    (self.threshold, self.num_perm, self.num_bands)
+    result
   }
 }
+
+#[cfg(test)]
+mod tests;
