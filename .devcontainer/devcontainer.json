@@ -6,6 +6,7 @@
 	"image": "mcr.microsoft.com/devcontainers/base:1-ubuntu-24.04",
 	"features": {
 		"ghcr.io/devcontainers/features/python:1": {},
+		"ghcr.io/devcontainers/features/go:1": {},
 		"ghcr.io/devcontainers/features/rust:1": {
 			"version": "latest"
 		}

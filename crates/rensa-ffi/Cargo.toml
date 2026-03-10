@@ -1,0 +1,20 @@
+[package]
+name = "rensa-ffi"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.83"
+authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
+description = "C ABI wrapper for Rensa core MinHash primitives"
+license = "MIT"
+repository = "https://github.com/beowolx/rensa"
+publish = false
+
+[lib]
+name = "rensa_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rensa-core = { path = "../rensa-core" }
+
+[build-dependencies]
+cbindgen = "0.29"

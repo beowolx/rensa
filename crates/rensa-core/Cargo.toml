@@ -1,0 +1,17 @@
+[package]
+name = "rensa-core"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.83"
+authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
+description = "Core Rensa MinHash primitives (no Python bindings)"
+license = "MIT"
+repository = "https://github.com/beowolx/rensa"
+publish = false
+
+[dependencies]
+rand_core = "0.9.3"
+rand_xoshiro = "0.7.0"
+
+[dev-dependencies]
+rustc-hash = "2.1.1"

@@ -1,0 +1,40 @@
+{
+  "config": {
+    "dataset": "ag_news",
+    "effective_max_rows": 20000,
+    "measured_runs": 1,
+    "ngram_size": 3,
+    "num_bands": 8,
+    "num_perm": 128,
+    "rows_per_band": 16,
+    "seed": 12345,
+    "threshold": 0.8,
+    "warmup_runs": 0
+  },
+  "input_fingerprint": {
+    "dataset": {
+      "effective_max_rows": 20000,
+      "hf_dataset": "fancyzhx/ag_news",
+      "key": "ag_news",
+      "revision": "eb185aade064a813bc0b7f42de02595523103ca4",
+      "split": "train",
+      "streaming": false,
+      "text_columns": [
+        "text"
+      ],
+      "token_cache_sha256": "2995336eeca88fddd7cfe0f2bbfbfa9d8f4e8899e725288ab22fb78cadba7280"
+    },
+    "ngram_size": 3
+  },
+  "locked_baseline": {
+    "jaccard": 0.995594,
+    "mismatch": 0.0044,
+    "rensa_c_time": 14.937511,
+    "rensa_r_time": 0.021567
+  },
+  "metadata": {
+    "captured_from": "2026-02-17 locked baseline",
+    "notes": "Original raw benchmark JSON was not present in the repo. This tracked artifact preserves the locked simple-benchmark thresholds together with the pinned benchmark input fingerprint used for future comparisons.",
+    "reference_kind": "locked_baseline"
+  }
+}

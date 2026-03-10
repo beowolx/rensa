@@ -36,4 +36,5 @@ bench = [
 default-groups = ["dev"]
 
 [tool.maturin]
+manifest-path = "crates/rensa-py/Cargo.toml"
 features = ["pyo3/extension-module"]
