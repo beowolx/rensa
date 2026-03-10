@@ -1,0 +1,160 @@
+{
+  "config": {
+    "datasets": [
+      "finefineweb",
+      "codefeedback",
+      "ag_news",
+      "pinecone",
+      "shuyuej",
+      "books3",
+      "bookcorpusopen"
+    ],
+    "ngram_size": 3,
+    "num_bands": 8,
+    "num_perm": 128,
+    "repetitions": 1,
+    "rows_per_band": 16,
+    "seed": 12345,
+    "threads": [
+      1,
+      8
+    ],
+    "threshold": 0.8,
+    "token_cache_schema_version": 2,
+    "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612",
+    "warmup_runs": 0
+  },
+  "input_fingerprint": {
+    "datasets": [
+      {
+        "effective_max_rows": 120000,
+        "hf_dataset": "fancyzhx/ag_news",
+        "key": "ag_news",
+        "revision": "eb185aade064a813bc0b7f42de02595523103ca4",
+        "split": "train",
+        "streaming": false,
+        "text_columns": [
+          "text"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "d5dd659c5837495ca18e773c6a0a6bfcc59ffe23412292d3a23a3f661cdc273e",
+        "token_sets_sha256": "2d0b875d448c5d9e61874f33d4484f733014ff4a067c59019fdd600b4de728fd",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 1000,
+        "hf_dataset": "lucadiliello/bookcorpusopen",
+        "key": "bookcorpusopen",
+        "revision": "edb74e6c88abb38f0a0fc993a7068ab00a32db45",
+        "split": "train",
+        "streaming": true,
+        "text_columns": [
+          "text"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "1e0dce031aa90511f731deeaee7df2532140d29242221a98753a86f705d87029",
+        "token_sets_sha256": "b71b6abb24c501236ea737c107aff6139469101ac92c6b4e49ee7bbaaf43e597",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 1000,
+        "hf_dataset": "P1ayer-1/books-3-textbooks",
+        "key": "books3",
+        "revision": "c3711e9461ad3de0a2e95855ad34a1ff97e0b799",
+        "split": "train",
+        "streaming": true,
+        "text_columns": [
+          "text"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "12118990a1bef7aaa5034504370ba801cc3d2fb95b8e040f595bc3bf6ca6dbac",
+        "token_sets_sha256": "fcdcbb74a97bb3425c4ab556acd2c7b9fc202459cf038d76f70c6dc7363da164",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 156526,
+        "hf_dataset": "m-a-p/CodeFeedback-Filtered-Instruction",
+        "key": "codefeedback",
+        "revision": "a08c213a9748c66c15d0225814be80a2e77adf4a",
+        "split": "train",
+        "streaming": false,
+        "text_columns": [
+          "query"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "753de92d0e97015b4805aa15a64ac4678bdaeafbfb3de96d24f28b051b529e35",
+        "token_sets_sha256": "8883f1eb6186bb968e382bf815821801938eee6de3959652be6054e92cb5675c",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 200000,
+        "hf_dataset": "m-a-p/FineFineWeb",
+        "key": "finefineweb",
+        "revision": "7fd92dc825a75cbff271a5a52eea0eda91a2c112",
+        "split": "train",
+        "streaming": true,
+        "text_columns": [
+          "text"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "3a8bbdc3c2a9a7fe7999f6573ecd2f6207728657cf4ddc798e37aab97ef1ee3c",
+        "token_sets_sha256": "7034436fcd3ebff515382bc8aaf74dbfaba92ad43d50d33c1e394fdbed2b65fa",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 100000,
+        "hf_dataset": "pinecone/core-2020-05-10-deduplication",
+        "key": "pinecone",
+        "revision": "2170a0eb8d75233132608787a4519f25bcc47ad7",
+        "split": "train",
+        "streaming": false,
+        "text_columns": [
+          "processed_title",
+          "processed_abstract"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "fc281e2fa82d0f162fb0a4df64b25d880ce4324f833dab02bb9f5f1a36ccd022",
+        "token_sets_sha256": "0d24bd7ed37575ca10ce0e5725acb084123ac3ef9551c2ec9fa5269b660d7663",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      },
+      {
+        "effective_max_rows": 37777,
+        "hf_dataset": "shuyuej/pretraining-dataset",
+        "key": "shuyuej",
+        "revision": "c0d79e736bafdd0d7ff9a0b9b08d5c58a1254109",
+        "split": "train",
+        "streaming": true,
+        "text_columns": [
+          "text"
+        ],
+        "token_cache_schema_version": 2,
+        "token_cache_sha256": "ec5afa5804cc6e866549978456fc3725ababc0fcd3d6e8f97617a25157296175",
+        "token_sets_sha256": "d54e8f13c073cddd4a08710f6055a7fbe9f6116db0786c951b4be3cfa391dbdf",
+        "tokenizer_fingerprint": "4b8c0f9962fb30b47b468e0fe91fd821b8c14483491f9b0c93838d87b7d10612"
+      }
+    ],
+    "ngram_size": 3,
+    "rensa": {
+      "query_mode": "matrix_one_shot",
+      "rho_probes": 4,
+      "sketch_mode": "rho_matrix"
+    }
+  },
+  "locked_baseline": {
+    "aggregate_rensa_median_total": {
+      "1": 1.917664,
+      "8": 1.222183
+    },
+    "fairness": {
+      "thread_env_assertions_all_true": true,
+      "token_cache_hash_consistent": true
+    },
+    "mean_jaccard": 0.987219,
+    "mean_mismatch": 0.010717
+  },
+  "metadata": {
+    "captured_from": "2026-02-17 locked baseline",
+    "notes": "Original raw benchmark JSON was not present in the repo. This tracked artifact preserves the locked regression thresholds together with a refreshed v2 benchmark fingerprint. Baseline validation prefers token_sets_sha256 so cache wrapper changes do not invalidate the lock by themselves.",
+    "reference_kind": "locked_baseline"
+  }
+}

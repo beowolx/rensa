@@ -1,6 +1,7 @@
 from array import array
 import json
 import os
+import pickle
 import random
 import subprocess
 import sys
@@ -56,10 +57,24 @@ def test_rminhash_jaccard_rejects_num_perm_mismatch():
         m1.jaccard(m2)
 
 
+def test_rminhash_jaccard_rejects_seed_mismatch():
+    m1 = RMinHash(num_perm=8, seed=1)
+    m2 = RMinHash(num_perm=8, seed=2)
+    with pytest.raises(ValueError, match="seed mismatch"):
+        m1.jaccard(m2)
+
+
 def test_cminhash_jaccard_rejects_num_perm_mismatch():
     m1 = CMinHash(num_perm=8, seed=1)
     m2 = CMinHash(num_perm=16, seed=1)
     with pytest.raises(ValueError, match="num_perm mismatch"):
+        m1.jaccard(m2)
+
+
+def test_cminhash_jaccard_rejects_seed_mismatch():
+    m1 = CMinHash(num_perm=8, seed=1)
+    m2 = CMinHash(num_perm=8, seed=2)
+    with pytest.raises(ValueError, match="seed mismatch"):
         m1.jaccard(m2)
 
 
@@ -68,7 +83,6 @@ def test_rminhash_serialization_roundtrip():
     m.update(["serialize", "this"])
     digest_before = m.digest()
 
-    import pickle
     data = pickle.dumps(m)
     m2 = pickle.loads(data)
 
@@ -200,6 +214,7 @@ def test_rminhash_batch_builders_match_single_document_path():
     )
     assert digest_matrix.len() == len(token_sets)
     assert digest_matrix.get_num_perm() == 32
+    assert digest_matrix.get_seed() == 123
     assert digest_matrix.to_rows() == scalar_digests
 
 
@@ -345,7 +360,7 @@ token_sets = [[f"tok{idx % 97}"] for idx in range(2048)]
 matrix = RMinHash.digest_matrix_from_token_sets_rho(
     token_sets, num_perm=128, seed=123, probes=4
 )
-lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4)
+lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4, seed=123)
 flags = lsh.query_duplicate_flags_matrix_one_shot(matrix)
 print(json.dumps(sum(bool(x) for x in flags)))
 """
@@ -377,7 +392,7 @@ token_sets = [[f"tok{idx % 97}"] for idx in range(2048)]
 matrix = RMinHash.digest_matrix_from_token_sets_rho(
     token_sets, num_perm=128, seed=123, probes=4
 )
-lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4)
+lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4, seed=123)
 flags = [bool(value) for value in lsh.query_duplicate_flags_matrix_one_shot(matrix)]
 print(json.dumps(flags))
 """
@@ -413,7 +428,7 @@ token_sets = [
 matrix = RMinHash.digest_matrix_from_token_sets_rho(
     token_sets, num_perm=128, seed=123, probes=4
 )
-lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4)
+lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4, seed=123)
 flags = lsh.query_duplicate_flags_matrix_one_shot(matrix)
 print(json.dumps(sum(bool(value) for value in flags)))
 """
@@ -647,9 +662,27 @@ def test_cminhash_digests64_from_token_hash_sets_rejects_invalid_tokens():
 
 
 def test_rminhashlsh_basics():
-    lsh = RMinHashLSH(0.5, 16, 4)
+    lsh = RMinHashLSH(0.5, 16, 4, 42)
     assert lsh.get_num_perm() == 16
     assert lsh.get_num_bands() == 4
+    assert lsh.get_seed() == 42
+
+
+def test_rminhashlsh_serialization_roundtrip_preserves_seed():
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
+    minhash = RMinHash(num_perm=16, seed=99)
+    minhash.update(["serialize", "lsh"])
+    lsh.insert(1, minhash)
+
+    restored = pickle.loads(pickle.dumps(lsh))
+
+    assert restored.get_seed() == 99
+    assert restored.query(minhash) == [1]
+
+    mismatched = RMinHash(num_perm=16, seed=100)
+    mismatched.update(["serialize", "lsh"])
+    with pytest.raises(ValueError, match="seed mismatch"):
+        restored.query(mismatched)
 
 
 @pytest.mark.parametrize(
@@ -667,11 +700,11 @@ def test_rminhashlsh_rejects_invalid_parameters(
     threshold, num_perm, num_bands, pattern
 ):
     with pytest.raises(ValueError, match=pattern):
-        RMinHashLSH(threshold, num_perm, num_bands)
+        RMinHashLSH(threshold, num_perm, num_bands, 42)
 
 
 def test_rminhashlsh_insert_and_query():
-    lsh = RMinHashLSH(threshold=0.5, num_perm=8, num_bands=2)
+    lsh = RMinHashLSH(threshold=0.5, num_perm=8, num_bands=2, seed=10)
     m1 = RMinHash(num_perm=8, seed=10)
     m2 = RMinHash(num_perm=8, seed=10)
 
@@ -693,11 +726,11 @@ def test_rminhashlsh_insert_pairs_matches_single_insert():
         m.update(tokens)
         minhashes.append(m)
 
-    lsh_single = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_single = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     for idx, minhash in enumerate(minhashes):
         lsh_single.insert(idx, minhash)
 
-    lsh_pairs = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_pairs = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     lsh_pairs.insert_pairs([(idx, minhash) for idx, minhash in enumerate(minhashes)])
 
     for minhash in minhashes:
@@ -711,10 +744,10 @@ def test_rminhashlsh_insert_many_matches_insert_pairs():
         m.update(tokens)
         minhashes.append(m)
 
-    lsh_many = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_many = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     lsh_many.insert_many(minhashes, start_key=100)
 
-    lsh_pairs = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_pairs = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     lsh_pairs.insert_pairs(
         [(100 + idx, minhash) for idx, minhash in enumerate(minhashes)]
     )
@@ -725,7 +758,7 @@ def test_rminhashlsh_insert_many_matches_insert_pairs():
 
 def test_rminhashlsh_query_all_matches_single_query():
     minhashes = []
-    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     for idx, tokens in enumerate((["a", "b"], ["a", "b", "c"], ["x", "y"])):
         m = RMinHash(num_perm=16, seed=99)
         m.update(tokens)
@@ -738,7 +771,7 @@ def test_rminhashlsh_query_all_matches_single_query():
 
 def test_rminhashlsh_query_duplicate_flags_matches_query_all():
     minhashes = []
-    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     for idx, tokens in enumerate((["a", "b"], ["a", "b", "c"], ["x", "y"])):
         m = RMinHash(num_perm=16, seed=99)
         m.update(tokens)
@@ -760,10 +793,10 @@ def test_rminhashlsh_matrix_methods_match_object_methods():
     )
     minhashes = RMinHash.from_token_sets(token_sets, num_perm=16, seed=99)
 
-    lsh_objects = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_objects = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     lsh_objects.insert_many(minhashes, start_key=0)
 
-    lsh_matrix = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh_matrix = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     lsh_matrix.insert_matrix(matrix, start_key=0)
 
     assert lsh_objects.query_duplicate_flags(minhashes) == (
@@ -793,7 +826,7 @@ def test_rminhashlsh_insert_matrix_and_query_duplicate_flags_ignores_future_over
     existing = RMinHash(num_perm=num_perm, seed=seed)
     existing.update(shared_tokens)
 
-    lsh = RMinHashLSH(threshold=0.8, num_perm=num_perm, num_bands=1)
+    lsh = RMinHashLSH(threshold=0.8, num_perm=num_perm, num_bands=1, seed=seed)
     lsh.insert(overlapping_key, existing)
 
     assert lsh.insert_matrix_and_query_duplicate_flags(matrix, start_key=start_key) == [
@@ -808,7 +841,7 @@ def test_rminhashlsh_one_shot_exposes_sparse_verify_stats():
     matrix = RMinHash.digest_matrix_from_token_sets_rho(
         token_sets, num_perm=128, seed=42, probes=4
     )
-    lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.95, num_perm=128, num_bands=4, seed=42)
     lsh.query_duplicate_flags_matrix_one_shot(matrix)
     checks = lsh.get_last_one_shot_sparse_verify_checks()
     passes = lsh.get_last_one_shot_sparse_verify_passes()
@@ -818,7 +851,7 @@ def test_rminhashlsh_one_shot_exposes_sparse_verify_stats():
 
 
 def test_rminhashlsh_insert_pairs_rejects_malformed_entries():
-    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     minhash = RMinHash(num_perm=16, seed=99)
     minhash.update(["a", "b"])
 
@@ -827,7 +860,7 @@ def test_rminhashlsh_insert_pairs_rejects_malformed_entries():
 
 
 def test_rminhashlsh_query_all_rejects_num_perm_mismatch():
-    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     m16 = RMinHash(num_perm=16, seed=99)
     m16.update(["a", "b"])
     m8 = RMinHash(num_perm=8, seed=99)
@@ -839,7 +872,7 @@ def test_rminhashlsh_query_all_rejects_num_perm_mismatch():
 
 
 def test_rminhashlsh_query_duplicate_flags_rejects_num_perm_mismatch():
-    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
     m16 = RMinHash(num_perm=16, seed=99)
     m16.update(["a", "b"])
     m8 = RMinHash(num_perm=8, seed=99)
@@ -851,7 +884,7 @@ def test_rminhashlsh_query_duplicate_flags_rejects_num_perm_mismatch():
 
 
 def test_rminhashlsh_rejects_signature_mismatch_on_insert_and_query():
-    lsh = RMinHashLSH(threshold=0.5, num_perm=8, num_bands=2)
+    lsh = RMinHashLSH(threshold=0.5, num_perm=8, num_bands=2, seed=10)
     good = RMinHash(num_perm=8, seed=10)
     bad = RMinHash(num_perm=16, seed=10)
     good.update(["lsh", "python"])
@@ -867,7 +900,7 @@ def test_rminhashlsh_rejects_signature_mismatch_on_insert_and_query():
 
 
 def test_rminhashlsh_is_similar():
-    lsh = RMinHashLSH(threshold=0.8, num_perm=16, num_bands=4)
+    lsh = RMinHashLSH(threshold=0.8, num_perm=16, num_bands=4, seed=555)
     m1 = RMinHash(num_perm=16, seed=555)
     m2 = RMinHash(num_perm=16, seed=555)
 
@@ -879,3 +912,36 @@ def test_rminhashlsh_is_similar():
     jaccard_value = m1.jaccard(m2)
     assert lsh.is_similar(m1, m2) == (
         jaccard_value >= 0.8), "Check LSH threshold vs real jaccard"
+
+
+def test_rminhashlsh_rejects_seed_mismatch():
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
+    good = RMinHash(num_perm=16, seed=99)
+    bad = RMinHash(num_perm=16, seed=100)
+    good.update(["a", "b"])
+    bad.update(["a", "b"])
+    lsh.insert(1, good)
+
+    with pytest.raises(ValueError, match="seed mismatch"):
+        lsh.insert(2, bad)
+
+    with pytest.raises(ValueError, match="seed mismatch"):
+        lsh.query(bad)
+
+
+def test_rminhashlsh_matrix_methods_reject_seed_mismatch():
+    good_matrix = RMinHash.digest_matrix_from_token_sets(
+        [["a"], ["b"]], num_perm=16, seed=99
+    )
+    bad_matrix = RMinHash.digest_matrix_from_token_sets(
+        [["a"], ["b"]], num_perm=16, seed=100
+    )
+    lsh = RMinHashLSH(threshold=0.7, num_perm=16, num_bands=4, seed=99)
+
+    lsh.insert_matrix(good_matrix, start_key=0)
+
+    with pytest.raises(ValueError, match="seed mismatch"):
+        lsh.query_duplicate_flags_matrix(bad_matrix)
+
+    with pytest.raises(ValueError, match="seed mismatch"):
+        lsh.query_duplicate_flags_matrix_one_shot(bad_matrix)

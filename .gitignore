@@ -1,4 +1,5 @@
 /target
+.bench/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -28,6 +29,10 @@ venv/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# rensa-ffi ships a checked-in C header.
+!crates/rensa-ffi/include/
+!crates/rensa-ffi/include/*.h
 
 # Installer logs
 pip-log.txt

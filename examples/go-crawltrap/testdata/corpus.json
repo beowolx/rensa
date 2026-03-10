@@ -1,0 +1,44 @@
+{
+  "docs": [
+    {
+      "name": "shop_seed",
+      "doc_id": 1,
+      "chain": "example.com/shop",
+      "max_candidates": 0,
+      "expected_verified": [],
+      "html": "<!DOCTYPE html><?xml version=\"1.0\"?><html><body><div :class=\"'card-'+123\" @click=\"open(123)\" [data-id]=\"123\" class=\"listing page-123\" id=\"deadbeefdeadbeef\">Alpha product page 123 hello world</div><script>var trap = 123;</script><style>.listing{display:block}</style></body></html>"
+    },
+    {
+      "name": "shop_near_duplicate",
+      "doc_id": 2,
+      "chain": "example.com/shop",
+      "max_candidates": 1,
+      "expected_verified": [1],
+      "html": "<!DOCTYPE html><?xml version=\"1.0\"?><html><body><div :class=\"'card-'+999\" @click=\"open(999)\" [data-id]=\"999\" class=\"listing page-999\" id=\"feedfacefeedface\">Alpha product page 999 hello world</div><script>var trap = 999;</script><style>.listing{display:block}</style></body></html>"
+    },
+    {
+      "name": "shop_different_content",
+      "doc_id": 3,
+      "chain": "example.com/shop",
+      "max_candidates": 1,
+      "expected_verified": [],
+      "html": "<html><body><article class=\"story feature-001\" id=\"story-0001\">Completely different report about market volatility and weather patterns</article></body></html>"
+    },
+    {
+      "name": "blog_cross_chain_duplicate",
+      "doc_id": 4,
+      "chain": "example.com/blog",
+      "max_candidates": 0,
+      "expected_verified": [],
+      "html": "<!DOCTYPE html><html><body><div class=\"listing page-321\" id=\"cafebabecafebabe\">Alpha product page 321 hello world</div><script>var trap = 321;</script></body></html>"
+    },
+    {
+      "name": "shop_malformed_attrs",
+      "doc_id": 5,
+      "chain": "example.com/shop",
+      "max_candidates": 1,
+      "expected_verified": [],
+      "html": "<html><body><div =\"oops\" class=\"listing page-555\" @click id=\"beadbeadbeadbead\">Another document with enough unique words to avoid duplicate verification</div></body></html>"
+    }
+  ]
+}

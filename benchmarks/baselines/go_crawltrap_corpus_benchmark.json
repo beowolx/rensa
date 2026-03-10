@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "benchmark_name": "go_crawltrap_corpus",
+  "generated_at_utc": "2026-03-08T19:55:42.391417Z",
+  "go_version": "go1.26.1",
+  "goos": "darwin",
+  "goarch": "arm64",
+  "corpus": {
+    "path": "testdata/corpus.json",
+    "documents": 5,
+    "chains": 2
+  },
+  "config": {
+    "iterations": 10,
+    "num_perm": 128,
+    "num_bands": 16,
+    "threshold": 0.9,
+    "max_docs_per_chain": 2000,
+    "rebuild_stale_ratio": 0.5,
+    "seed": 42
+  },
+  "metrics": {
+    "total_docs_processed": 50,
+    "total_features": 520,
+    "total_candidates": 10,
+    "total_verified": 10,
+    "inserted_count": 40,
+    "duplicate_count": 10,
+    "total_duration_ns": 463373,
+    "average_duration_ns": 46337,
+    "min_duration_ns": 29500,
+    "max_duration_ns": 124458
+  }
+}

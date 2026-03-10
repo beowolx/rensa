@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import pickle
@@ -43,12 +44,32 @@ DEFAULT_SEED = 12345
 DEFAULT_WARMUP_RUNS = 0
 DEFAULT_REPETITIONS = 1
 DEFAULT_NGRAM_SIZE = 3
+DEFAULT_RENSA_SKETCH_MODE = "rho_matrix"
+DEFAULT_RENSA_QUERY_MODE = "matrix_one_shot"
+DEFAULT_RENSA_RHO_PROBES = 4
+TOKEN_CACHE_SCHEMA_VERSION = 2
+TOKENIZER_FINGERPRINT_FRAGMENT_LEN = 12
 
 DEFAULT_CACHE_DIR = (
     Path(__file__).resolve().parents[1] / ".bench" / "local" / "cache" / "full_benchmark"
 )
 DEFAULT_OUTPUT_PATH = (
     Path(__file__).resolve().parents[1] / ".bench" / "profiling" / "full_benchmark.json"
+)
+DEFAULT_BASELINE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "baselines"
+    / "full_benchmark_run.json"
+)
+
+RENSA_SKETCH_MODES = ("compat", "rho_matrix", "matrix", "per_item")
+RENSA_QUERY_MODES = (
+    "compat",
+    "matrix_one_shot",
+    "matrix_insert_query",
+    "matrix_build_query",
+    "per_item",
 )
 
 
@@ -70,6 +91,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=200_000,
+        revision="7fd92dc825a75cbff271a5a52eea0eda91a2c112",
         streaming=True,
     ),
     "codefeedback": DatasetSpec(
@@ -78,6 +100,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("query",),
         default_max_rows=156_526,
+        revision="a08c213a9748c66c15d0225814be80a2e77adf4a",
     ),
     "ag_news": DatasetSpec(
         key="ag_news",
@@ -85,6 +108,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=120_000,
+        revision="eb185aade064a813bc0b7f42de02595523103ca4",
     ),
     "pinecone": DatasetSpec(
         key="pinecone",
@@ -92,6 +116,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("processed_title", "processed_abstract"),
         default_max_rows=100_000,
+        revision="2170a0eb8d75233132608787a4519f25bcc47ad7",
     ),
     "shuyuej": DatasetSpec(
         key="shuyuej",
@@ -99,6 +124,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=37_777,
+        revision="c0d79e736bafdd0d7ff9a0b9b08d5c58a1254109",
         # JSON source can fail with non-streaming pyarrow parsing on some snapshots.
         streaming=True,
     ),
@@ -108,6 +134,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=1_000,
+        revision="edb74e6c88abb38f0a0fc993a7068ab00a32db45",
         streaming=True,
     ),
     "books3": DatasetSpec(
@@ -116,6 +143,7 @@ DATASET_PRESETS: dict[str, DatasetSpec] = {
         split="train",
         text_columns=("text",),
         default_max_rows=1_000,
+        revision="c3711e9461ad3de0a2e95855ad34a1ff97e0b799",
         streaming=True,
     ),
 }
@@ -159,6 +187,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--output-json", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--ngram-size", type=int, default=DEFAULT_NGRAM_SIZE)
+    parser.add_argument(
+        "--rensa-sketch-mode",
+        choices=RENSA_SKETCH_MODES,
+        default=DEFAULT_RENSA_SKETCH_MODE,
+    )
+    parser.add_argument(
+        "--rensa-query-mode",
+        choices=RENSA_QUERY_MODES,
+        default=DEFAULT_RENSA_QUERY_MODE,
+    )
+    parser.add_argument(
+        "--rensa-rho-probes",
+        type=int,
+        default=DEFAULT_RENSA_RHO_PROBES,
+    )
+    parser.add_argument("--baseline-json", type=Path, default=DEFAULT_BASELINE_PATH)
 
     parser.add_argument("--_run-once", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--token-cache", type=Path, default=None, help=argparse.SUPPRESS)
@@ -243,10 +287,13 @@ def dataset_cache_path(
     revision_suffix = "none" if spec.revision is None else sanitized_fragment(spec.revision)
     columns_fragment = "__".join(sanitized_fragment(column) for column in spec.text_columns)
     name_fragment = sanitized_fragment(spec.hf_dataset)
+    tokenizer_fragment = tokenizer_fingerprint()[:TOKENIZER_FINGERPRINT_FRAGMENT_LEN]
     filename = (
         f"{spec.key}__{name_fragment}__{spec.split}__{columns_fragment}"
         f"__ng{ngram_size}__stream{int(spec.streaming)}"
-        f"__rev_{revision_suffix}__rows_{row_suffix}.pkl"
+        f"__rev_{revision_suffix}"
+        f"__cache_v{TOKEN_CACHE_SCHEMA_VERSION}"
+        f"__tok_{tokenizer_fragment}__rows_{row_suffix}.pkl"
     )
     return cache_dir / filename
 
@@ -271,6 +318,18 @@ def sha256_file(path: Path) -> str:
             if not chunk:
                 break
             hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def sha256_token_sets(token_sets: list[list[str]]) -> str:
+    hasher = hashlib.sha256()
+    for token_set in token_sets:
+        hasher.update(len(token_set).to_bytes(8, "little"))
+        for token in token_set:
+            encoded = token.encode("utf-8")
+            hasher.update(len(encoded).to_bytes(8, "little"))
+            hasher.update(encoded)
+        hasher.update(b"\xff")
     return hasher.hexdigest()
 
 
@@ -310,6 +369,28 @@ def tokenize_to_ngrams(text: str, ngram_size: int) -> list[str]:
     return [" ".join(tokens[index : index + ngram_size]) for index in range(len(tokens) - ngram_size + 1)]
 
 
+_TOKENIZER_FINGERPRINT: str | None = None
+
+
+def tokenizer_fingerprint() -> str:
+    global _TOKENIZER_FINGERPRINT
+    if _TOKENIZER_FINGERPRINT is not None:
+        return _TOKENIZER_FINGERPRINT
+
+    hasher = hashlib.sha256()
+    components = (
+        str(TOKEN_CACHE_SCHEMA_VERSION),
+        inspect.getsource(extract_text),
+        inspect.getsource(tokenize_to_ngrams),
+        repr(FALLBACK_TEXT_COLUMNS),
+    )
+    for component in components:
+        hasher.update(component.encode("utf-8"))
+        hasher.update(b"\0")
+    _TOKENIZER_FINGERPRINT = hasher.hexdigest()
+    return _TOKENIZER_FINGERPRINT
+
+
 def select_evenly_spaced_indices(total_rows: int, target_rows: int) -> list[int]:
     if target_rows >= total_rows:
         return list(range(total_rows))
@@ -347,27 +428,106 @@ def load_token_sets_from_hf(
     return token_sets
 
 
+def build_token_cache_payload(
+    spec: DatasetSpec,
+    max_rows: int | None,
+    ngram_size: int,
+    token_sets: list[list[str]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": TOKEN_CACHE_SCHEMA_VERSION,
+        "tokenizer_fingerprint": tokenizer_fingerprint(),
+        "dataset_key": spec.key,
+        "hf_dataset": spec.hf_dataset,
+        "split": spec.split,
+        "text_columns": list(spec.text_columns),
+        "revision": spec.revision,
+        "streaming": spec.streaming,
+        "max_rows": max_rows,
+        "ngram_size": ngram_size,
+        "token_sets_sha256": sha256_token_sets(token_sets),
+        "token_sets": token_sets,
+    }
+
+
+def load_token_cache_payload(
+    cache_path: Path,
+    spec: DatasetSpec | None = None,
+    max_rows: int | None = None,
+    ngram_size: int | None = None,
+) -> dict[str, Any] | None:
+    with cache_path.open("rb") as handle:
+        payload = pickle.load(handle)
+
+    if isinstance(payload, list):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != TOKEN_CACHE_SCHEMA_VERSION:
+        return None
+    if payload.get("tokenizer_fingerprint") != tokenizer_fingerprint():
+        return None
+
+    token_sets = payload.get("token_sets")
+    if not isinstance(token_sets, list):
+        return None
+    if not isinstance(payload.get("token_sets_sha256"), str):
+        payload["token_sets_sha256"] = sha256_token_sets(token_sets)
+
+    if spec is None:
+        return payload
+
+    expected = {
+        "dataset_key": spec.key,
+        "hf_dataset": spec.hf_dataset,
+        "split": spec.split,
+        "text_columns": list(spec.text_columns),
+        "revision": spec.revision,
+        "streaming": spec.streaming,
+        "max_rows": max_rows,
+        "ngram_size": ngram_size,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            return None
+    return payload
+
+
 def load_or_prepare_token_cache(
     cache_dir: Path,
     spec: DatasetSpec,
     max_rows: int | None,
     ngram_size: int,
-) -> tuple[Path, int, str]:
+) -> tuple[Path, int, str, str]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = dataset_cache_path(cache_dir, spec, max_rows, ngram_size)
 
     if cache_path.exists():
-        row_count = cached_row_count_from_cache_path(cache_path)
-        if row_count is None:
-            with cache_path.open("rb") as handle:
-                token_sets = pickle.load(handle)
-            row_count = len(token_sets)
-        return cache_path, row_count, sha256_file(cache_path)
+        payload = load_token_cache_payload(
+            cache_path,
+            spec=spec,
+            max_rows=max_rows,
+            ngram_size=ngram_size,
+        )
+        if payload is not None:
+            row_count = len(payload["token_sets"])
+            return (
+                cache_path,
+                row_count,
+                sha256_file(cache_path),
+                payload["token_sets_sha256"],
+            )
 
     token_sets = load_token_sets_from_hf(spec, max_rows, ngram_size)
+    payload = build_token_cache_payload(spec, max_rows, ngram_size, token_sets)
     with cache_path.open("wb") as handle:
-        pickle.dump(token_sets, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    return cache_path, len(token_sets), sha256_file(cache_path)
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    return (
+        cache_path,
+        len(token_sets),
+        sha256_file(cache_path),
+        payload["token_sets_sha256"],
+    )
 
 
 def thread_env(threads: int) -> dict[str, str]:
@@ -397,6 +557,37 @@ def resolve_package_version(
 
 def current_rensa_env() -> dict[str, str]:
     return {key: value for key, value in sorted(os.environ.items()) if key.startswith("RENSA_")}
+
+
+_RENSA_BUILD_CHECKED = False
+
+
+def assert_rensa_release_build() -> None:
+    global _RENSA_BUILD_CHECKED
+    if _RENSA_BUILD_CHECKED:
+        return
+    _RENSA_BUILD_CHECKED = True
+
+    try:
+        import rensa  # type: ignore
+    except Exception:
+        # Import failures will surface later with a clearer stack trace.
+        return
+
+    get_build_info = getattr(rensa, "get_build_info", None)
+    if get_build_info is None:
+        # Older revisions don't expose build info, so we can't validate profile.
+        return
+
+    info = get_build_info()
+    profile = info.get("profile")
+    debug_assertions = bool(info.get("debug_assertions"))
+    if debug_assertions or profile != "release":
+        raise RuntimeError(
+            "Benchmarks must run against a release build of rensa. "
+            f"Detected profile={profile!r}, debug_assertions={debug_assertions}. "
+            "Rebuild with: maturin develop --release --uv --manifest-path crates/rensa-py/Cargo.toml"
+        )
 
 
 def run_datasketch(
@@ -446,9 +637,11 @@ def run_datasketch(
     rows = len(token_sets)
     rows_removed = sum(1 for is_duplicate in duplicate_flags if is_duplicate)
     metrics = {
+        "phase_model": "split",
         "sketch": sketch_elapsed,
         "build": build_elapsed,
         "query": query_elapsed,
+        "fused_build_query": None,
         "total": sketch_elapsed + build_elapsed + query_elapsed,
         "rows_removed": rows_removed,
         "rows_remaining": rows - rows_removed,
@@ -489,9 +682,11 @@ def run_fastsketch(
 
     rows_removed = sum(1 for is_duplicate in duplicate_flags if is_duplicate)
     metrics = {
+        "phase_model": "split",
         "sketch": sketch_elapsed,
         "build": build_elapsed,
         "query": query_elapsed,
+        "fused_build_query": None,
         "total": sketch_elapsed + build_elapsed + query_elapsed,
         "rows_removed": rows_removed,
         "rows_remaining": row_count - rows_removed,
@@ -507,60 +702,170 @@ def run_rensa(
     num_bands: int,
     threshold: float,
     seed: int,
+    sketch_mode: str = "compat",
+    query_mode: str = "compat",
+    rho_probes: int = DEFAULT_RENSA_RHO_PROBES,
 ) -> tuple[dict[str, Any], list[bool]]:
+    assert_rensa_release_build()
     from rensa import RMinHash, RMinHashLSH  # type: ignore
 
     matrix: Any | None = None
     minhashes: list[Any] | None = None
     sketch_start = perf_counter()
-    if hasattr(RMinHash, "digest_matrix_from_token_sets_rho"):
-        probes = int(os.environ.get("RENSA_RHO_PROBES", "4"))
+    if sketch_mode == "compat":
+        if hasattr(RMinHash, "digest_matrix_from_token_sets_rho"):
+            matrix = RMinHash.digest_matrix_from_token_sets_rho(
+                token_sets,
+                num_perm=num_perm,
+                seed=seed,
+                probes=rho_probes,
+            )
+        elif hasattr(RMinHash, "digest_matrix_from_token_sets"):
+            matrix = RMinHash.digest_matrix_from_token_sets(
+                token_sets,
+                num_perm=num_perm,
+                seed=seed,
+            )
+        else:
+            # Compatibility fallback for older branch checkouts in CI perf comparisons.
+            minhashes = []
+            for tokens in token_sets:
+                minhash = RMinHash(num_perm=num_perm, seed=seed)
+                minhash.update(tokens)
+                minhashes.append(minhash)
+    elif sketch_mode == "rho_matrix":
+        digest_matrix_from_token_sets_rho = getattr(
+            RMinHash, "digest_matrix_from_token_sets_rho", None
+        )
+        if digest_matrix_from_token_sets_rho is None:
+            raise RuntimeError("Requested rensa sketch mode 'rho_matrix' is unavailable")
         matrix = RMinHash.digest_matrix_from_token_sets_rho(
             token_sets,
             num_perm=num_perm,
             seed=seed,
-            probes=probes,
+            probes=rho_probes,
         )
-    elif hasattr(RMinHash, "digest_matrix_from_token_sets"):
+    elif sketch_mode == "matrix":
+        digest_matrix_from_token_sets = getattr(
+            RMinHash, "digest_matrix_from_token_sets", None
+        )
+        if digest_matrix_from_token_sets is None:
+            raise RuntimeError("Requested rensa sketch mode 'matrix' is unavailable")
         matrix = RMinHash.digest_matrix_from_token_sets(
             token_sets,
             num_perm=num_perm,
             seed=seed,
         )
-    else:
-        # Compatibility fallback for older branch checkouts in CI perf comparisons.
+    elif sketch_mode == "per_item":
         minhashes = []
         for tokens in token_sets:
             minhash = RMinHash(num_perm=num_perm, seed=seed)
             minhash.update(tokens)
             minhashes.append(minhash)
+    else:
+        raise ValueError(f"Unknown rensa sketch mode: {sketch_mode}")
     sketch_elapsed = perf_counter() - sketch_start
 
-    lsh = RMinHashLSH(threshold=threshold, num_perm=num_perm, num_bands=num_bands)
+    lsh = RMinHashLSH(
+        threshold=threshold,
+        num_perm=num_perm,
+        num_bands=num_bands,
+        seed=seed,
+    )
 
+    build_elapsed = 0.0
     query_elapsed = 0.0
-    if matrix is not None and hasattr(lsh, "query_duplicate_flags_matrix_one_shot"):
-        build_start = perf_counter()
+    fused_build_query_elapsed: float | None = None
+    phase_model = "split"
+    if query_mode == "compat":
+        if matrix is not None and hasattr(lsh, "query_duplicate_flags_matrix_one_shot"):
+            fused_start = perf_counter()
+            duplicate_flags = [
+                bool(value) for value in lsh.query_duplicate_flags_matrix_one_shot(matrix)
+            ]
+            fused_build_query_elapsed = perf_counter() - fused_start
+            phase_model = "fused_build_query"
+        elif matrix is not None and hasattr(lsh, "insert_matrix_and_query_duplicate_flags"):
+            fused_start = perf_counter()
+            duplicate_flags = [
+                bool(value)
+                for value in lsh.insert_matrix_and_query_duplicate_flags(matrix, start_key=0)
+            ]
+            fused_build_query_elapsed = perf_counter() - fused_start
+            phase_model = "fused_build_query"
+        elif matrix is not None and hasattr(lsh, "insert_matrix") and hasattr(
+            lsh, "query_duplicate_flags_matrix"
+        ):
+            build_start = perf_counter()
+            lsh.insert_matrix(matrix, start_key=0)
+            build_elapsed = perf_counter() - build_start
+
+            query_start = perf_counter()
+            duplicate_flags = [bool(value) for value in lsh.query_duplicate_flags_matrix(matrix)]
+            query_elapsed = perf_counter() - query_start
+        elif minhashes is not None:
+            build_start = perf_counter()
+            for index, minhash in enumerate(minhashes):
+                lsh.insert(index, minhash)
+            build_elapsed = perf_counter() - build_start
+
+            query_start = perf_counter()
+            duplicate_flags = []
+            for minhash in minhashes:
+                candidates = lsh.query(minhash)
+                duplicate_flags.append(len(candidates) > 1)
+            query_elapsed = perf_counter() - query_start
+        else:
+            raise RuntimeError(
+                "Unsupported rensa API shape: no compatible matrix or per-item benchmark path"
+            )
+    elif query_mode == "matrix_one_shot":
+        if matrix is None:
+            raise RuntimeError("Rensa query mode 'matrix_one_shot' requires matrix sketch mode")
+        query_duplicate_flags_matrix_one_shot = getattr(
+            lsh, "query_duplicate_flags_matrix_one_shot", None
+        )
+        if query_duplicate_flags_matrix_one_shot is None:
+            raise RuntimeError("Requested rensa query mode 'matrix_one_shot' is unavailable")
+        fused_start = perf_counter()
+        duplicate_flags = [bool(value) for value in query_duplicate_flags_matrix_one_shot(matrix)]
+        fused_build_query_elapsed = perf_counter() - fused_start
+        phase_model = "fused_build_query"
+    elif query_mode == "matrix_insert_query":
+        if matrix is None:
+            raise RuntimeError(
+                "Rensa query mode 'matrix_insert_query' requires matrix sketch mode"
+            )
+        insert_matrix_and_query_duplicate_flags = getattr(
+            lsh, "insert_matrix_and_query_duplicate_flags", None
+        )
+        if insert_matrix_and_query_duplicate_flags is None:
+            raise RuntimeError(
+                "Requested rensa query mode 'matrix_insert_query' is unavailable"
+            )
+        fused_start = perf_counter()
         duplicate_flags = [
-            bool(value) for value in lsh.query_duplicate_flags_matrix_one_shot(matrix)
+            bool(value) for value in insert_matrix_and_query_duplicate_flags(matrix, start_key=0)
         ]
-        build_elapsed = perf_counter() - build_start
-    elif matrix is not None and hasattr(lsh, "insert_matrix_and_query_duplicate_flags"):
+        fused_build_query_elapsed = perf_counter() - fused_start
+        phase_model = "fused_build_query"
+    elif query_mode == "matrix_build_query":
+        if matrix is None:
+            raise RuntimeError("Rensa query mode 'matrix_build_query' requires matrix sketch mode")
+        insert_matrix = getattr(lsh, "insert_matrix", None)
+        query_duplicate_flags_matrix = getattr(lsh, "query_duplicate_flags_matrix", None)
+        if insert_matrix is None or query_duplicate_flags_matrix is None:
+            raise RuntimeError("Requested rensa query mode 'matrix_build_query' is unavailable")
         build_start = perf_counter()
-        duplicate_flags = [
-            bool(value)
-            for value in lsh.insert_matrix_and_query_duplicate_flags(matrix, start_key=0)
-        ]
-        build_elapsed = perf_counter() - build_start
-    elif matrix is not None and hasattr(lsh, "insert_matrix") and hasattr(lsh, "query_duplicate_flags_matrix"):
-        build_start = perf_counter()
-        lsh.insert_matrix(matrix, start_key=0)
+        insert_matrix(matrix, start_key=0)
         build_elapsed = perf_counter() - build_start
 
         query_start = perf_counter()
-        duplicate_flags = [bool(value) for value in lsh.query_duplicate_flags_matrix(matrix)]
+        duplicate_flags = [bool(value) for value in query_duplicate_flags_matrix(matrix)]
         query_elapsed = perf_counter() - query_start
-    elif minhashes is not None:
+    elif query_mode == "per_item":
+        if minhashes is None:
+            raise RuntimeError("Rensa query mode 'per_item' requires per-item sketch mode")
         build_start = perf_counter()
         for index, minhash in enumerate(minhashes):
             lsh.insert(index, minhash)
@@ -573,17 +878,17 @@ def run_rensa(
             duplicate_flags.append(len(candidates) > 1)
         query_elapsed = perf_counter() - query_start
     else:
-        raise RuntimeError(
-            "Unsupported rensa API shape: no compatible matrix or per-item benchmark path"
-        )
+        raise ValueError(f"Unknown rensa query mode: {query_mode}")
 
     rows = len(duplicate_flags)
     rows_removed = sum(1 for is_duplicate in duplicate_flags if is_duplicate)
     metrics = {
+        "phase_model": phase_model,
         "sketch": sketch_elapsed,
         "build": build_elapsed,
         "query": query_elapsed,
-        "total": sketch_elapsed + build_elapsed + query_elapsed,
+        "fused_build_query": fused_build_query_elapsed,
+        "total": sketch_elapsed + build_elapsed + query_elapsed + (fused_build_query_elapsed or 0.0),
         "rows_removed": rows_removed,
         "rows_remaining": rows - rows_removed,
         "total_candidates": None,
@@ -600,6 +905,9 @@ def run_engine(
     threshold: float,
     seed: int,
     threads: int,
+    rensa_sketch_mode: str,
+    rensa_query_mode: str,
+    rensa_rho_probes: int,
 ) -> tuple[dict[str, Any], list[bool]]:
     if engine == "datasketch":
         return run_datasketch(
@@ -624,6 +932,9 @@ def run_engine(
             num_bands=num_bands,
             threshold=threshold,
             seed=seed,
+            sketch_mode=rensa_sketch_mode,
+            query_mode=rensa_query_mode,
+            rho_probes=rensa_rho_probes,
         )
     raise ValueError(f"Unknown engine: {engine}")
 
@@ -689,8 +1000,14 @@ def run_once(args: argparse.Namespace) -> None:
             f"expected {args.expected_token_cache_sha}, got {token_cache_sha}"
         )
 
-    with args.token_cache.open("rb") as handle:
-        token_sets: list[list[str]] = pickle.load(handle)
+    payload = load_token_cache_payload(args.token_cache)
+    if payload is None:
+        raise RuntimeError(
+            "Token cache is stale or uses an unsupported schema. Rebuild it with the current "
+            "benchmarks/full_benchmark.py cache loader."
+        )
+    token_sets: list[list[str]] = payload["token_sets"]
+    token_sets_sha = payload["token_sets_sha256"]
 
     results: dict[str, dict[str, Any]] = {}
     flags_by_engine: dict[str, list[bool]] = {}
@@ -703,6 +1020,9 @@ def run_once(args: argparse.Namespace) -> None:
             threshold=args.threshold,
             seed=args.seed,
             threads=args.run_threads,
+            rensa_sketch_mode=args.rensa_sketch_mode,
+            rensa_query_mode=args.rensa_query_mode,
+            rensa_rho_probes=args.rensa_rho_probes,
         )
         results[engine] = metrics
         flags_by_engine[engine] = flags
@@ -719,6 +1039,14 @@ def run_once(args: argparse.Namespace) -> None:
         "threads": args.run_threads,
         "order": ordered_engines,
         "token_cache_sha256": token_cache_sha,
+        "token_sets_sha256": token_sets_sha,
+        "token_cache_schema_version": TOKEN_CACHE_SCHEMA_VERSION,
+        "tokenizer_fingerprint": tokenizer_fingerprint(),
+        "rensa_modes": {
+            "sketch_mode": args.rensa_sketch_mode,
+            "query_mode": args.rensa_query_mode,
+            "rho_probes": args.rensa_rho_probes,
+        },
         "thread_env_assertions": thread_assertions,
         "engines": results,
         "accuracy": {
@@ -756,6 +1084,9 @@ def run_once_subprocess(
     seed: int,
     threads: int,
     order: list[str],
+    rensa_sketch_mode: str,
+    rensa_query_mode: str,
+    rensa_rho_probes: int,
 ) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -773,6 +1104,12 @@ def run_once_subprocess(
         str(threshold),
         "--seed",
         str(seed),
+        "--rensa-sketch-mode",
+        rensa_sketch_mode,
+        "--rensa-query-mode",
+        rensa_query_mode,
+        "--rensa-rho-probes",
+        str(rensa_rho_probes),
         "--run-threads",
         str(threads),
         "--order",
@@ -803,6 +1140,11 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     cache_hashes = {run["token_cache_sha256"] for run in runs}
     if len(cache_hashes) != 1:
         raise ValueError(f"Token cache hash mismatch across runs: {sorted(cache_hashes)}")
+    token_set_hashes = {run["token_sets_sha256"] for run in runs}
+    if len(token_set_hashes) != 1:
+        raise ValueError(
+            f"Token set hash mismatch across runs: {sorted(token_set_hashes)}"
+        )
 
     thread_env_ok = all(
         all(bool(value) for value in run["thread_env_assertions"].values()) for run in runs
@@ -812,10 +1154,20 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
     engine_summary: dict[str, Any] = {}
     for engine in ENGINE_KEYS:
+        phase_models = {run["engines"][engine]["phase_model"] for run in runs}
+        if len(phase_models) != 1:
+            raise ValueError(
+                f"Phase model mismatch across runs for {engine}: {sorted(phase_models)}"
+            )
         totals = [run["engines"][engine]["total"] for run in runs]
         sketches = [run["engines"][engine]["sketch"] for run in runs]
         builds = [run["engines"][engine]["build"] for run in runs]
         queries = [run["engines"][engine]["query"] for run in runs]
+        fused_build_queries = [
+            run["engines"][engine]["fused_build_query"]
+            for run in runs
+            if run["engines"][engine]["fused_build_query"] is not None
+        ]
         rows_removed = [run["engines"][engine]["rows_removed"] for run in runs]
         rows_remaining = [run["engines"][engine]["rows_remaining"] for run in runs]
         avg_candidates = [
@@ -825,10 +1177,14 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         ]
 
         engine_summary[engine] = {
+            "phase_model": next(iter(phase_models)),
             "median_total": median(totals),
             "median_sketch": median(sketches),
             "median_build": median(builds),
             "median_query": median(queries),
+            "median_fused_build_query": (
+                median(fused_build_queries) if fused_build_queries else None
+            ),
             "median_rows_removed": int(round(median(rows_removed))),
             "median_rows_remaining": int(round(median(rows_remaining))),
             "median_avg_candidates_per_row": median(avg_candidates) if avg_candidates else None,
@@ -936,8 +1292,197 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "fairness": {
             "token_cache_hash_consistent": True,
             "token_cache_sha256": next(iter(cache_hashes)),
+            "token_sets_sha256": next(iter(token_set_hashes)),
             "thread_env_assertions_all_true": True,
         },
+    }
+
+
+def canonicalize_dataset_fingerprint(
+    fingerprint: dict[str, Any],
+) -> dict[str, Any]:
+    canonical = dict(fingerprint)
+    token_sets_sha = canonical.get("token_sets_sha256")
+    if not isinstance(token_sets_sha, str) or not token_sets_sha:
+        raise ValueError(
+            "Baseline dataset fingerprint is missing token_sets_sha256. "
+            "Refresh the locked baseline artifact with the current benchmark script."
+        )
+    canonical.pop("token_cache_sha256", None)
+    return canonical
+
+
+def build_dataset_fingerprints(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fingerprints: dict[str, dict[str, Any]] = {}
+    for result in results:
+        dataset = result["dataset"]
+        key = dataset["key"]
+        fingerprint = {
+            "key": key,
+            "hf_dataset": dataset["hf_dataset"],
+            "split": dataset["split"],
+            "text_columns": list(dataset["text_columns"]),
+            "revision": dataset["revision"],
+            "streaming": bool(dataset["streaming"]),
+            "effective_max_rows": result["effective_max_rows"],
+            "token_cache_sha256": result["token_cache_sha256"],
+            "token_sets_sha256": result["token_sets_sha256"],
+            "token_cache_schema_version": TOKEN_CACHE_SCHEMA_VERSION,
+            "tokenizer_fingerprint": tokenizer_fingerprint(),
+        }
+        existing = fingerprints.get(key)
+        if existing is None:
+            fingerprints[key] = fingerprint
+            continue
+        if existing != fingerprint:
+            raise ValueError(
+                f"Dataset fingerprint mismatch across thread lanes for '{key}': "
+                f"{existing} != {fingerprint}"
+            )
+    return [fingerprints[key] for key in sorted(fingerprints)]
+
+
+def aggregate_rensa_totals(results: list[dict[str, Any]]) -> dict[str, float]:
+    totals_by_thread: dict[str, float] = {}
+    for result in results:
+        thread_key = str(result["threads"])
+        totals_by_thread.setdefault(thread_key, 0.0)
+        totals_by_thread[thread_key] += result["summary"]["engine_medians"]["rensa"]["median_total"]
+    return totals_by_thread
+
+
+def mean_accuracy_metric(
+    results: list[dict[str, Any]],
+    *,
+    jaccard: bool,
+) -> float:
+    if not results:
+        return 0.0
+    if jaccard:
+        values = [
+            result["summary"]["accuracy"]["median_jaccard"]["datasketch_vs_rensa"]
+            for result in results
+        ]
+    else:
+        values = [
+            result["summary"]["accuracy"]["mismatch_vs_datasketch"]["rensa"]["median_rate"]
+            for result in results
+        ]
+    return statistics.fmean(values)
+
+
+def validate_baseline_fingerprint(
+    current_payload: dict[str, Any],
+    baseline_payload: dict[str, Any],
+) -> None:
+    current_fingerprint = current_payload["input_fingerprint"]
+    baseline_fingerprint = baseline_payload["input_fingerprint"]
+
+    if current_fingerprint["ngram_size"] != baseline_fingerprint["ngram_size"]:
+        raise ValueError(
+            "Baseline ngram_size mismatch: "
+            f"{current_fingerprint['ngram_size']} != {baseline_fingerprint['ngram_size']}"
+        )
+    if current_fingerprint["rensa"] != baseline_fingerprint["rensa"]:
+        raise ValueError(
+            "Baseline Rensa mode mismatch: "
+            f"{current_fingerprint['rensa']} != {baseline_fingerprint['rensa']}"
+        )
+
+    current_datasets = current_fingerprint["datasets"]
+    baseline_datasets = baseline_fingerprint["datasets"]
+    canonical_current = [
+        canonicalize_dataset_fingerprint(fingerprint)
+        for fingerprint in current_datasets
+    ]
+    canonical_baseline = [
+        canonicalize_dataset_fingerprint(fingerprint)
+        for fingerprint in baseline_datasets
+    ]
+    if canonical_current != canonical_baseline:
+        raise ValueError(
+            "Baseline dataset fingerprint mismatch: "
+            f"{canonical_current} != {canonical_baseline}"
+        )
+
+
+def compare_to_locked_baseline(
+    payload: dict[str, Any],
+    baseline_path: Path,
+) -> dict[str, Any] | None:
+    if not baseline_path.exists():
+        return None
+
+    baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    validate_baseline_fingerprint(payload, baseline_payload)
+
+    baseline_config = baseline_payload["config"]
+    current_config = payload["config"]
+    comparable_fields = (
+        "datasets",
+        "threads",
+        "num_perm",
+        "num_bands",
+        "threshold",
+        "seed",
+        "ngram_size",
+    )
+    for field in comparable_fields:
+        if current_config[field] != baseline_config[field]:
+            raise ValueError(
+                f"Baseline config mismatch for {field}: "
+                f"{current_config[field]!r} != {baseline_config[field]!r}"
+            )
+
+    current_totals = aggregate_rensa_totals(payload["results"])
+    baseline_totals = {
+        str(key): value
+        for key, value in baseline_payload["locked_baseline"][
+            "aggregate_rensa_median_total"
+        ].items()
+    }
+    current_jaccard = mean_accuracy_metric(payload["results"], jaccard=True)
+    current_mismatch = mean_accuracy_metric(payload["results"], jaccard=False)
+    baseline_jaccard = baseline_payload["locked_baseline"]["mean_jaccard"]
+    baseline_mismatch = baseline_payload["locked_baseline"]["mean_mismatch"]
+
+    thread_checks = {
+        thread: current_totals[thread] <= baseline_totals[thread]
+        for thread in baseline_totals
+    }
+    fairness = {
+        "thread_env_assertions_all_true": all(
+            result["summary"]["fairness"]["thread_env_assertions_all_true"]
+            for result in payload["results"]
+        ),
+        "token_cache_hash_consistent": all(
+            result["summary"]["fairness"]["token_cache_hash_consistent"]
+            for result in payload["results"]
+        ),
+    }
+    accuracy = {
+        "jaccard_non_regression": current_jaccard >= baseline_jaccard,
+        "mismatch_non_regression": current_mismatch <= baseline_mismatch,
+    }
+
+    passed = all(thread_checks.values()) and all(fairness.values()) and all(accuracy.values())
+    return {
+        "baseline_path": str(baseline_path),
+        "validated": True,
+        "passed": passed,
+        "aggregate_rensa_median_total": {
+            "current": current_totals,
+            "baseline": baseline_totals,
+            "non_regression": thread_checks,
+        },
+        "accuracy": {
+            "current_mean_jaccard": current_jaccard,
+            "baseline_mean_jaccard": baseline_jaccard,
+            "current_mean_mismatch": current_mismatch,
+            "baseline_mean_mismatch": baseline_mismatch,
+            **accuracy,
+        },
+        "fairness": fairness,
     }
 
 
@@ -949,9 +1494,7 @@ def print_section_summary(dataset_key: str, threads: int, summary: dict[str, Any
     print("\n" + "=" * 80)
     print(f"{dataset_key.upper()} | threads={threads}")
     print("=" * 80)
-    print(
-        f"{'Engine':<14} {'Median Total(s)':<16} {'Sketch':<10} {'Build':<10} {'Query':<10} {'Speedup vs DS':<14}"
-    )
+    print(f"{'Engine':<14} {'Median Total(s)':<16} {'Speedup vs DS':<14}")
     print("-" * 80)
     for engine in ENGINE_KEYS:
         engine_stats = medians[engine]
@@ -960,10 +1503,25 @@ def print_section_summary(dataset_key: str, threads: int, summary: dict[str, Any
         print(
             f"{engine:<14} "
             f"{engine_stats['median_total']:<16.4f} "
+            f"{speedup_label:<14}"
+        )
+
+    print("\nEngine-specific phase medians (s):")
+    print(
+        f"{'Engine':<14} {'Model':<18} {'Sketch':<10} {'Build':<10} {'Query':<10} {'Fused':<10}"
+    )
+    print("-" * 80)
+    for engine in ENGINE_KEYS:
+        engine_stats = medians[engine]
+        fused_value = engine_stats["median_fused_build_query"]
+        fused_label = f"{fused_value:.4f}" if fused_value is not None else "n/a"
+        print(
+            f"{engine:<14} "
+            f"{engine_stats['phase_model']:<18} "
             f"{engine_stats['median_sketch']:<10.4f} "
             f"{engine_stats['median_build']:<10.4f} "
             f"{engine_stats['median_query']:<10.4f} "
-            f"{speedup_label:<14}"
+            f"{fused_label:<10}"
         )
 
     print("\nRows removed (median):")
@@ -1026,6 +1584,24 @@ def main(args: argparse.Namespace) -> None:
         raise ValueError("--repetitions must be > 0")
     if args.ngram_size <= 0:
         raise ValueError("--ngram-size must be > 0")
+    if args.rensa_rho_probes <= 0:
+        raise ValueError("--rensa-rho-probes must be > 0")
+    if args.rensa_sketch_mode == "per_item" and args.rensa_query_mode != "per_item":
+        raise ValueError(
+            "--rensa-sketch-mode=per_item requires --rensa-query-mode=per_item"
+        )
+    if args.rensa_sketch_mode != "per_item" and args.rensa_query_mode == "per_item":
+        raise ValueError(
+            "--rensa-query-mode=per_item requires --rensa-sketch-mode=per_item"
+        )
+    if args.rensa_sketch_mode == "compat" and args.rensa_query_mode != "compat":
+        raise ValueError(
+            "--rensa-sketch-mode=compat requires --rensa-query-mode=compat"
+        )
+    if args.rensa_sketch_mode != "compat" and args.rensa_query_mode == "compat":
+        raise ValueError(
+            "--rensa-query-mode=compat requires --rensa-sketch-mode=compat"
+        )
 
     global_max_rows = args.max_rows
     if global_max_rows is not None:
@@ -1041,10 +1617,14 @@ def main(args: argparse.Namespace) -> None:
     print(
         f"Config: num_perm={args.num_perm} threshold={args.threshold} "
         f"num_bands={args.num_bands} rows_per_band={args.num_perm // args.num_bands} "
-        f"ngram_size={args.ngram_size} warmup_runs={args.warmup_runs} repetitions={args.repetitions}"
+        f"ngram_size={args.ngram_size} warmup_runs={args.warmup_runs} repetitions={args.repetitions} "
+        f"rensa_sketch_mode={args.rensa_sketch_mode} "
+        f"rensa_query_mode={args.rensa_query_mode} "
+        f"rensa_rho_probes={args.rensa_rho_probes}"
     )
     print(f"Datasets: {dataset_keys}")
     print(f"Thread modes: {thread_modes}")
+    print("Dataset revisions are pinned for reproducibility.")
     if args.warmup_runs == 0 and args.repetitions == 1:
         print(
             "Stability note: warmup_runs=0 and repetitions=1 is the fastest config "
@@ -1066,7 +1646,12 @@ def main(args: argparse.Namespace) -> None:
             global_max_rows=global_max_rows,
             dataset_max_rows=dataset_max_rows_overrides,
         )
-        token_cache, row_count, token_cache_sha256 = load_or_prepare_token_cache(
+        (
+            token_cache,
+            row_count,
+            token_cache_sha256,
+            token_sets_sha256,
+        ) = load_or_prepare_token_cache(
             cache_dir=args.cache_dir,
             spec=spec,
             max_rows=effective_max_rows,
@@ -1097,6 +1682,9 @@ def main(args: argparse.Namespace) -> None:
                     seed=args.seed,
                     threads=threads,
                     order=order,
+                    rensa_sketch_mode=args.rensa_sketch_mode,
+                    rensa_query_mode=args.rensa_query_mode,
+                    rensa_rho_probes=args.rensa_rho_probes,
                 )
                 if iteration >= args.warmup_runs:
                     runs.append(run_payload)
@@ -1119,10 +1707,21 @@ def main(args: argparse.Namespace) -> None:
                     "effective_max_rows": effective_max_rows,
                     "token_cache": str(token_cache),
                     "token_cache_sha256": token_cache_sha256,
+                    "token_sets_sha256": token_sets_sha256,
                     "runs": runs,
                     "summary": summary,
                 }
             )
+
+    input_fingerprint = {
+        "ngram_size": args.ngram_size,
+        "rensa": {
+            "sketch_mode": args.rensa_sketch_mode,
+            "query_mode": args.rensa_query_mode,
+            "rho_probes": args.rensa_rho_probes,
+        },
+        "datasets": build_dataset_fingerprints(full_results),
+    }
 
     payload = {
         "metadata": {
@@ -1149,23 +1748,53 @@ def main(args: argparse.Namespace) -> None:
             "warmup_runs": args.warmup_runs,
             "repetitions": args.repetitions,
             "ngram_size": args.ngram_size,
+            "rensa_sketch_mode": args.rensa_sketch_mode,
+            "rensa_query_mode": args.rensa_query_mode,
+            "rensa_rho_probes": args.rensa_rho_probes,
             "max_rows": global_max_rows,
             "dataset_max_rows": dataset_max_rows_overrides,
             "cache_dir": str(args.cache_dir),
+            "baseline_json": str(args.baseline_json),
+            "token_cache_schema_version": TOKEN_CACHE_SCHEMA_VERSION,
+            "tokenizer_fingerprint": tokenizer_fingerprint(),
             "rensa_env": current_rensa_env(),
             "datasketch_threading_note": (
                 "Datasketch does not expose explicit thread count controls; "
                 "lane env vars are pinned for process symmetry."
             ),
         },
+        "input_fingerprint": input_fingerprint,
         "results": full_results,
     }
+
+    payload["baseline_comparison"] = compare_to_locked_baseline(
+        payload,
+        args.baseline_json,
+    )
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     with args.output_json.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
     print(f"\nWrote benchmark JSON to {args.output_json}")
+
+    comparison = payload["baseline_comparison"]
+    if comparison is None:
+        print(f"No baseline artifact found at {args.baseline_json}, skipped baseline comparison.")
+        return
+
+    print(
+        "Baseline comparison: "
+        f"threads={comparison['aggregate_rensa_median_total']['non_regression']} "
+        f"accuracy={{'jaccard': {comparison['accuracy']['jaccard_non_regression']}, "
+        f"'mismatch': {comparison['accuracy']['mismatch_non_regression']}}} "
+        f"fairness={comparison['fairness']}"
+    )
+    if not comparison["passed"]:
+        raise RuntimeError(
+            "Locked baseline regression detected. "
+            f"See {args.output_json} and {args.baseline_json} for details."
+        )
 
 
 if __name__ == "__main__":
