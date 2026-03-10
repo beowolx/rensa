@@ -33,6 +33,19 @@ jobs:
       - name: Lint with clippy
         run: cargo clippy --all --benches --tests --examples --all-features -- -D clippy::pedantic -D clippy::nursery
 
+  rust-test:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features
+
   cargo-deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
@@ -48,6 +61,55 @@ jobs:
           tool: cargo-deny
       - name: Check Rust dependency policy
         run: cargo deny check all
+
+  rensa-ffi:
+    name: Rensa FFI (cdylib)
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            artifact: librensa_ffi.so
+          - runner: macos-14
+            artifact: librensa_ffi.dylib
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+      - name: Build rensa-ffi
+        run: cargo build -p rensa-ffi --profile release-ffi
+      - name: Upload rensa-ffi artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rensa-ffi-${{ matrix.platform.runner }}
+          path: target/release-ffi/${{ matrix.platform.artifact }}
+
+  go-tests:
+    name: Go Tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        runner:
+          - ubuntu-latest
+          - macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: examples/go-crawltrap/go.mod
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+      - name: Build rensa-ffi
+        run: cargo build -p rensa-ffi --profile release-ffi
+      - name: Run Go tests
+        working-directory: examples/go-crawltrap
+        run: go test ./...
 
   dependency-review:
     name: Dependency Review
@@ -91,7 +153,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist --find-interpreter
+          args: --manifest-path crates/rensa-py/Cargo.toml --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -123,7 +185,7 @@ jobs:
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --manifest-path crates/rensa-py/Cargo.toml --release --out dist --find-interpreter
           sccache: "true"
           manylinux: musllinux_1_2
       - name: Upload wheels
@@ -152,7 +214,7 @@ jobs:
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --manifest-path crates/rensa-py/Cargo.toml --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -179,7 +241,7 @@ jobs:
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --manifest-path crates/rensa-py/Cargo.toml --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -196,12 +258,56 @@ jobs:
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021
         with:
           command: sdist
-          args: --out dist
+          args: --manifest-path crates/rensa-py/Cargo.toml --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wheels-sdist
           path: dist
+
+  sdist-smoke:
+    name: Sdist Smoke
+    needs: [sdist]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: wheels-sdist
+          path: dist
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.9"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: stable
+      - name: Install sdist into a clean env
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python 3.9 .venv-sdist
+          uv pip install --python .venv-sdist/bin/python dist/*.tar.gz
+      - name: Smoke import installed sdist
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv-sdist/bin/python - <<'PY'
+          from rensa import CMinHash, RMinHash, RMinHashLSH
+
+          r = RMinHash(num_perm=32, seed=7)
+          r.update(["alpha", "beta"])
+          c = CMinHash(num_perm=32, seed=7)
+          c.update(["alpha", "beta"])
+          lsh = RMinHashLSH(threshold=0.8, num_perm=32, num_bands=8, seed=7)
+          lsh.insert(1, r)
+
+          assert len(r.digest()) == 32
+          assert len(c.digest()) == 32
+          assert 1 in lsh.query(r)
+          PY
 
   performance-check:
     name: Performance Check
@@ -270,7 +376,7 @@ jobs:
             local label="$4"
 
             pushd "${commit_dir}" >/dev/null
-            VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release
+            VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release --manifest-path "${commit_dir}/crates/rensa-py/Cargo.toml"
             popd >/dev/null
 
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
@@ -368,7 +474,7 @@ jobs:
             "FastSketchLSH" \
             "tqdm>=4.66"
 
-          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
+          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release --manifest-path crates/rensa-py/Cargo.toml
 
           .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET_KEY}" \
@@ -461,7 +567,7 @@ jobs:
           
       - name: Build & Install Rensa
         run: |
-          uv run --python .venv/bin/python maturin develop --release
+          uv run --python .venv/bin/python maturin develop --release --manifest-path crates/rensa-py/Cargo.toml
         
       - name: Run tests
         run: |
@@ -472,7 +578,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: "startsWith(github.ref, 'refs/tags/')"
-    needs: [rust-quality, cargo-deny, linux, musllinux, windows, macos, sdist, performance-check, test]
+    needs: [rust-quality, rust-test, cargo-deny, rensa-ffi, go-tests, linux, musllinux, windows, macos, sdist, sdist-smoke, performance-check, test]
     permissions:
       contents: read
       id-token: write
