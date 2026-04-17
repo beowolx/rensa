@@ -297,6 +297,7 @@ impl RMinHash {
     num_perm: usize,
     seed: u64,
   ) -> PyResult<RMinHashDigestMatrix> {
+    Self::validate_num_perm(num_perm)?;
     Self::validate_flat_row_offsets(row_offsets, token_hashes.len())?;
     let rows = row_offsets.len().saturating_sub(1);
     let permutations = Self::build_permutations(num_perm, seed);
@@ -550,6 +551,7 @@ impl RMinHash {
     permutations_soa: &PermutationSoA,
     document_hasher: fn(&Bound<'_, PyAny>, &mut Vec<u64>) -> PyResult<()>,
   ) -> PyResult<RMinHashDigestMatrix> {
+    Self::validate_num_perm(num_perm)?;
     let config = DigestBuildConfig::from_env();
     if let Ok(py_list) = token_sets.cast::<PyList>() {
       return Self::build_digest_matrix_data_with_known_rows(
@@ -610,11 +612,7 @@ impl RMinHash {
       permutation_cache.as_mut(),
     );
 
-    let rows = if num_perm == 0 {
-      0
-    } else {
-      matrix_data.len() / num_perm
-    };
+    let rows = matrix_data.len() / num_perm;
 
     Ok(RMinHashDigestMatrix {
       num_perm,
