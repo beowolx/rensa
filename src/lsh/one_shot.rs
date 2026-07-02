@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(target_pointer_width = "64")]
 const USIZE_MASK_U64: u64 = u64::MAX;
@@ -13,6 +14,12 @@ const USIZE_MASK_U64: u64 = u64::MAX;
 const USIZE_MASK_U64: u64 = u32::MAX as u64;
 
 const MIN_PARALLEL_BAND_ROWS: usize = 2048;
+/// Sentinel for "no previous row" in per-band collision chains. Row indices
+/// are validated to fit `u32`, so `u32::MAX` is never a valid predecessor.
+const NO_ROW: u32 = u32::MAX;
+/// Marks a recall-rescue bucket that already collided (low 32 bits hold the
+/// first row index).
+const RESCUE_COLLIDED_BIT: u64 = 1 << 32;
 
 #[inline]
 fn u64_to_usize_lowbits(value: u64) -> usize {
@@ -66,25 +73,44 @@ struct BandScanContext<'a> {
   sparse_verify: &'a SparseVerifyConfig,
 }
 
+/// Per-band scan state. Collision groups are kept as intrusive chains inside
+/// `chain_prev` (indexed by row), which avoids one `Vec` allocation per
+/// colliding hash bucket.
 struct BandScanScratch {
-  first_row_by_hash: FxHashMap<u64, u32>,
-  collisions_by_hash: FxHashMap<u64, Vec<u32>>,
+  tail_row_by_hash: FxHashMap<u64, u32>,
+  chain_prev: Vec<u32>,
+  collided_hashes: Vec<u64>,
+  group_rows: Vec<u32>,
 }
 
 impl BandScanScratch {
   fn with_row_capacity(rows: usize) -> Self {
-    let mut first_row_by_hash = FxHashMap::default();
-    first_row_by_hash.reserve(rows);
+    let mut tail_row_by_hash = FxHashMap::default();
+    tail_row_by_hash.reserve(rows);
     Self {
-      first_row_by_hash,
-      collisions_by_hash: FxHashMap::default(),
+      tail_row_by_hash,
+      chain_prev: vec![NO_ROW; rows],
+      collided_hashes: Vec::new(),
+      group_rows: Vec::new(),
     }
+  }
+
+  fn reset(&mut self) {
+    self.tail_row_by_hash.clear();
+    self.chain_prev.fill(NO_ROW);
+    self.collided_hashes.clear();
   }
 }
 
-struct RecallRescueBucketState {
-  first_row: usize,
-  collided: bool,
+#[inline]
+fn rescue_state_first_row(state: u64) -> usize {
+  usize::try_from(state & u64::from(u32::MAX)).unwrap_or_default()
+}
+
+fn atomic_counters(rows: usize) -> Vec<AtomicU32> {
+  let mut counters = Vec::with_capacity(rows);
+  counters.resize_with(rows, AtomicU32::default);
+  counters
 }
 
 #[inline]
@@ -161,7 +187,7 @@ impl RMinHashLSH {
       return Ok(flags);
     }
 
-    let mut band_match_counts = vec![0u32; rows];
+    let band_match_counts = atomic_counters(rows);
     let mut sparse_verify_checks = 0usize;
     let mut sparse_verify_passes = 0usize;
     {
@@ -176,26 +202,20 @@ impl RMinHashLSH {
       };
       let this = &*self;
       if use_parallel_bands(folding.effective_num_bands, rows) {
-        let band_results: Vec<(Vec<u32>, usize, usize)> = (0..folding
-          .effective_num_bands)
+        let band_stats: Vec<(usize, usize)> = (0..folding.effective_num_bands)
           .into_par_iter()
           .map(|band_idx| {
-            let mut local_counts = vec![0u32; rows];
             let mut scratch = BandScanScratch::with_row_capacity(rows);
-            let (checks, passes) = Self::scan_effective_band(
+            Self::scan_effective_band(
               this,
               &ctx,
               band_idx,
-              &mut local_counts,
+              &band_match_counts,
               &mut scratch,
-            );
-            (local_counts, checks, passes)
+            )
           })
           .collect();
-        for (local_counts, checks, passes) in band_results {
-          for (total, local) in band_match_counts.iter_mut().zip(local_counts) {
-            *total = total.saturating_add(local);
-          }
+        for (checks, passes) in band_stats {
           sparse_verify_checks = sparse_verify_checks.saturating_add(checks);
           sparse_verify_passes = sparse_verify_passes.saturating_add(passes);
         }
@@ -206,7 +226,7 @@ impl RMinHashLSH {
             this,
             &ctx,
             band_idx,
-            &mut band_match_counts,
+            &band_match_counts,
             &mut scratch,
           );
           sparse_verify_checks = sparse_verify_checks.saturating_add(checks);
@@ -222,7 +242,7 @@ impl RMinHashLSH {
         rows,
         precomputed.as_ref(),
         &required_band_matches,
-        &mut band_match_counts,
+        &band_match_counts,
         &recall_rescue,
       );
     }
@@ -230,7 +250,7 @@ impl RMinHashLSH {
     let flags = band_match_counts
       .iter()
       .zip(required_band_matches.iter())
-      .map(|(matches, required)| *matches >= *required)
+      .map(|(matches, required)| matches.load(Ordering::Relaxed) >= *required)
       .collect();
 
     self.last_one_shot_sparse_verify_checks = sparse_verify_checks;
@@ -404,7 +424,7 @@ impl RMinHashLSH {
     &self,
     ctx: &BandScanContext<'_>,
     band_idx: usize,
-    band_match_counts: &mut [u32],
+    band_match_counts: &[AtomicU32],
     scratch: &mut BandScanScratch,
   ) -> (usize, usize) {
     let table = if ctx.rho_band_fold == 1 {
@@ -412,16 +432,11 @@ impl RMinHashLSH {
     } else {
       None
     };
-    let first_row_by_hash = &mut scratch.first_row_by_hash;
-    let collisions_by_hash = &mut scratch.collisions_by_hash;
-    first_row_by_hash.clear();
-    collisions_by_hash.clear();
+    scratch.reset();
     let mut sparse_verify_checks = 0usize;
     let mut sparse_verify_passes = 0usize;
 
-    for (row_index, band_match_count) in
-      band_match_counts.iter_mut().enumerate()
-    {
+    for (row_index, band_match_count) in band_match_counts.iter().enumerate() {
       let band_hash = Self::effective_band_hash(
         self,
         ctx.digest_matrix,
@@ -435,40 +450,47 @@ impl RMinHashLSH {
       if ctx.has_existing_entries
         && table.is_some_and(|band_table| band_table.contains_key(&band_hash))
       {
-        *band_match_count = band_match_count.saturating_add(1);
+        band_match_count.fetch_add(1, Ordering::Relaxed);
       }
 
       #[allow(clippy::cast_possible_truncation)]
       let row_index_u32 = row_index as u32;
-      match first_row_by_hash.entry(band_hash) {
+      match scratch.tail_row_by_hash.entry(band_hash) {
         Entry::Vacant(entry) => {
           entry.insert(row_index_u32);
         }
-        Entry::Occupied(entry) => {
-          let first_row = *entry.get();
-          collisions_by_hash
-            .entry(band_hash)
-            .or_insert_with(|| {
-              let mut rows = Vec::with_capacity(2);
-              rows.push(first_row);
-              rows
-            })
-            .push(row_index_u32);
+        Entry::Occupied(mut entry) => {
+          let prev_tail = *entry.get();
+          if scratch.chain_prev[prev_tail as usize] == NO_ROW {
+            // Group just reached two members; remember it for the pass below.
+            scratch.collided_hashes.push(band_hash);
+          }
+          scratch.chain_prev[row_index] = prev_tail;
+          *entry.get_mut() = row_index_u32;
         }
       }
     }
 
-    for row_indices in collisions_by_hash.values() {
-      if row_indices.len() < 2 {
+    for &band_hash in &scratch.collided_hashes {
+      let Some(&tail_row) = scratch.tail_row_by_hash.get(&band_hash) else {
         continue;
+      };
+      scratch.group_rows.clear();
+      let mut cursor = tail_row;
+      while cursor != NO_ROW {
+        scratch.group_rows.push(cursor);
+        cursor = scratch.chain_prev[cursor as usize];
       }
-      for &row_index in row_indices {
+      // Chains link tail -> first; restore insertion order.
+      scratch.group_rows.reverse();
+
+      for &row_index in &scratch.group_rows {
         let row_index = row_index as usize;
         let row_sparse = ctx.required_band_matches[row_index] > 1;
         let mut checked_candidates = 0usize;
         let mut matched = false;
 
-        for &other_row in row_indices {
+        for &other_row in &scratch.group_rows {
           let other_row = other_row as usize;
           if other_row == row_index {
             continue;
@@ -499,8 +521,7 @@ impl RMinHashLSH {
         }
 
         if matched {
-          band_match_counts[row_index] =
-            band_match_counts[row_index].saturating_add(1);
+          band_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
         }
       }
     }
@@ -571,8 +592,8 @@ impl RMinHashLSH {
     precomputed: Option<&PrecomputedBandHashes>,
     band_idx: usize,
     rescue_candidate_mask: &[u8],
-    rescue_band_match_counts: &mut [u8],
-    bucket_state_by_hash: &mut FxHashMap<u64, RecallRescueBucketState>,
+    rescue_band_match_counts: &[AtomicU32],
+    bucket_state_by_hash: &mut FxHashMap<u64, u64>,
   ) {
     bucket_state_by_hash.clear();
     for (row_index, rescue_candidate) in
@@ -588,26 +609,18 @@ impl RMinHashLSH {
         |precomputed| precomputed.hashes[row_index * self.num_bands + band_idx],
       );
       if let Some(bucket_state) = bucket_state_by_hash.get_mut(&band_hash) {
-        if !bucket_state.collided {
-          bucket_state.collided = true;
-          let first_row = bucket_state.first_row;
+        if *bucket_state & RESCUE_COLLIDED_BIT == 0 {
+          let first_row = rescue_state_first_row(*bucket_state);
+          *bucket_state |= RESCUE_COLLIDED_BIT;
           if rescue_candidate_mask[first_row] == 1 {
-            rescue_band_match_counts[first_row] =
-              rescue_band_match_counts[first_row].saturating_add(1);
+            rescue_band_match_counts[first_row].fetch_add(1, Ordering::Relaxed);
           }
         }
         if *rescue_candidate == 1 {
-          rescue_band_match_counts[row_index] =
-            rescue_band_match_counts[row_index].saturating_add(1);
+          rescue_band_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
         }
       } else {
-        bucket_state_by_hash.insert(
-          band_hash,
-          RecallRescueBucketState {
-            first_row: row_index,
-            collided: false,
-          },
-        );
+        bucket_state_by_hash.insert(band_hash, usize_to_u64_lowbits(row_index));
       }
     }
   }
@@ -618,13 +631,13 @@ impl RMinHashLSH {
     rows: usize,
     precomputed: Option<&PrecomputedBandHashes>,
     required_band_matches: &[u32],
-    band_match_counts: &mut [u32],
+    band_match_counts: &[AtomicU32],
     recall_rescue: &RecallRescueConfig,
   ) {
     let mut rescue_candidate_mask = vec![0u8; rows];
     let mut rescue_candidate_count = 0usize;
     for row_index in 0..rows {
-      if band_match_counts[row_index] != 0
+      if band_match_counts[row_index].load(Ordering::Relaxed) != 0
         || required_band_matches[row_index] > 1
       {
         continue;
@@ -645,38 +658,23 @@ impl RMinHashLSH {
       return;
     }
 
-    let mut rescue_band_match_counts = vec![0u8; rows];
+    let rescue_band_match_counts = atomic_counters(rows);
     if use_parallel_bands(self.num_bands, rows) {
-      let band_results: Vec<Vec<u8>> = (0..self.num_bands)
-        .into_par_iter()
-        .map(|band_idx| {
-          let mut local_counts = vec![0u8; rows];
-          let mut bucket_state_by_hash: FxHashMap<
-            u64,
-            RecallRescueBucketState,
-          > = FxHashMap::default();
-          bucket_state_by_hash.reserve(rows);
-          self.recall_rescue_band_counts(
-            digest_matrix,
-            precomputed,
-            band_idx,
-            &rescue_candidate_mask,
-            &mut local_counts,
-            &mut bucket_state_by_hash,
-          );
-          local_counts
-        })
-        .collect();
-      for local_counts in band_results {
-        for (total, local) in
-          rescue_band_match_counts.iter_mut().zip(local_counts)
-        {
-          *total = total.saturating_add(local);
-        }
-      }
+      (0..self.num_bands).into_par_iter().for_each(|band_idx| {
+        let mut bucket_state_by_hash: FxHashMap<u64, u64> =
+          FxHashMap::default();
+        bucket_state_by_hash.reserve(rows);
+        self.recall_rescue_band_counts(
+          digest_matrix,
+          precomputed,
+          band_idx,
+          &rescue_candidate_mask,
+          &rescue_band_match_counts,
+          &mut bucket_state_by_hash,
+        );
+      });
     } else {
-      let mut bucket_state_by_hash: FxHashMap<u64, RecallRescueBucketState> =
-        FxHashMap::default();
+      let mut bucket_state_by_hash: FxHashMap<u64, u64> = FxHashMap::default();
       bucket_state_by_hash.reserve(rows);
       for band_idx in 0..self.num_bands {
         self.recall_rescue_band_counts(
@@ -684,19 +682,21 @@ impl RMinHashLSH {
           precomputed,
           band_idx,
           &rescue_candidate_mask,
-          &mut rescue_band_match_counts,
+          &rescue_band_match_counts,
           &mut bucket_state_by_hash,
         );
       }
     }
 
-    let required_matches_u8 =
-      u8::try_from(recall_rescue.required_band_matches).unwrap_or(u8::MAX);
+    let required_matches =
+      u32::try_from(recall_rescue.required_band_matches).unwrap_or(u32::MAX);
     for row_index in 0..rows {
       if rescue_candidate_mask[row_index] == 1
-        && rescue_band_match_counts[row_index] >= required_matches_u8
+        && rescue_band_match_counts[row_index].load(Ordering::Relaxed)
+          >= required_matches
       {
-        band_match_counts[row_index] = required_band_matches[row_index];
+        band_match_counts[row_index]
+          .store(required_band_matches[row_index], Ordering::Relaxed);
       }
     }
   }

@@ -21,7 +21,7 @@ use crate::rminhash::{
   MIN_RHO_MEDIUM_TOKEN_BUDGET, MIN_RHO_MEDIUM_TOKEN_THRESHOLD, MIN_RHO_PROBES,
   MIN_RHO_SPARSE_OCCUPANCY_THRESHOLD_BASE, MIN_RHO_SPARSE_VERIFY_PERM,
 };
-use crate::utils::calculate_hash_fast;
+use crate::utils::{calculate_hash_fast, permute_hash};
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -29,6 +29,9 @@ use rayon::prelude::*;
 use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
+
+// The parallel builder initializes matrix chunks with `write_bytes(.., 0xFF, ..)`.
+const _: () = assert!(EMPTY_BUCKET == u32::MAX);
 
 #[inline]
 const fn splitmix64(mut value: u64) -> u64 {
@@ -490,8 +493,8 @@ fn append_sparse_sidecar_for_row(
   non_empty_count: usize,
   sparse_occupancy_threshold: usize,
   sparse_verify_perm: usize,
-  token_hashes: &[u64],
-  seed: u64,
+  mixed_token_values: &[u64],
+  signature_pairs: &[(u64, u64)],
   sparse_verify_active: &mut Vec<u8>,
   sparse_verify_signatures: &mut Vec<u32>,
 ) {
@@ -507,8 +510,8 @@ fn append_sparse_sidecar_for_row(
     RMinHash::compute_sparse_verify_signature_into(
       &mut sparse_verify_signatures
         [signature_start..signature_start + sparse_verify_perm],
-      token_hashes,
-      seed,
+      mixed_token_values,
+      signature_pairs,
     );
   }
 }
@@ -529,6 +532,19 @@ impl RMinHash {
   }
 
   #[inline]
+  const fn rho_derived_bucket_index(derived: u64, num_perm_u64: u64) -> usize {
+    if num_perm_u64 <= u32::MAX as u64 {
+      // Fastrange on the high word: buckets come from bits 32..64, so they
+      // stay independent from the low-word slot value extracted below.
+      u64_to_usize_wrapping(((derived >> 32).wrapping_mul(num_perm_u64)) >> 32)
+    } else {
+      u64_to_usize_wrapping(derived % num_perm_u64)
+    }
+  }
+
+  /// Applies all probes for one token and returns the mixed token value so
+  /// callers can reuse it for the sparse-verify signature.
+  #[inline]
   fn apply_rho_probes_to_row(
     digest_row: &mut [u32],
     token_hash: u64,
@@ -536,23 +552,24 @@ impl RMinHash {
     probes: usize,
     num_perm_u64: u64,
     is_power_of_two: bool,
-  ) {
-    const RHO_SALTS: [u64; 4] = [
-      0x517c_c1b7_2722_0a95,
-      0x6eed_0e9d_a4d9_4a4f,
+  ) -> u64 {
+    const RHO_FIRST_SALT: u64 = 0x517c_c1b7_2722_0a95;
+    // Odd multipliers give independent multiply-shift probes derived from one
+    // splitmix64 call instead of a serial splitmix64 chain per probe.
+    const RHO_PROBE_MULTIPLIERS: [u64; MAX_RHO_PROBES - 1] = [
+      0xff51_afd7_ed55_8ccd,
+      0xc4ce_b9fe_1a85_ec53,
       0x9e37_79b9_7f4a_7c15,
-      0xbf58_476d_1ce4_e5b9,
     ];
-    let mut mixed = splitmix64(token_hash ^ seed ^ RHO_SALTS[0]);
-    let mut probe = 0usize;
-    while probe < probes {
-      let bucket = Self::rho_bucket_index(mixed, num_perm_u64, is_power_of_two);
-      digest_row[bucket] = digest_row[bucket].min((mixed >> 32) as u32);
-      if probe + 1 < probes {
-        mixed = splitmix64(mixed ^ RHO_SALTS[(probe + 1) & 3]);
-      }
-      probe += 1;
+    let mixed = splitmix64(token_hash ^ seed ^ RHO_FIRST_SALT);
+    let bucket = Self::rho_bucket_index(mixed, num_perm_u64, is_power_of_two);
+    digest_row[bucket] = digest_row[bucket].min((mixed >> 32) as u32);
+    for &multiplier in RHO_PROBE_MULTIPLIERS.iter().take(probes - 1) {
+      let derived = mixed.wrapping_mul(multiplier);
+      let bucket = Self::rho_derived_bucket_index(derived, num_perm_u64);
+      digest_row[bucket] = digest_row[bucket].min(low_u32_from_u64(derived));
     }
+    mixed
   }
 
   fn densify_rho_row(digest_row: &mut [u32], seed: u64) {
@@ -615,26 +632,38 @@ impl RMinHash {
     )
   }
 
+  /// Derives one deterministic multiply-shift `(a, b)` pair per sparse-verify
+  /// slot so signatures cost one multiply-add per slot per token.
+  fn sparse_verify_signature_pairs(
+    seed: u64,
+    sparse_verify_perm: usize,
+  ) -> Vec<(u64, u64)> {
+    (0..sparse_verify_perm)
+      .map(|index| {
+        let base = Self::sparse_verify_signature_seed(seed, index);
+        (base | 1, splitmix64(base ^ 0x1319_8a2e_0370_7344))
+      })
+      .collect()
+  }
+
   fn compute_sparse_verify_signature_into(
     signature_row: &mut [u32],
-    token_hashes: &[u64],
-    seed: u64,
+    mixed_token_values: &[u64],
+    signature_pairs: &[(u64, u64)],
   ) {
     signature_row.fill(u32::MAX);
-    if token_hashes.is_empty() {
+    if mixed_token_values.is_empty() {
       return;
     }
-    for (perm_idx, value) in signature_row.iter_mut().enumerate() {
-      let perm_seed = Self::sparse_verify_signature_seed(seed, perm_idx);
-      let mut minimum = u32::MAX;
-      for &token_hash in token_hashes {
-        let mixed = splitmix64(token_hash ^ perm_seed);
-        minimum = minimum.min((mixed >> 32) as u32);
+    for &mixed in mixed_token_values {
+      for (value, &(a, b)) in signature_row.iter_mut().zip(signature_pairs) {
+        *value = (*value).min(permute_hash(mixed, a, b));
       }
-      *value = minimum;
     }
   }
 
+  /// Sketches one row and stores the mixed value of every processed token in
+  /// `mixed_values_out` for sparse-verify signature reuse.
   fn compute_rho_digest_from_token_hashes_into(
     digest_row: &mut [u32],
     token_hashes: &[u64],
@@ -642,8 +671,10 @@ impl RMinHash {
     probes: usize,
     token_budget: Option<usize>,
     densify_enabled: bool,
+    mixed_values_out: &mut Vec<u64>,
   ) {
     // Callers pre-initialize rows with EMPTY_BUCKET.
+    mixed_values_out.clear();
     if digest_row.is_empty() || token_hashes.is_empty() {
       return;
     }
@@ -655,7 +686,7 @@ impl RMinHash {
       let mut sampler = MidpointSampler::new(token_hashes.len(), limit);
       for _ in 0..limit {
         let index = sampler.next();
-        Self::apply_rho_probes_to_row(
+        let mixed = Self::apply_rho_probes_to_row(
           digest_row,
           token_hashes[index],
           seed,
@@ -663,10 +694,11 @@ impl RMinHash {
           num_perm_u64,
           is_power_of_two,
         );
+        mixed_values_out.push(mixed);
       }
     } else {
       for &token_hash in token_hashes {
-        Self::apply_rho_probes_to_row(
+        let mixed = Self::apply_rho_probes_to_row(
           digest_row,
           token_hash,
           seed,
@@ -674,6 +706,7 @@ impl RMinHash {
           num_perm_u64,
           is_power_of_two,
         );
+        mixed_values_out.push(mixed);
       }
     }
     if densify_enabled {
@@ -683,13 +716,14 @@ impl RMinHash {
 
   fn compute_rho_row_from_token_refs(
     row: &mut [u32],
-    token_hashes: &mut Vec<u64>,
+    mixed_values: &mut Vec<u64>,
     token_refs: &[TokenBytesRef],
     seed: u64,
     probes: usize,
     densify_enabled: bool,
   ) -> usize {
-    token_hashes.clear();
+    // Callers pre-initialize rows with EMPTY_BUCKET.
+    mixed_values.clear();
     let num_perm_u64 = row.len() as u64;
     let is_power_of_two = row.len().is_power_of_two();
     for token_ref in token_refs.iter().copied() {
@@ -700,8 +734,7 @@ impl RMinHash {
         unsafe { std::slice::from_raw_parts(token_ref.ptr, token_ref.len) }
       };
       let token_hash = calculate_hash_fast(token_bytes);
-      token_hashes.push(token_hash);
-      Self::apply_rho_probes_to_row(
+      let mixed = Self::apply_rho_probes_to_row(
         row,
         token_hash,
         seed,
@@ -709,6 +742,7 @@ impl RMinHash {
         num_perm_u64,
         is_power_of_two,
       );
+      mixed_values.push(mixed);
     }
     if densify_enabled {
       Self::densify_rho_row(row, seed);
@@ -754,7 +788,13 @@ impl RMinHash {
     let densify_enabled = sketch.densify_enabled;
 
     let matrix_len = checked_len_mul(rows, num_perm, "rho matrix")?;
-    let mut matrix_data = vec![EMPTY_BUCKET; matrix_len];
+    // Matrix rows are initialized chunk-by-chunk in the worker right before
+    // they are sketched, instead of one serial pre-fill pass over the full
+    // allocation.
+    let mut matrix_storage: Vec<std::mem::MaybeUninit<u32>> =
+      Vec::with_capacity(matrix_len);
+    // SAFETY: `MaybeUninit<u32>` requires no initialization.
+    unsafe { matrix_storage.set_len(matrix_len) };
     let mut non_empty_counts = vec![0u16; rows];
     let mut source_token_counts = vec![0u16; rows];
     let mut sparse_verify_signatures = if sparse_verify_perm > 0 {
@@ -772,9 +812,12 @@ impl RMinHash {
 
     let py = token_sets.py();
 
+    let sig_pairs =
+      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+
     let chunk_size = config.doc_chunk_size.max(1);
     let output_ptrs = RhoOutputs {
-      matrix: SendPtr::new(matrix_data.as_mut_ptr()),
+      matrix: SendPtr::new(matrix_storage.as_mut_ptr().cast::<u32>()),
       non_empty: SendPtr::new(non_empty_counts.as_mut_ptr()),
       source_counts: SendPtr::new(source_token_counts.as_mut_ptr()),
       sparse_active: if sparse_verify_perm > 0 {
@@ -801,6 +844,15 @@ impl RMinHash {
 
         // SAFETY: output pointers refer to preallocated vectors which remain alive
         // until the worker thread is joined. Each chunk writes to a disjoint row range.
+        // The matrix region starts uninitialized, so fill it with EMPTY_BUCKET
+        // (u32::MAX, i.e. all bytes 0xFF) before forming a `&mut [u32]` over it.
+        unsafe {
+          std::ptr::write_bytes(
+            output_ptrs.matrix.add(matrix_offset),
+            0xFF,
+            matrix_chunk_len,
+          );
+        }
         let matrix_chunk = unsafe {
           std::slice::from_raw_parts_mut(
             output_ptrs.matrix.add(matrix_offset),
@@ -828,7 +880,7 @@ impl RMinHash {
             .enumerate()
             .for_each_init(
               || Vec::<u64>::with_capacity(64),
-              |token_hashes, (local_row_index, ((row, non_empty_out), source_out))| {
+              |mixed_values, (local_row_index, ((row, non_empty_out), source_out))| {
                 let source_token_count =
                   chunk.source_token_counts[local_row_index];
                 *source_out = saturating_u16(source_token_count);
@@ -839,7 +891,7 @@ impl RMinHash {
                 let token_end = chunk.row_token_offsets[local_row_index + 1];
                 let non_empty = Self::compute_rho_row_from_token_refs(
                   row,
-                  token_hashes,
+                  mixed_values,
                   &chunk.token_refs[token_start..token_end],
                   seed,
                   row_probes,
@@ -877,7 +929,7 @@ impl RMinHash {
             .enumerate()
             .for_each_init(
               || Vec::<u64>::with_capacity(64),
-              |token_hashes,
+              |mixed_values,
                (
                 local_row_index,
                 (
@@ -895,7 +947,7 @@ impl RMinHash {
                 let token_end = chunk.row_token_offsets[local_row_index + 1];
                 let non_empty = Self::compute_rho_row_from_token_refs(
                   row,
-                  token_hashes,
+                  mixed_values,
                   &chunk.token_refs[token_start..token_end],
                   seed,
                   row_probes,
@@ -908,8 +960,8 @@ impl RMinHash {
                 if is_sparse {
                   Self::compute_sparse_verify_signature_into(
                     signature_row,
-                    token_hashes,
-                    seed,
+                    mixed_values,
+                    &sig_pairs,
                   );
                 }
               },
@@ -1078,6 +1130,15 @@ impl RMinHash {
       return Ok(None);
     }
 
+    let matrix_data = {
+      let mut storage = std::mem::ManuallyDrop::new(matrix_storage);
+      let ptr = storage.as_mut_ptr().cast::<u32>();
+      let (len, capacity) = (storage.len(), storage.capacity());
+      // SAFETY: same allocation and layout; every element was initialized by
+      // the worker because all chunks covering 0..rows completed successfully.
+      unsafe { Vec::from_raw_parts(ptr, len, capacity) }
+    };
+
     let rho_sidecar = RhoDigestSidecar {
       non_empty_counts,
       source_token_counts,
@@ -1115,7 +1176,10 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
+    let sig_pairs =
+      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
     let mut token_hashes = Vec::new();
+    let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
     let mut source_token_counts = Vec::with_capacity(capacity);
     let sparse_verify_capacity = checked_len_mul(
@@ -1156,6 +1220,7 @@ impl RMinHash {
         row_probes,
         row_token_budget,
         densify_enabled,
+        &mut mixed_values,
       );
       let non_empty_count = Self::count_non_empty_buckets(row);
       non_empty_counts.push(saturating_u16(non_empty_count));
@@ -1164,8 +1229,8 @@ impl RMinHash {
         non_empty_count,
         sparse_occupancy_threshold,
         sparse_verify_perm,
-        &token_hashes,
-        seed,
+        &mixed_values,
+        &sig_pairs,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
@@ -1210,7 +1275,10 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
+    let sig_pairs =
+      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
     let mut token_hashes = Vec::new();
+    let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
     let mut source_token_counts = Vec::with_capacity(capacity);
     let sparse_verify_capacity = checked_len_mul(
@@ -1247,6 +1315,7 @@ impl RMinHash {
         row_probes,
         row_token_budget,
         densify_enabled,
+        &mut mixed_values,
       );
       let non_empty_count = Self::count_non_empty_buckets(row);
       non_empty_counts.push(saturating_u16(non_empty_count));
@@ -1255,8 +1324,8 @@ impl RMinHash {
         non_empty_count,
         sparse_occupancy_threshold,
         sparse_verify_perm,
-        &token_hashes,
-        seed,
+        &mixed_values,
+        &sig_pairs,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
@@ -1301,6 +1370,9 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
+    let sig_pairs =
+      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(rows);
     let mut source_token_counts = Vec::with_capacity(rows);
     let sparse_verify_capacity =
@@ -1327,6 +1399,7 @@ impl RMinHash {
         row_probes,
         row_token_budget,
         densify_enabled,
+        &mut mixed_values,
       );
       let non_empty_count = Self::count_non_empty_buckets(row);
       non_empty_counts.push(saturating_u16(non_empty_count));
@@ -1335,8 +1408,8 @@ impl RMinHash {
         non_empty_count,
         sparse_occupancy_threshold,
         sparse_verify_perm,
-        &token_hashes[start..end],
-        seed,
+        &mixed_values,
+        &sig_pairs,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
