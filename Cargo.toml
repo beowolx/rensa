@@ -23,7 +23,10 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["mimalloc"]
-mimalloc = ["dep:mimalloc"]
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+
+[build-dependencies]
+pyo3-build-config = "0.29.0"
 
 [dependencies]
 pyo3 = "0.29.0"
@@ -34,6 +37,7 @@ serde = { version = "1.0", features = ["derive"] }
 rand_xoshiro = "0.7.0"
 rand_core = "0.9.3"
 mimalloc = { version = "0.1.48", optional = true }
+libmimalloc-sys = { version = "0.1.44", optional = true, features = ["extended"] }
 rayon = "1.11.0"
 
 [profile.release]

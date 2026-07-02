@@ -35,6 +35,7 @@ use pyo3::types::{PyIterator, PyList, PyTuple};
 use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::sync::Arc;
 
 mod config;
 mod matrix;
@@ -42,11 +43,14 @@ mod permutation_cache;
 mod pipeline;
 mod py;
 mod rho;
+#[cfg(not(any(PyPy, GraalPy)))]
+mod rho_raw;
 mod send_ptr;
 mod token;
 
 use config::DigestBuildConfig;
 use matrix::RhoDigestSidecar;
+pub use permutation_cache::{shared_permutations, SharedPermutations};
 
 const HASH_BATCH_SIZE: usize = 32;
 const DEFAULT_DOC_CHUNK_SIZE: usize = 2048;
@@ -106,9 +110,9 @@ pub struct RMinHash {
   seed: u64,
   hash_values: Vec<u32>,
   #[serde(skip, default)]
-  permutations: Vec<(u64, u64)>,
+  permutations: Arc<[(u64, u64)]>,
   #[serde(skip, default)]
-  permutations_soa: PermutationSoA,
+  permutations_soa: Arc<PermutationSoA>,
 }
 
 #[derive(Deserialize)]
@@ -128,8 +132,8 @@ impl<'de> Deserialize<'de> for RMinHash {
       num_perm: state.num_perm,
       seed: state.seed,
       hash_values: state.hash_values,
-      permutations: Vec::new(),
-      permutations_soa: PermutationSoA::default(),
+      permutations: Arc::default(),
+      permutations_soa: Arc::default(),
     })
   }
 }
@@ -254,12 +258,12 @@ impl RMinHash {
   }
 
   fn ensure_permutations(&mut self) {
-    if self.permutations.len() != self.num_perm {
-      self.permutations = Self::build_permutations(self.num_perm, self.seed);
-    }
-    if self.permutations_soa.len() != self.num_perm {
-      self.permutations_soa =
-        PermutationSoA::from_permutations(&self.permutations);
+    if self.permutations.len() != self.num_perm
+      || self.permutations_soa.len() != self.num_perm
+    {
+      let shared = shared_permutations(self.num_perm, self.seed);
+      self.permutations = shared.pairs;
+      self.permutations_soa = shared.soa;
     }
   }
 
@@ -382,5 +386,21 @@ impl RMinHash {
   /// Updates the `MinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
     self.update_iter(items);
+  }
+}
+
+/// The raw-read parallel builder depends on `CPython` object layouts; other
+/// interpreters fall back to the pipelined or streaming builders.
+#[cfg(any(PyPy, GraalPy))]
+impl RMinHash {
+  // Signature mirrors the CPython implementation in `rho_raw`.
+  #[allow(clippy::unnecessary_wraps)]
+  pub(in crate::rminhash) const fn try_build_rho_digest_matrix_raw_parallel(
+    _token_sets: &Bound<'_, PyAny>,
+    _num_perm: usize,
+    _seed: u64,
+    _probes: usize,
+  ) -> PyResult<Option<RMinHashDigestMatrix>> {
+    Ok(None)
   }
 }
