@@ -43,6 +43,7 @@ mod permutation_cache;
 mod pipeline;
 mod py;
 mod rho;
+#[cfg(not(any(PyPy, GraalPy)))]
 mod rho_raw;
 mod send_ptr;
 mod token;
@@ -385,5 +386,21 @@ impl RMinHash {
   /// Updates the `MinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
     self.update_iter(items);
+  }
+}
+
+/// The raw-read parallel builder depends on `CPython` object layouts; other
+/// interpreters fall back to the pipelined or streaming builders.
+#[cfg(any(PyPy, GraalPy))]
+impl RMinHash {
+  // Signature mirrors the CPython implementation in `rho_raw`.
+  #[allow(clippy::unnecessary_wraps)]
+  pub(in crate::rminhash) const fn try_build_rho_digest_matrix_raw_parallel(
+    _token_sets: &Bound<'_, PyAny>,
+    _num_perm: usize,
+    _seed: u64,
+    _probes: usize,
+  ) -> PyResult<Option<RMinHashDigestMatrix>> {
+    Ok(None)
   }
 }

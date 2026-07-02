@@ -306,6 +306,7 @@ dependencies = [
  "mimalloc",
  "postcard",
  "pyo3",
+ "pyo3-build-config",
  "rand",
  "rand_core",
  "rand_xoshiro",

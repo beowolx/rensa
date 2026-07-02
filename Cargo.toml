@@ -25,6 +25,9 @@ crate-type = ["cdylib", "rlib"]
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
+[build-dependencies]
+pyo3-build-config = "0.29.0"
+
 [dependencies]
 pyo3 = "0.29.0"
 rand = "0.9.3"
