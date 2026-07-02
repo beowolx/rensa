@@ -226,9 +226,15 @@ impl RMinHash {
   ) -> PyResult<RMinHashDigestMatrix> {
     Self::validate_num_perm(num_perm)?;
     let matrix = if let Some(matrix) =
-      Self::try_build_rho_digest_matrix_from_token_sets_parallel(
+      Self::try_build_rho_digest_matrix_raw_parallel(
         token_sets, num_perm, seed, probes,
       )? {
+      matrix
+    } else if let Some(matrix) =
+      Self::try_build_rho_digest_matrix_from_token_sets_parallel(
+        token_sets, num_perm, seed, probes,
+      )?
+    {
       matrix
     } else {
       Self::build_rho_digest_matrix_from_token_sets_streaming(

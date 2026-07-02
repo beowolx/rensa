@@ -43,6 +43,7 @@ mod permutation_cache;
 mod pipeline;
 mod py;
 mod rho;
+mod rho_raw;
 mod send_ptr;
 mod token;
 

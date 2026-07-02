@@ -34,7 +34,7 @@ use std::thread;
 const _: () = assert!(EMPTY_BUCKET == u32::MAX);
 
 #[inline]
-const fn splitmix64(mut value: u64) -> u64 {
+pub(super) const fn splitmix64(mut value: u64) -> u64 {
   value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
   value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
   value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -96,11 +96,15 @@ fn rho_medium_token_budget() -> usize {
 }
 
 #[inline]
-fn saturating_u16(value: usize) -> u16 {
+pub(super) fn saturating_u16(value: usize) -> u16 {
   u16::try_from(value).unwrap_or(u16::MAX)
 }
 
-fn checked_len_mul(left: usize, right: usize, label: &str) -> PyResult<usize> {
+pub(super) fn checked_len_mul(
+  left: usize,
+  right: usize,
+  label: &str,
+) -> PyResult<usize> {
   left.checked_mul(right).ok_or_else(|| {
     PyValueError::new_err(format!(
       "{label} size overflow: left={left}, right={right}"
@@ -108,7 +112,7 @@ fn checked_len_mul(left: usize, right: usize, label: &str) -> PyResult<usize> {
   })
 }
 
-const fn rho_adaptive_token_budget_for_row(
+pub(super) const fn rho_adaptive_token_budget_for_row(
   source_token_count: Option<usize>,
   default_budget: Option<usize>,
   has_token_budget_override: bool,
@@ -187,7 +191,7 @@ fn rho_long_doc_threshold(num_perm: usize) -> usize {
 }
 
 #[inline]
-fn effective_rho_probes(
+pub(super) fn effective_rho_probes(
   configured_probes: usize,
   source_token_count: usize,
   num_perm: usize,
@@ -213,19 +217,19 @@ fn rho_densify_enabled() -> bool {
 }
 
 #[derive(Clone, Copy)]
-struct RhoSketchConfig {
-  probes: usize,
-  default_token_budget: Option<usize>,
-  has_token_budget_override: bool,
-  medium_token_threshold: usize,
-  medium_token_budget: usize,
-  sparse_occupancy_threshold: usize,
-  sparse_verify_perm: usize,
-  densify_enabled: bool,
+pub(super) struct RhoSketchConfig {
+  pub(super) probes: usize,
+  pub(super) default_token_budget: Option<usize>,
+  pub(super) has_token_budget_override: bool,
+  pub(super) medium_token_threshold: usize,
+  pub(super) medium_token_budget: usize,
+  pub(super) sparse_occupancy_threshold: usize,
+  pub(super) sparse_verify_perm: usize,
+  pub(super) densify_enabled: bool,
 }
 
 impl RhoSketchConfig {
-  fn from_env(num_perm: usize, probes: usize) -> Self {
+  pub(super) fn from_env(num_perm: usize, probes: usize) -> Self {
     let probes = parse_rho_probes(probes);
     let default_token_budget = rho_token_budget(num_perm);
     let has_token_budget_override = rho_token_budget_env_override_is_set();
@@ -321,7 +325,7 @@ impl RhoChunkBuffers {
 }
 
 #[derive(Clone, Copy)]
-struct MidpointSampler {
+pub(super) struct MidpointSampler {
   q: usize,
   r: usize,
   step_div: usize,
@@ -331,7 +335,7 @@ struct MidpointSampler {
 
 impl MidpointSampler {
   #[inline]
-  const fn new(total: usize, limit: usize) -> Self {
+  pub(super) const fn new(total: usize, limit: usize) -> Self {
     let denom = limit * 2;
     let total_div = total / limit;
     let total_rem = total - total_div * limit;
@@ -354,7 +358,7 @@ impl MidpointSampler {
   }
 
   #[inline]
-  const fn next(&mut self) -> usize {
+  pub(super) const fn next(&mut self) -> usize {
     let index = self.q;
     self.r += self.step_mod;
     self.q += self.step_div;
@@ -545,7 +549,7 @@ impl RMinHash {
   /// Applies all probes for one token and returns the mixed token value so
   /// callers can reuse it for the sparse-verify signature.
   #[inline]
-  fn apply_rho_probes_to_row(
+  pub(super) fn apply_rho_probes_to_row(
     digest_row: &mut [u32],
     token_hash: u64,
     seed: u64,
@@ -572,7 +576,7 @@ impl RMinHash {
     mixed
   }
 
-  fn densify_rho_row(digest_row: &mut [u32], seed: u64) {
+  pub(super) fn densify_rho_row(digest_row: &mut [u32], seed: u64) {
     if digest_row.is_empty()
       || digest_row.iter().all(|&value| value == EMPTY_BUCKET)
     {
@@ -617,7 +621,7 @@ impl RMinHash {
   }
 
   #[inline]
-  fn count_non_empty_buckets(digest_row: &[u32]) -> usize {
+  pub(super) fn count_non_empty_buckets(digest_row: &[u32]) -> usize {
     digest_row
       .iter()
       .filter(|&&value| value != EMPTY_BUCKET)
@@ -634,7 +638,7 @@ impl RMinHash {
 
   /// Derives one deterministic multiply-shift `(a, b)` pair per sparse-verify
   /// slot so signatures cost one multiply-add per slot per token.
-  fn sparse_verify_signature_pairs(
+  pub(super) fn sparse_verify_signature_pairs(
     seed: u64,
     sparse_verify_perm: usize,
   ) -> Vec<(u64, u64)> {
@@ -646,7 +650,7 @@ impl RMinHash {
       .collect()
   }
 
-  fn compute_sparse_verify_signature_into(
+  pub(super) fn compute_sparse_verify_signature_into(
     signature_row: &mut [u32],
     mixed_token_values: &[u64],
     signature_pairs: &[(u64, u64)],
@@ -664,7 +668,7 @@ impl RMinHash {
 
   /// Sketches one row and stores the mixed value of every processed token in
   /// `mixed_values_out` for sparse-verify signature reuse.
-  fn compute_rho_digest_from_token_hashes_into(
+  pub(super) fn compute_rho_digest_from_token_hashes_into(
     digest_row: &mut [u32],
     token_hashes: &[u64],
     seed: u64,
