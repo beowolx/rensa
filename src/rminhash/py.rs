@@ -102,16 +102,14 @@ impl RMinHash {
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
-    let permutations = Self::build_permutations(num_perm, seed);
-    let permutations_soa =
-      crate::simd::dispatch::PermutationSoA::from_permutations(&permutations);
+    let shared = crate::rminhash::shared_permutations(num_perm, seed);
 
     Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
-      permutations,
-      permutations_soa,
+      permutations: shared.pairs,
+      permutations_soa: shared.soa,
     })
   }
 

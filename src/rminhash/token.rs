@@ -22,6 +22,19 @@ pub unsafe fn token_bytes_ref_from_unicode_ptr(
   py: Python<'_>,
   object_ptr: *mut ffi::PyObject,
 ) -> PyResult<TokenBytesRef> {
+  if let Some((ascii_ptr, ascii_len)) =
+    unsafe { crate::py_input::compact_ascii_bytes(object_ptr) }
+  {
+    let ptr = if ascii_len == 0 {
+      std::ptr::NonNull::<u8>::dangling().as_ptr()
+    } else {
+      ascii_ptr
+    };
+    return Ok(TokenBytesRef {
+      ptr,
+      len: ascii_len,
+    });
+  }
   let mut length: ffi::Py_ssize_t = 0;
   // SAFETY: caller ensures `object_ptr` points to a unicode object.
   let utf8_ptr =

@@ -294,6 +294,29 @@ struct RhoWorkChunk {
   source_token_counts: Vec<usize>,
 }
 
+#[derive(Default)]
+struct RhoChunkBuffers {
+  token_refs: Vec<TokenBytesRef>,
+  row_token_offsets: Vec<usize>,
+  source_token_counts: Vec<usize>,
+}
+
+impl RhoChunkBuffers {
+  fn from_chunk(chunk: RhoWorkChunk) -> Self {
+    Self {
+      token_refs: chunk.token_refs,
+      row_token_offsets: chunk.row_token_offsets,
+      source_token_counts: chunk.source_token_counts,
+    }
+  }
+
+  fn clear(&mut self) {
+    self.token_refs.clear();
+    self.row_token_offsets.clear();
+    self.source_token_counts.clear();
+  }
+}
+
 #[derive(Clone, Copy)]
 struct MidpointSampler {
   q: usize,
@@ -768,7 +791,7 @@ impl RMinHash {
 
     let (work_tx, work_rx) =
       mpsc::sync_channel::<RhoWorkChunk>(config.pipeline_queue_cap);
-    let (result_tx, result_rx) = mpsc::channel::<()>();
+    let (result_tx, result_rx) = mpsc::channel::<RhoChunkBuffers>();
 
     let worker = thread::spawn(move || {
       for chunk in work_rx {
@@ -893,39 +916,54 @@ impl RMinHash {
             );
         }
 
-        if result_tx.send(()).is_err() {
+        if result_tx.send(RhoChunkBuffers::from_chunk(chunk)).is_err() {
           break;
         }
       }
     });
 
     let mut chunks_sent = 0usize;
+    let mut chunks_completed = 0usize;
+    let mut spare_buffers: Vec<RhoChunkBuffers> = Vec::new();
     let mut extraction_error: Option<PyErr> = None;
     let mut should_fallback = false;
     let mut row_start = 0usize;
     while row_start < rows {
       let row_end = (row_start + chunk_size).min(rows);
-
       let chunk_rows = row_end - row_start;
-      let max_take_per_row = default_token_budget
-        .unwrap_or(0)
-        .max(DEFAULT_RHO_SHORT_FULL_TOKEN_THRESHOLD)
-        .max(medium_token_budget);
-      let token_ref_capacity = match checked_len_mul(
-        chunk_rows,
-        max_take_per_row,
-        "rho token refs chunk",
-      ) {
-        Ok(value) => value,
-        Err(err) => {
-          extraction_error = Some(err);
-          break;
-        }
-      };
-      let mut token_refs = Vec::with_capacity(token_ref_capacity);
-      let mut row_token_offsets = Vec::with_capacity(chunk_rows + 1);
+
+      while let Ok(buffers) = result_rx.try_recv() {
+        chunks_completed += 1;
+        spare_buffers.push(buffers);
+      }
+      let mut buffers = spare_buffers.pop().unwrap_or_default();
+      buffers.clear();
+      if buffers.token_refs.capacity() == 0 {
+        let max_take_per_row = default_token_budget
+          .unwrap_or(0)
+          .max(DEFAULT_RHO_SHORT_FULL_TOKEN_THRESHOLD)
+          .max(medium_token_budget);
+        let token_ref_capacity = match checked_len_mul(
+          chunk_rows,
+          max_take_per_row,
+          "rho token refs chunk",
+        ) {
+          Ok(value) => value,
+          Err(err) => {
+            extraction_error = Some(err);
+            break;
+          }
+        };
+        buffers.token_refs.reserve(token_ref_capacity);
+        buffers.row_token_offsets.reserve(chunk_rows + 1);
+        buffers.source_token_counts.reserve(chunk_rows);
+      }
+      let RhoChunkBuffers {
+        mut token_refs,
+        mut row_token_offsets,
+        source_token_counts: mut chunk_source_counts,
+      } = buffers;
       row_token_offsets.push(0);
-      let mut chunk_source_counts = Vec::with_capacity(chunk_rows);
 
       for row_index in row_start..row_end {
         // SAFETY: row indices come from a CPython `Py_ssize_t` length.
@@ -1015,12 +1053,16 @@ impl RMinHash {
     }
 
     drop(work_tx);
-    for _ in 0..chunks_sent {
-      if let Err(err) = result_rx.recv() {
-        extraction_error = Some(PyValueError::new_err(format!(
-          "rho pipeline worker failed to report results: {err}"
-        )));
-        break;
+    drop(spare_buffers);
+    while chunks_completed < chunks_sent {
+      match result_rx.recv() {
+        Ok(_) => chunks_completed += 1,
+        Err(err) => {
+          extraction_error = Some(PyValueError::new_err(format!(
+            "rho pipeline worker failed to report results: {err}"
+          )));
+          break;
+        }
       }
     }
 

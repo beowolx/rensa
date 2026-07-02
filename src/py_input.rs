@@ -7,6 +7,9 @@ mod convert;
 mod fast_sequence;
 mod prehashed;
 mod ptr_hash;
+mod unicode_fast;
+
+pub use unicode_fast::{compact_ascii_bytes, init as init_unicode_fast_path};
 
 const TOKEN_TYPE_ERROR: &str =
   "each item must be str, bytes, bytearray, or a C-contiguous u8 buffer";

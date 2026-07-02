@@ -1,5 +1,40 @@
 use crate::simd::dispatch::PermutationSoA;
 use rustc_hash::FxHashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+#[derive(Clone)]
+pub struct SharedPermutations {
+  pub(crate) pairs: Arc<[(u64, u64)]>,
+  pub(crate) soa: Arc<PermutationSoA>,
+}
+
+const MAX_SHARED_PERMUTATION_ENTRIES: usize = 16;
+
+static SHARED_PERMUTATIONS: OnceLock<
+  Mutex<FxHashMap<(usize, u64), SharedPermutations>>,
+> = OnceLock::new();
+
+pub fn shared_permutations(num_perm: usize, seed: u64) -> SharedPermutations {
+  let cache =
+    SHARED_PERMUTATIONS.get_or_init(|| Mutex::new(FxHashMap::default()));
+  if let Ok(guard) = cache.lock() {
+    if let Some(entry) = guard.get(&(num_perm, seed)) {
+      return entry.clone();
+    }
+  }
+
+  let pairs: Arc<[(u64, u64)]> =
+    crate::rminhash::RMinHash::build_permutations(num_perm, seed).into();
+  let soa = Arc::new(PermutationSoA::from_permutations(&pairs));
+  let entry = SharedPermutations { pairs, soa };
+  if let Ok(mut guard) = cache.lock() {
+    if guard.len() >= MAX_SHARED_PERMUTATION_ENTRIES {
+      guard.clear();
+    }
+    guard.insert((num_perm, seed), entry.clone());
+  }
+  entry
+}
 
 pub(in crate::rminhash) struct AdaptivePermutationCache {
   pub(in crate::rminhash) digests: FxHashMap<u64, Box<[u32]>>,
