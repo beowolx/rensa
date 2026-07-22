@@ -1,5 +1,6 @@
 use crate::py_input::buffer::{has_buffer_protocol, hash_buffer_like};
 use crate::py_input::convert::py_err_to_type_error;
+use crate::py_input::unicode_fast::compact_ascii_bytes;
 use crate::utils::calculate_hash_fast;
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -12,6 +13,12 @@ pub unsafe fn hash_unicode_ptr(
   py: Python<'_>,
   object_ptr: *mut ffi::PyObject,
 ) -> PyResult<u64> {
+  if let Some((ascii_ptr, ascii_len)) =
+    unsafe { compact_ascii_bytes(object_ptr) }
+  {
+    let bytes = unsafe { std::slice::from_raw_parts(ascii_ptr, ascii_len) };
+    return Ok(calculate_hash_fast(bytes));
+  }
   let mut length: ffi::Py_ssize_t = 0;
   // SAFETY: caller ensures `object_ptr` points to a unicode object.
   let utf8_ptr =

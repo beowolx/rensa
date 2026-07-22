@@ -2,8 +2,7 @@ use crate::inline_dedup::common::{validate_threshold, PAIR_ENTRY_ERROR};
 use crate::inline_dedup::RMinHashDeduplicator;
 use crate::lsh::RMinHashLSH;
 use crate::py_input::extend_token_hashes_from_document;
-use crate::rminhash::RMinHash;
-use crate::simd::dispatch::PermutationSoA;
+use crate::rminhash::{shared_permutations, RMinHash, SharedPermutations};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyTuple};
@@ -49,8 +48,7 @@ fn select_lsh_bands(
 
 #[derive(Default)]
 struct RMinHashTokenScratch {
-  permutations: Option<Vec<(u64, u64)>>,
-  permutations_soa: Option<PermutationSoA>,
+  permutations: Option<SharedPermutations>,
   scratch: Option<RMinHash>,
 }
 
@@ -63,9 +61,7 @@ impl RMinHashTokenScratch {
     token_hashes: &mut Vec<u64>,
   ) -> PyResult<&RMinHash> {
     if self.permutations.is_none() {
-      let built = RMinHash::build_permutations(num_perm, seed);
-      self.permutations_soa = Some(PermutationSoA::from_permutations(&built));
-      self.permutations = Some(built);
+      self.permutations = Some(shared_permutations(num_perm, seed));
       self.scratch = Some(RMinHash::new_compact(num_perm, seed)?);
     }
 
@@ -75,16 +71,13 @@ impl RMinHashTokenScratch {
     let Some(permutations_ref) = self.permutations.as_ref() else {
       return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
     };
-    let Some(permutations_soa_ref) = self.permutations_soa.as_ref() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
     let Some(scratch_ref) = self.scratch.as_mut() else {
       return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
     };
     scratch_ref.reset_from_token_hashes_with_permutations(
       token_hashes,
-      permutations_ref,
-      permutations_soa_ref,
+      &permutations_ref.pairs,
+      &permutations_ref.soa,
     );
     Ok(scratch_ref)
   }

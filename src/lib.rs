@@ -27,12 +27,27 @@ pub use rminhash::RMinHashDigestMatrix;
 
 use pyo3::prelude::*;
 
+#[cfg(feature = "mimalloc")]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
+#[cfg(feature = "mimalloc")]
+fn tune_mimalloc() {
+  unsafe {
+    if libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT) == 2 {
+      libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+    }
+  }
+}
+
 /// Python module for `MinHash` and LSH implementations
 ///
 /// # Errors
 /// Returns an error if the module initialization fails or classes cannot be added
 #[pymodule(gil_used = true)]
 pub fn rensa(m: &Bound<'_, PyModule>) -> PyResult<()> {
+  #[cfg(feature = "mimalloc")]
+  tune_mimalloc();
+  py_input::init_unicode_fast_path(m.py());
   m.add_class::<RMinHash>()?;
   m.add_class::<RMinHashDigestMatrix>()?;
   m.add_class::<CMinHash>()?;

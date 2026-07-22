@@ -53,7 +53,7 @@ const fn high_u32(value: u64) -> u32 {
 }
 
 #[inline]
-fn multiply_mix(x: u64, y: u64) -> u64 {
+pub fn multiply_mix(x: u64, y: u64) -> u64 {
   #[cfg(target_pointer_width = "64")]
   {
     let full = u128::from(x) * u128::from(y);
