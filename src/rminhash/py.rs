@@ -102,16 +102,14 @@ impl RMinHash {
   #[new]
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
-    let permutations = Self::build_permutations(num_perm, seed);
-    let permutations_soa =
-      crate::simd::dispatch::PermutationSoA::from_permutations(&permutations);
+    let shared = crate::rminhash::shared_permutations(num_perm, seed);
 
     Ok(Self {
       num_perm,
       seed,
       hash_values: vec![u32::MAX; num_perm],
-      permutations,
-      permutations_soa,
+      permutations: shared.pairs,
+      permutations_soa: shared.soa,
     })
   }
 
@@ -228,9 +226,15 @@ impl RMinHash {
   ) -> PyResult<RMinHashDigestMatrix> {
     Self::validate_num_perm(num_perm)?;
     let matrix = if let Some(matrix) =
-      Self::try_build_rho_digest_matrix_from_token_sets_parallel(
+      Self::try_build_rho_digest_matrix_raw_parallel(
         token_sets, num_perm, seed, probes,
       )? {
+      matrix
+    } else if let Some(matrix) =
+      Self::try_build_rho_digest_matrix_from_token_sets_parallel(
+        token_sets, num_perm, seed, probes,
+      )?
+    {
       matrix
     } else {
       Self::build_rho_digest_matrix_from_token_sets_streaming(

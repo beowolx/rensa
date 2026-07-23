@@ -55,9 +55,11 @@ Input elements are hashed with a fast non-cryptographic hash that mirrors `rustc
 
 Elements are hashed in groups of 32. Permutations are applied to each batch in chunks of 16, using a fixed-size temporary array (`[u32; 16]`) that is register-friendly. This gives the compiler room to optimize tight loops and keeps working data cache-local.
 
-The (a, b) permutation pairs are deterministic, derived from a seed via Xoshiro256++. They are initialized at construction and reused across updates to avoid recomputing setup state on every incremental update.
+The (a, b) permutation pairs are deterministic, derived from a seed via Xoshiro256++. They are initialized at construction and reused across updates to avoid recomputing setup state on every incremental update. Permutation tables are shared process-wide per `(num_perm, seed)`, so constructing or cloning many `RMinHash` objects with the same parameters costs O(1) in `num_perm`.
 
-The global allocator is MiMalloc, which handles the batch-allocate-then-free pattern better than the system default.
+Token extraction reads compact ASCII `str` data inline (the common case for tokenized text) instead of round-tripping through `PyUnicode_AsUTF8AndSize`. For batch sketching over lists of ASCII/bytes tokens, worker threads read list items and string payloads directly from CPython object memory (safe because the calling thread holds the GIL and never runs Python during the build), so extraction itself is parallelized instead of bottlenecking on one producer thread; rows containing other token types fall back to the GIL thread. One-shot LSH deduplication groups rows by raw band hashes with intrusive chains (no per-bucket allocations), refines fold windows by exact hash-pair equality, and reuses the same scans' collision counts for its recall-rescue pass, with band scans fanned out across threads when a Rayon pool is available.
+
+The global allocator is MiMalloc, which handles the batch-allocate-then-free pattern better than the system default. Rensa disables MiMalloc's eager arena commit at module load (unless overridden via `MIMALLOC_ARENA_EAGER_COMMIT`), which keeps peak RSS flat when many threads allocate short-lived sketch buffers.
 
 ### C-MinHash
 
@@ -254,10 +256,11 @@ Run the full cross-library benchmark (single-thread + multi-thread lanes):
 uv run python benchmarks/full_benchmark.py
 ```
 
-`benchmarks/` now contains two scripts:
+`benchmarks/` now contains three scripts:
 
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
+- `benchmarks/perf_memory_benchmark.py`: Rensa-only time and peak-memory (VmHWM/VmRSS, Linux) benchmark on a deterministic synthetic corpus with injected duplicates, per thread lane and per phase (sketch / dedup / classic update path), with duplicate-flag precision/recall as an accuracy guardrail. Use `--label` to tag runs and compare JSON outputs across code changes.
 
 `simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 
