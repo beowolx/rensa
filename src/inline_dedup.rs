@@ -30,5 +30,6 @@ pub struct CMinHashDeduplicator {
   threshold: f64,
   existing_signatures: FxHashMap<String, CMinHash>,
   num_perm: Option<usize>,
+  configured_num_perm: Option<usize>,
   seed: u64,
 }

@@ -239,6 +239,12 @@ impl RMinHash {
         self.num_perm, other.num_perm
       )));
     }
+    if self.seed != other.seed {
+      return Err(PyValueError::new_err(format!(
+        "seed mismatch: left is {}, right is {}",
+        self.seed, other.seed
+      )));
+    }
     Ok(())
   }
 

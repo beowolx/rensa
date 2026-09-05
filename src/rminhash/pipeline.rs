@@ -421,6 +421,12 @@ impl RMinHash {
         }
       }
 
+      if chunk_row_start + token_hash_ranges.len() != rows {
+        return Err(PyValueError::new_err(
+          "document list changed size during hashing",
+        ));
+      }
+
       if !token_hash_ranges.is_empty() {
         let flat = std::mem::take(&mut token_hashes_chunk);
         let ranges = std::mem::take(&mut token_hash_ranges);
@@ -507,6 +513,14 @@ impl RMinHash {
         token_hashes_chunk = Vec::with_capacity(flat_capacity);
         token_hash_ranges = Vec::with_capacity(ranges_capacity);
       }
+    }
+
+    if extraction_error.is_none()
+      && chunk_row_start + token_hash_ranges.len() != rows
+    {
+      extraction_error = Some(PyValueError::new_err(
+        "document list changed size during hashing",
+      ));
     }
 
     if extraction_error.is_none() && !token_hash_ranges.is_empty() {

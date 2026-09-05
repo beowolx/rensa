@@ -17,9 +17,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping
 
-from datasets import load_dataset
-from datasketch import MinHash, MinHashLSH
-
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "RAYON_NUM_THREADS",
@@ -321,6 +318,8 @@ def load_token_sets_from_hf(
     max_rows: int | None,
     ngram_size: int,
 ) -> list[list[str]]:
+    from datasets import load_dataset
+
     load_kwargs: dict[str, Any] = {"split": spec.split}
     if spec.revision:
         load_kwargs["revision"] = spec.revision
@@ -406,6 +405,8 @@ def run_datasketch(
     threshold: float,
     seed: int,
 ) -> tuple[dict[str, Any], list[bool]]:
+    from datasketch import MinHash, MinHashLSH
+
     rows_per_band = num_perm // num_bands
     _ = threshold  # `params=(b, r)` controls banding for datasketch in this benchmark.
 
@@ -467,26 +468,35 @@ def run_fastsketch(
 ) -> tuple[dict[str, Any], list[bool]]:
     from FastSketchLSH import FastSimilaritySketch, LSH  # type: ignore
 
-    sketcher = FastSimilaritySketch(sketch_size=num_perm, seed=seed)
+    sketcher = FastSimilaritySketch(num_perm, seed=seed)
 
     sketch_start = perf_counter()
-    sketches = sketcher.sketch_batch(token_sets, num_threads=threads)
+    batch = sketcher.batch if hasattr(sketcher, "batch") else sketcher.sketch_batch
+    sketches = batch(token_sets, num_threads=threads)
     sketch_elapsed = perf_counter() - sketch_start
 
     lsh = LSH(num_perm=num_perm, num_bands=num_bands, num_threads=threads)
 
+    total_candidates: int | None = None
+    query_elapsed = 0.0
     build_start = perf_counter()
-    lsh.build_from_batch(sketches)
-    build_elapsed = perf_counter() - build_start
+    if hasattr(lsh, "insert_and_query_duplicates"):
+        duplicate_flags = [bool(value) for value in lsh.insert_and_query_duplicates(sketches)]
+        build_elapsed = perf_counter() - build_start
+    else:
+        # Compatibility with FastSketchLSH 0.2 in older benchmark environments.
+        lsh.build_from_batch(sketches)
+        build_elapsed = perf_counter() - build_start
 
-    query_start = perf_counter()
-    flat, indptr = lsh.batch_query_csr(sketches)
-    row_count = len(indptr) - 1
-    duplicate_flags = [
-        int(indptr[index + 1] - indptr[index]) > 1 for index in range(row_count)
-    ]
-    query_elapsed = perf_counter() - query_start
+        query_start = perf_counter()
+        flat, indptr = lsh.batch_query_csr(sketches)
+        duplicate_flags = [
+            int(indptr[index + 1] - indptr[index]) > 1 for index in range(len(indptr) - 1)
+        ]
+        query_elapsed = perf_counter() - query_start
+        total_candidates = int(len(flat))
 
+    row_count = len(duplicate_flags)
     rows_removed = sum(1 for is_duplicate in duplicate_flags if is_duplicate)
     metrics = {
         "sketch": sketch_elapsed,
@@ -495,8 +505,10 @@ def run_fastsketch(
         "total": sketch_elapsed + build_elapsed + query_elapsed,
         "rows_removed": rows_removed,
         "rows_remaining": row_count - rows_removed,
-        "total_candidates": int(len(flat)),
-        "avg_candidates_per_row": (len(flat) / row_count) if row_count else 0.0,
+        "total_candidates": total_candidates,
+        "avg_candidates_per_row": (
+            (total_candidates / row_count) if row_count else 0.0
+        ) if total_candidates is not None else None,
     }
     return metrics, duplicate_flags
 
@@ -721,6 +733,10 @@ def run_once(args: argparse.Namespace) -> None:
         "token_cache_sha256": token_cache_sha,
         "thread_env_assertions": thread_assertions,
         "engines": results,
+        "duplicate_flags_sha256": {
+            engine: hashlib.sha256(bytes(flags)).hexdigest()
+            for engine, flags in flags_by_engine.items()
+        },
         "accuracy": {
             "jaccard": {
                 "datasketch_vs_rensa": jaccard_similarity(

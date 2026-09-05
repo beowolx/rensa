@@ -29,7 +29,7 @@ Numbers below come from a reference full benchmark run (`benchmarks/full_benchma
 | Mean Jaccard of kept sets | 0.987219 |
 | Mean duplicate-flag mismatch rate | 0.010717 |
 
-These accuracy metrics are from the same full benchmark run as the speed numbers above.
+These agreement metrics are from the same full benchmark run as the speed numbers above. They compare duplicate decisions with Datasketch, not with exact Jaccard ground truth. The benchmark uses Rensa’s approximate rho matrix and one-shot duplicate flags. Current FastSketchLSH also uses its fused duplicate-flag API; older versions fall back to candidate lists, as does Datasketch. The speedups describe these deduplication pipelines, not every MinHash API or workload.
 
 ## How R-MinHash works
 
@@ -256,11 +256,11 @@ Run the full cross-library benchmark (single-thread + multi-thread lanes):
 uv run python benchmarks/full_benchmark.py
 ```
 
-`benchmarks/` now contains three scripts:
+`benchmarks/` contains these scripts:
 
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
-- `benchmarks/perf_memory_benchmark.py`: Rensa-only time and peak-memory (VmHWM/VmRSS, Linux) benchmark on a deterministic synthetic corpus with injected duplicates, per thread lane and per phase (sketch / dedup / classic update path), with duplicate-flag precision/recall as an accuracy guardrail. Use `--label` to tag runs and compare JSON outputs across code changes.
+- `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for classic sketching, rho sketching, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
 
 `simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 

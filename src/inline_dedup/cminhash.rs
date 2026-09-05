@@ -183,6 +183,7 @@ impl CMinHashDeduplicator {
       threshold,
       existing_signatures: FxHashMap::default(),
       num_perm,
+      configured_num_perm: num_perm,
       seed,
     })
   }
@@ -191,7 +192,6 @@ impl CMinHashDeduplicator {
   ///
   /// Returns an error when the supplied `CMinHash` has an incompatible configuration.
   pub fn add(&mut self, key: String, minhash: &CMinHash) -> PyResult<bool> {
-    self.validate_input_minhash(minhash)?;
     if self.is_duplicate(&key, minhash)? {
       return Ok(false);
     }
@@ -299,7 +299,7 @@ impl CMinHashDeduplicator {
   pub fn remove(&mut self, key: &str) -> bool {
     let removed = self.existing_signatures.remove(key).is_some();
     if self.existing_signatures.is_empty() {
-      self.num_perm = None;
+      self.num_perm = self.configured_num_perm;
     }
     removed
   }
@@ -316,6 +316,6 @@ impl CMinHashDeduplicator {
 
   pub fn clear(&mut self) {
     self.existing_signatures.clear();
-    self.num_perm = None;
+    self.num_perm = self.configured_num_perm;
   }
 }

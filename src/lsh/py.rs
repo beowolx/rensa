@@ -5,6 +5,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyIterator};
 use rustc_hash::FxHashSet;
 
+fn checked_key(start_key: usize, offset: usize) -> PyResult<usize> {
+  start_key.checked_add(offset).ok_or_else(|| {
+    PyValueError::new_err("start_key + offset exceeds the maximum key")
+  })
+}
+
 #[pymethods]
 impl RMinHashLSH {
   /// Creates a new `RMinHashLSH` instance.
@@ -68,7 +74,7 @@ impl RMinHashLSH {
   /// # Errors
   ///
   /// Returns an error if `minhashes` is not iterable, if an item is not an
-  /// `RMinHash`, or if a `minhash` has incompatible parameters.
+  /// `RMinHash`, if a `minhash` has incompatible parameters, or if a key overflows.
   #[pyo3(signature = (minhashes, start_key=0))]
   pub fn insert_many(
     &mut self,
@@ -78,7 +84,10 @@ impl RMinHashLSH {
     let iterator = PyIterator::from_object(minhashes)?;
     for (offset, minhash) in iterator.enumerate() {
       let minhash: PyRef<'_, RMinHash> = minhash?.extract()?;
-      self.insert_digest(start_key + offset, minhash.hash_values())?;
+      self.insert_digest(
+        checked_key(start_key, offset)?,
+        minhash.hash_values(),
+      )?;
     }
     Ok(())
   }
@@ -89,7 +98,7 @@ impl RMinHashLSH {
   ///
   /// # Errors
   ///
-  /// Returns an error when `num_perm` does not match this index.
+  /// Returns an error when `num_perm` does not match this index or a key overflows.
   #[pyo3(signature = (digest_matrix, start_key=0))]
   pub fn insert_matrix(
     &mut self,
@@ -97,6 +106,7 @@ impl RMinHashLSH {
     start_key: usize,
   ) -> PyResult<()> {
     self.ensure_digest_len(digest_matrix.num_perm())?;
+    checked_key(start_key, digest_matrix.rows().saturating_sub(1))?;
     self.key_bands.reserve(digest_matrix.rows());
     for table in &mut self.hash_tables {
       table.reserve(digest_matrix.rows());
@@ -114,7 +124,7 @@ impl RMinHashLSH {
   ///
   /// # Errors
   ///
-  /// Returns an error when `num_perm` does not match this index.
+  /// Returns an error when `num_perm` does not match this index or a key overflows.
   #[pyo3(signature = (digest_matrix, start_key=0))]
   pub fn insert_matrix_and_query_duplicate_flags(
     &mut self,
@@ -123,6 +133,7 @@ impl RMinHashLSH {
   ) -> PyResult<Vec<bool>> {
     self.ensure_digest_len(digest_matrix.num_perm())?;
     let rows = digest_matrix.rows();
+    checked_key(start_key, rows.saturating_sub(1))?;
     self.key_bands.reserve(rows);
     for table in &mut self.hash_tables {
       table.reserve(rows);
@@ -242,13 +253,12 @@ impl RMinHashLSH {
     let capacity = minhashes.len().unwrap_or_default();
     let iterator = PyIterator::from_object(minhashes)?;
     let mut flags = Vec::with_capacity(capacity);
-    let mut seen = FxHashSet::default();
 
     for minhash in iterator {
       let minhash: PyRef<'_, RMinHash> = minhash?.extract()?;
       let digest = minhash.hash_values();
       self.ensure_digest_len(digest.len())?;
-      flags.push(self.has_multiple_candidates(digest, &mut seen));
+      flags.push(self.has_multiple_candidates(digest));
     }
 
     Ok(flags)
@@ -265,12 +275,9 @@ impl RMinHashLSH {
   ) -> PyResult<Vec<bool>> {
     self.ensure_digest_len(digest_matrix.num_perm())?;
     let mut flags = Vec::with_capacity(digest_matrix.rows());
-    let mut seen = FxHashSet::default();
 
     for row_index in 0..digest_matrix.rows() {
-      flags.push(
-        self.has_multiple_candidates(digest_matrix.row(row_index), &mut seen),
-      );
+      flags.push(self.has_multiple_candidates(digest_matrix.row(row_index)));
     }
 
     Ok(flags)

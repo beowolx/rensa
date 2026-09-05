@@ -30,8 +30,13 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.9"
+      - name: Run Rust tests
+        run: cargo test --locked
       - name: Lint with clippy
-        run: cargo clippy --all --benches --tests --examples --all-features -- -D clippy::pedantic -D clippy::nursery
+        run: cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings -D clippy::pedantic -D clippy::nursery
 
   cargo-deny:
     name: Cargo Deny
@@ -224,7 +229,7 @@ jobs:
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.9"
+          python-version: "3.13"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           enable-cache: true
@@ -251,7 +256,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          uv venv --python 3.9 "${GITHUB_WORKSPACE}/.venv"
+          uv venv --python 3.13 "${GITHUB_WORKSPACE}/.venv"
           uv sync --python "${GITHUB_WORKSPACE}/.venv/bin/python" --group dev --no-install-project
           uv pip install \
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
@@ -261,7 +266,7 @@ jobs:
           uv pip install \
             --no-cache \
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
-            "FastSketchLSH"
+            "FastSketchLSH==1.0.1"
           BENCH_VENV="${GITHUB_WORKSPACE}/.venv"
           BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
           BENCH_MATURIN="${GITHUB_WORKSPACE}/.venv/bin/maturin"
@@ -286,6 +291,11 @@ jobs:
               --measured-runs "${BENCH_PR_MEASURED_RUNS}" \
               --output-json "${output_json}" \
               | tee "${output_log}"
+
+            RAYON_NUM_THREADS=1 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/kernel_benchmark.py" \
+              --rows 256 --repetitions 5 --sizes 8 128 4096 --num-perm 128 512 \
+              --output-json "${output_json%.json}_kernels.json" \
+              | tee "${output_log%.txt}_kernels.txt"
 
             echo "Completed ${label} benchmark."
           }
@@ -322,22 +332,64 @@ jobs:
               if engine not in base["summary"]["engine_medians"]:
                   raise SystemExit(f"missing base engine metrics: {engine}")
 
-          head_total = float(head["summary"]["engine_medians"]["rensa_r"]["median_total"])
-          base_total = float(base["summary"]["engine_medians"]["rensa_r"]["median_total"])
-          if base_total <= 0:
-              raise SystemExit("invalid base rensa_r median_total")
-          slowdown_fraction = (head_total / base_total) - 1.0
-
-          if slowdown_fraction > 0.10:
-              raise SystemExit(
-                  f"rensa_r slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
-                  f"slowdown={slowdown_fraction:.2%}"
-              )
-
-          print(
-              f"PASS: rensa_r median_total head={head_total:.6f}s "
-              f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}"
+          config_keys = (
+              "dataset", "dataset_spec", "rows", "effective_max_rows", "num_perm",
+              "num_bands", "rows_per_band", "threshold", "seed", "ngram_size",
+              "warmup_runs", "measured_runs", "thread_env", "rensa_env", "token_cache_sha256",
           )
+          for key in config_keys:
+              if head["config"][key] != base["config"][key]:
+                  raise SystemExit(f"benchmark input/config mismatch: {key}")
+
+          for engine in required_engines:
+              flag_hashes = {
+                  run["duplicate_flags_sha256"][engine]
+                  for payload in (head, base)
+                  for run in payload["runs"]
+              }
+              if len(flag_hashes) != 1:
+                  raise SystemExit(f"duplicate decisions changed or are nondeterministic: {engine}")
+
+          for engine in ("rensa_r", "rensa_c"):
+              head_total = float(head["summary"]["engine_medians"][engine]["median_total"])
+              base_total = float(base["summary"]["engine_medians"][engine]["median_total"])
+              if not (0 < head_total < float("inf") and 0 < base_total < float("inf")):
+                  raise SystemExit(f"invalid {engine} median_total")
+              slowdown_fraction = (head_total / base_total) - 1.0
+              if slowdown_fraction > 0.10:
+                  raise SystemExit(
+                      f"{engine} slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
+                      f"slowdown={slowdown_fraction:.2%}"
+                  )
+              print(
+                  f"PASS: {engine} median_total head={head_total:.6f}s "
+                  f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}; duplicate decisions unchanged"
+              )
+          with open(".bench/head_kernels.json", "r", encoding="utf-8") as handle:
+              head_kernels = json.load(handle)
+          with open(".bench/base_kernels.json", "r", encoding="utf-8") as handle:
+              base_kernels = json.load(handle)
+          if head_kernels["config"] != base_kernels["config"]:
+              raise SystemExit("kernel benchmark config mismatch")
+          if head_kernels["environment"]["flags"] != base_kernels["environment"]["flags"]:
+              raise SystemExit("kernel benchmark environment flags mismatch")
+          def keyed_results(payload):
+              return {
+                  (result["case"], result["tokens_per_row"], result["num_perm"]): result
+                  for result in payload["results"]
+              }
+          head_cases = keyed_results(head_kernels)
+          base_cases = keyed_results(base_kernels)
+          if not head_cases or head_cases.keys() != base_cases.keys():
+              raise SystemExit("kernel benchmark cases mismatch or empty")
+          for key, result in head_cases.items():
+              baseline = base_cases[key]
+              if result["sha256"] != baseline["sha256"]:
+                  raise SystemExit(f"kernel output changed: {key}")
+              head_time, base_time = result["median_seconds"], baseline["median_seconds"]
+              if not (0 < head_time < float("inf") and 0 < base_time < float("inf")):
+                  raise SystemExit(f"invalid kernel timings: {key}")
+              print(f"Kernel {key}: {base_time / head_time:.3f}x speedup; output unchanged")
           PY
 
       - name: Run full benchmark smoke
@@ -345,6 +397,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
           "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/full_benchmark.py \
             --datasets "${BENCH_DATASET_KEY}" \
             --threads "1,8" \
@@ -362,7 +415,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv venv --python 3.9 .venv
+          uv venv --python 3.13 .venv
           uv sync --python .venv/bin/python --group dev --no-install-project
           uv pip install \
             --python .venv/bin/python \
@@ -372,7 +425,7 @@ jobs:
           uv pip install \
             --no-cache \
             --python .venv/bin/python \
-            "FastSketchLSH"
+            "FastSketchLSH==1.0.1"
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
 
@@ -448,21 +501,24 @@ jobs:
           fi
 
   test:
-    name: Run Tests
+    name: Run Tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           enable-cache: true
       
       - name: Install dependencies
         run: |
-          uv venv --python 3.9 .venv
+          uv venv --python "${{ matrix.python }}" .venv
           uv sync --python .venv/bin/python --group dev --no-install-project
           
       - name: Build & Install Rensa

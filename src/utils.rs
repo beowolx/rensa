@@ -101,19 +101,9 @@ const fn hash_add_u32(hash: usize, value: u32) -> usize {
 }
 
 #[inline]
-pub fn usize_to_f64(value: usize) -> f64 {
-  #[cfg(target_pointer_width = "64")]
-  {
-    let bytes = value.to_be_bytes();
-    let high = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let low = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
-  }
-
-  #[cfg(target_pointer_width = "32")]
-  {
-    f64::from(u32::from_ne_bytes(value.to_ne_bytes()))
-  }
+#[allow(clippy::cast_precision_loss)]
+pub const fn usize_to_f64(value: usize) -> f64 {
+  value as f64
 }
 
 #[inline]
@@ -212,14 +202,7 @@ pub fn calculate_band_hash(band: &[u32]) -> u64 {
     hash = hash_add_u32(hash, value);
   }
 
-  #[cfg(target_pointer_width = "64")]
-  {
-    hash.rotate_left(ROTATE) as u64
-  }
-  #[cfg(target_pointer_width = "32")]
-  {
-    hash.rotate_left(ROTATE) as u64
-  }
+  hash.rotate_left(ROTATE) as u64
 }
 
 #[cfg(test)]

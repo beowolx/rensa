@@ -375,8 +375,20 @@ impl RMinHash {
     let mut mixed_values = Vec::new();
     for &row_u32 in fallback_rows {
       let row_index = row_u32 as usize;
-      let document_ptr =
-        unsafe { seq_get_item(ctx.outer.0, ctx.outer_is_list, row_index) };
+      // Row indices were bounded by the original Python sequence length.
+      #[allow(clippy::cast_possible_wrap)]
+      let row_index_ssize = row_index as ffi::Py_ssize_t;
+      // A previous fallback exporter may have resized the outer list.
+      let document_ptr = unsafe {
+        if ctx.outer_is_list {
+          ffi::PyList_GetItem(ctx.outer.0, row_index_ssize)
+        } else {
+          seq_get_item(ctx.outer.0, false, row_index)
+        }
+      };
+      if document_ptr.is_null() {
+        return Err(PyErr::fetch(py));
+      }
       let document =
         unsafe { Bound::<'_, PyAny>::from_borrowed_ptr(py, document_ptr) };
 

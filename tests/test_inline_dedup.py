@@ -397,3 +397,29 @@ class TestInlineDeduplication:
 
         with pytest.raises(ValueError, match="num_perm is not configured"):
             dedup.is_duplicate_pairs([("doc0", ["alpha", "beta"])])
+
+
+@pytest.mark.parametrize("operation", ["clear", "remove_last", "remove_missing"])
+def test_cminhash_deduplicator_preserves_explicit_num_perm(operation):
+    dedup = CMinHashDeduplicator(threshold=0.8, num_perm=64)
+    if operation != "remove_missing":
+        assert dedup.add_pairs([("first", ["alpha"])]) == [True]
+    if operation == "clear":
+        dedup.clear()
+    else:
+        assert dedup.remove("first") is (operation == "remove_last")
+    assert dedup.add_pairs([("second", ["beta"])]) == [True]
+    incompatible = CMinHash(num_perm=32, seed=42)
+    with pytest.raises(ValueError, match="num_perm mismatch"):
+        dedup.add("incompatible", incompatible)
+
+
+@pytest.mark.parametrize("operation", ["clear", "remove"])
+def test_cminhash_deduplicator_resets_inferred_num_perm(operation):
+    dedup = CMinHashDeduplicator(threshold=0.8)
+    assert dedup.add("first", CMinHash(num_perm=64, seed=42))
+    if operation == "clear":
+        dedup.clear()
+    else:
+        assert dedup.remove("first")
+    assert dedup.add("second", CMinHash(num_perm=32, seed=42))

@@ -63,6 +63,16 @@ def test_cminhash_jaccard_rejects_num_perm_mismatch():
         m1.jaccard(m2)
 
 
+@pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])
+def test_minhash_jaccard_rejects_seed_mismatch(minhash_type):
+    left = minhash_type(num_perm=128, seed=1)
+    right = minhash_type(num_perm=128, seed=2)
+    left.update(["same", "tokens"])
+    right.update(["same", "tokens"])
+    with pytest.raises(ValueError, match="seed mismatch"):
+        left.jaccard(right)
+
+
 def test_rminhash_serialization_roundtrip():
     m = RMinHash(num_perm=5, seed=2023)
     m.update(["serialize", "this"])

@@ -120,12 +120,8 @@ impl RMinHashLSH {
     }
   }
 
-  pub(in crate::lsh) fn has_multiple_candidates(
-    &self,
-    digest: &[u32],
-    seen: &mut FxHashSet<usize>,
-  ) -> bool {
-    seen.clear();
+  pub(in crate::lsh) fn has_multiple_candidates(&self, digest: &[u32]) -> bool {
+    let mut first = None;
 
     for (i, table) in self.hash_tables.iter().enumerate() {
       let band_hash = calculate_band_hash(
@@ -133,9 +129,10 @@ impl RMinHashLSH {
       );
       if let Some(keys) = table.get(&band_hash) {
         for &key in keys {
-          if seen.insert(key) && seen.len() > 1 {
+          if first.is_some_and(|first_key| first_key != key) {
             return true;
           }
+          first = Some(key);
         }
       }
     }

@@ -167,9 +167,7 @@ fn rho_sparse_verify_perm(num_perm: usize) -> usize {
 fn rho_adaptive_probes_enabled() -> bool {
   static ENABLED: OnceLock<bool> = OnceLock::new();
   *ENABLED.get_or_init(|| {
-    std::env::var("RENSA_RHO_ADAPTIVE_PROBES")
-      .ok()
-      .is_some_and(|value| value != "0")
+    std::env::var("RENSA_RHO_ADAPTIVE_PROBES").is_ok_and(|value| value != "0")
   })
 }
 
@@ -209,9 +207,7 @@ pub(super) fn effective_rho_probes(
 fn rho_densify_enabled() -> bool {
   static ENABLED: OnceLock<bool> = OnceLock::new();
   *ENABLED.get_or_init(|| {
-    std::env::var("RENSA_RHO_DENSIFY")
-      .ok()
-      .is_some_and(|value| value != "0")
+    std::env::var("RENSA_RHO_DENSIFY").is_ok_and(|value| value != "0")
   })
 }
 

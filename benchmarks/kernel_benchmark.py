@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Deterministic, stdlib-only Rensa kernels; run the same file against both wheels.
+
+Times include returned-object allocation, but exclude input generation, digest
+extraction, correctness hashing, and result destruction. Update cases include
+construction of fresh sketches. Query cases exclude index construction.
+"""
+
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import statistics
+import subprocess
+import time
+from pathlib import Path
+
+from rensa import CMinHash, RMinHash, RMinHashLSH
+
+CASES = (
+    "r_update", "c_update", "r_batch", "r_prehashed", "c_prehashed",
+    "rho", "rho_dedup", "query",
+)
+
+
+def fingerprint(value):
+    return hashlib.sha256(
+        json.dumps(value, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+
+def cpu_name():
+    if platform.system() == "Darwin":
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"], text=True, capture_output=True
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text().splitlines():
+            if line.startswith("model name"):
+                return line.partition(":")[2].strip()
+    return platform.processor() or platform.machine()
+
+
+def documents(rows, size):
+    # Each consecutive group of four contains one exact duplicate pair and
+    # two disjoint documents. Strings, row order, and overlap are reproducible.
+    return [
+        [f"document-{row - (row % 4 == 1)}-token-{token}" for token in range(size)]
+        for row in range(rows)
+    ]
+
+
+def update_all(cls, docs, num_perm, seed):
+    sketches = []
+    for doc in docs:
+        sketch = cls(num_perm, seed)
+        sketch.update(doc)
+        sketches.append(sketch)
+    return sketches
+
+
+def operation(case, docs, hashes, num_perm, seed):
+    if case in ("r_update", "c_update"):
+        cls = RMinHash if case == "r_update" else CMinHash
+        extract = (lambda result: [s.digest() for s in result]) if case == "r_update" else (
+            lambda result: [s.digest_u64() for s in result]
+        )
+        return lambda: update_all(cls, docs, num_perm, seed), extract
+    if case == "c_prehashed":
+        return lambda: CMinHash.digests64_from_token_hash_sets(hashes, num_perm, seed), lambda x: x
+    if case == "query":
+        sketches = RMinHash.from_token_sets(docs, num_perm, seed)
+        index = RMinHashLSH(0.5, num_perm, 16)
+        index.insert_many(sketches)
+        return lambda: index.query_duplicate_flags(sketches), lambda x: x
+    if case == "rho_dedup":
+        def run():
+            matrix = RMinHash.digest_matrix_from_token_sets_rho(docs, num_perm, seed)
+            index = RMinHashLSH(0.5, num_perm, 16)
+            flags = index.query_duplicate_flags_matrix_one_shot(matrix)
+            return matrix, flags
+        return run, lambda result: [result[0].to_rows(), result[1]]
+    method, values = {
+        "r_batch": (RMinHash.digest_matrix_from_token_sets, docs),
+        "r_prehashed": (RMinHash.digest_matrix_from_token_hash_sets, hashes),
+        "rho": (RMinHash.digest_matrix_from_token_sets_rho, docs),
+    }[case]
+    return lambda: method(values, num_perm, seed), lambda result: result.to_rows()
+
+
+def measure(run, extract, repetitions, min_sample_seconds):
+    result = run()  # Warm caches, lazy SIMD dispatch, and Rayon initialization.
+    expected = fingerprint(extract(result))
+    del result
+    samples = []
+    iterations = []
+    for _ in range(repetitions):
+        elapsed = 0.0
+        count = 0
+        while elapsed < min_sample_seconds or count == 0:
+            if count:
+                del result
+            start = time.perf_counter_ns()
+            result = run()
+            elapsed += (time.perf_counter_ns() - start) / 1e9
+            count += 1
+        samples.append(elapsed / count)
+        iterations.append(count)
+        if fingerprint(extract(result)) != expected:
+            raise RuntimeError("Non-deterministic output across repetitions")
+        del result
+    return {"seconds": samples, "iterations": iterations, "median_seconds": statistics.median(samples), "sha256": expected}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-json", type=Path, required=True)
+    parser.add_argument("--rows", type=int, default=512)
+    parser.add_argument("--repetitions", type=int, default=5)
+    parser.add_argument("--min-sample-seconds", type=float, default=0.02)
+    parser.add_argument("--sizes", type=int, nargs="+", default=[1, 8, 32, 128, 1024, 4096])
+    parser.add_argument("--num-perm", type=int, nargs="+", default=[128, 512])
+    parser.add_argument("--cases", choices=CASES, nargs="+", default=list(CASES))
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    if min(args.rows, args.repetitions, *args.sizes, *args.num_perm) <= 0:
+        parser.error("rows, repetitions, sizes, and num-perm must be positive")
+    if not 0 <= args.min_sample_seconds < float("inf"):
+        parser.error("min-sample-seconds must be finite and nonnegative")
+    if any(n % 16 for n in args.num_perm) and any(case in args.cases for case in ("query", "rho_dedup")):
+        parser.error("num-perm must divide evenly into the fixed 16-band LSH")
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "schema_version": 1,
+        "environment": {
+            "platform": platform.platform(), "machine": platform.machine(),
+            "cpu": cpu_name(), "logical_cpus": os.cpu_count(),
+            "python": platform.python_version(), "rensa": importlib.metadata.version("rensa"),
+            "flags": {key: value for key, value in sorted(os.environ.items())
+                      if key.startswith(("RENSA_", "RAYON_")) or key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")},
+        },
+        "config": {key: value for key, value in vars(args).items() if key != "output_json"},
+        "results": [],
+    }
+    for size in args.sizes:
+        docs = documents(args.rows, size)
+        hashes = RMinHash.hash_token_sets(docs)
+        for num_perm in args.num_perm:
+            checksums = {}
+            for case in args.cases:
+                run, extract = operation(case, docs, hashes, num_perm, args.seed)
+                result = measure(run, extract, args.repetitions, args.min_sample_seconds)
+                checksums[case] = result["sha256"]
+                result.update(case=case, tokens_per_row=size, num_perm=num_perm)
+                report["results"].append(result)
+                print(f"{case:12s} tokens={size:4d} perm={num_perm:3d}: {result['median_seconds']:.6f}s", flush=True)
+            for equivalent in (("r_update", "r_batch", "r_prehashed"), ("c_update", "c_prehashed")):
+                if len({checksums[name] for name in equivalent if name in checksums}) > 1:
+                    raise RuntimeError(f"Digest mismatch among equivalent APIs: {equivalent}")
+        args.output_json.write_text(json.dumps(report, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()
