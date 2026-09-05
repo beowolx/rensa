@@ -51,6 +51,11 @@ impl CMinHash {
   }
 
   #[inline]
+  pub(crate) fn signature_values(&self) -> &[u64] {
+    &self.hash_values
+  }
+
+  #[inline]
   pub(crate) const fn seed(&self) -> u64 {
     self.seed
   }

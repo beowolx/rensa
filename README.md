@@ -67,6 +67,8 @@ Rensa also includes C-MinHash, based on the [C-MinHash paper](https://arxiv.org/
 
 For batches with at least 128 tokens and 128 permutations, C-MinHash sorts the transformed token values and finds the minimum for each wrapping offset by binary search. This produces the same signature with O(n log n + k log n) work instead of O(nk), using an additional 8-byte temporary value per token. Streaming duplicate checks stop comparing a pair once its remaining signature slots cannot meet the threshold.
 
+`CMinHashDeduplicator` builds an exact candidate index after 128 stored entries. If the threshold permits `d` mismatching signature slots, it partitions the signature into `d + 1` disjoint bands: every accepted duplicate must match at least one complete band. Candidates still pass the same signature comparison, so hash collisions only cause extra checks. This accelerates insertion and boolean duplicate checks at the cost of additional memory proportional to stored entries times band count. Singleton buckets stay inline. Collections initially use a scan, and thresholds requiring at most one matching slot always use a scan. `get_duplicates()` retains its full scan.
+
 ## Installation
 
 ```bash
@@ -262,7 +264,9 @@ uv run python benchmarks/full_benchmark.py
 
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
-- `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for classic sketching, rho sketching, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
+- `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for token hashing, classic and rho sketching, streaming C-MinHash insertion, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
+
+Kernel measurements default to 200 ms of untimed warmup and at least 100 ms per sample. For noisy multi-thread measurements, run individual cases in fresh processes using `--cases`, `--sizes`, and `--num-perm`, increase `--min-sample-seconds`, and alternate the order of the builds. Keep all samples; large timing dispersion makes a comparison inconclusive.
 
 `simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 

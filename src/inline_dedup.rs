@@ -29,6 +29,8 @@ pub struct RMinHashDeduplicator {
 pub struct CMinHashDeduplicator {
   threshold: f64,
   existing_signatures: FxHashMap<String, CMinHash>,
+  signature_bands: Vec<FxHashMap<u64, cminhash::SignatureBucket>>,
+  band_count: usize,
   num_perm: Option<usize>,
   configured_num_perm: Option<usize>,
   seed: u64,
