@@ -26,10 +26,27 @@ impl Avx512Mixer {
 
   #[inline]
   #[allow(clippy::unused_self)] // Calling requires this checked CPU capability.
-  pub fn mix(self, values: &mut [u64; 8], seed: u64) {
+  pub fn mix(self, values: &[u64; 8], seed: u64) -> [u64; 8] {
     // SAFETY: this capability can only be constructed after runtime detection
     // confirms AVX-512F/DQ support, including the operating system's state.
-    unsafe { crate::simd::x86::splitmix64x8_avx512(values, seed) };
+    unsafe { crate::simd::x86::splitmix64x8_avx512(values.as_ptr(), seed) }
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)] // Calling requires this checked CPU capability.
+  pub fn mix_cells(
+    self,
+    values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
+    seed: u64,
+  ) -> [u64; 8] {
+    // SAFETY: this capability proves AVX-512F/DQ support. ReadOnlyCell is
+    // repr(transparent) around UnsafeCell<u64>, with the layout of u64.
+    // Deriving the raw pointer from the whole array preserves its full range
+    // of eight readable values. No shared u64 reference is created over the
+    // interior-mutable cells.
+    unsafe {
+      crate::simd::x86::splitmix64x8_avx512(values.as_ptr().cast::<u64>(), seed)
+    }
   }
 }
 
@@ -506,6 +523,53 @@ mod tests {
       assert_eq!(soa.b_hi[1], 0x0102_0304);
       assert_eq!(soa.b_lo[1], 0x0506_0708);
     }
+  }
+
+  #[test]
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  fn avx512_mixer_reads_python_cells_without_changing_values() {
+    use pyo3::buffer::PyBuffer;
+    use pyo3::prelude::*;
+
+    let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() else {
+      return;
+    };
+    let values = [
+      0,
+      1,
+      u64::MAX,
+      u64::MAX - 1,
+      u64::from(u32::MAX),
+      1 << 32,
+      1 << 63,
+      0xaaaa_aaaa_5555_5555,
+    ];
+    Python::initialize();
+    Python::attach(|py| {
+      let array = py.import("array").unwrap();
+      let mut input = vec![17];
+      input.extend(values);
+      input.push(23);
+      let object = array
+        .getattr("array")
+        .unwrap()
+        .call1(("Q", input.clone()))
+        .unwrap();
+      let buffer = PyBuffer::<u64>::get(&object).unwrap();
+      let cells = buffer.as_slice(py).unwrap();
+      let chunk = cells[1..].first_chunk::<8>().unwrap();
+      for seed in [0, 42, u64::MAX] {
+        let expected = mixer.mix(&values, seed);
+        assert_eq!(mixer.mix_cells(chunk, seed), expected);
+      }
+      assert_eq!(
+        cells
+          .iter()
+          .map(pyo3::buffer::ReadOnlyCell::get)
+          .collect::<Vec<_>>(),
+        input
+      );
+    });
   }
 
   #[test]

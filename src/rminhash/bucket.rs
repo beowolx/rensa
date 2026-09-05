@@ -21,6 +21,15 @@ const FALLBACK_DOMAIN: u64 = 0xbb67_ae85_84ca_a73b;
 
 pub(super) trait HashValue {
   fn value(&self) -> u64;
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  fn mix_chunk(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+  ) -> [u64; 8]
+  where
+    Self: Sized;
 }
 
 impl HashValue for u64 {
@@ -28,12 +37,32 @@ impl HashValue for u64 {
   fn value(&self) -> u64 {
     *self
   }
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[inline]
+  fn mix_chunk(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+  ) -> [u64; 8] {
+    mixer.mix(values, seed)
+  }
 }
 
 impl HashValue for ReadOnlyCell<u64> {
   #[inline]
   fn value(&self) -> u64 {
     self.get()
+  }
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[inline]
+  fn mix_chunk(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+  ) -> [u64; 8] {
+    mixer.mix_cells(values, seed)
   }
 }
 
@@ -48,10 +77,10 @@ fn for_each_mixed<H: HashValue>(
   if hashes.len() >= 8 {
     if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
       for chunk in chunks.by_ref() {
-        let mut values = std::array::from_fn(|i| chunk[i].value());
-        mixer.mix(&mut values, seed);
-        for mixed in values {
-          visit(mixed);
+        if let Some(values) = chunk.first_chunk::<8>() {
+          for mixed in H::mix_chunk(values, mixer, seed) {
+            visit(mixed);
+          }
         }
       }
       for hash in chunks.remainder() {

@@ -2,17 +2,23 @@ use crate::utils::permute_hash;
 
 /// Mixes eight independent token values; coordinate updates remain scalar.
 #[inline]
-pub(super) unsafe fn splitmix64x8_avx512(values: &mut [u64; 8], seed: u64) {
+pub(super) unsafe fn splitmix64x8_avx512(
+  values: *const u64,
+  seed: u64,
+) -> [u64; 8] {
   const CONSTANTS: [u64; 3] = [
     0x9e37_79b9_7f4a_7c15,
     0xbf58_476d_1ce4_e5b9,
     0x94d0_49bb_1331_11eb,
   ];
-  // SAFETY: the caller proves AVX-512F/DQ support. The unaligned load/store
-  // access exactly the initialized, exclusively borrowed eight-value array;
-  // broadcasts read one seed and three constants. All used vector registers
-  // are declared clobbered. Assembly retains compatibility with Rust 1.83,
-  // before AVX-512 intrinsics and target_feature were stabilized.
+  let mut output = std::mem::MaybeUninit::<[u64; 8]>::uninit();
+  // SAFETY: the caller proves AVX-512F/DQ support and that values points to
+  // eight readable u64 values. The unaligned store initializes exactly the
+  // eight output values; broadcasts read one seed and three constants. All
+  // used vector registers are declared clobbered. Assembly retains Rust 1.83
+  // compatibility, before AVX-512 intrinsics and target_feature stabilized.
+  // Every normal return follows the full 64-byte store, so assume_init is
+  // valid and avoids zeroing output that the assembly immediately replaces.
   unsafe {
     core::arch::asm!(
       "vmovdqu64 zmm0, [{values}]",
@@ -30,8 +36,9 @@ pub(super) unsafe fn splitmix64x8_avx512(values: &mut [u64; 8], seed: u64) {
       "vpmullq zmm0, zmm0, zmm1",
       "vpsrlq zmm2, zmm0, 31",
       "vpxorq zmm0, zmm0, zmm2",
-      "vmovdqu64 [{values}], zmm0",
-      values = in(reg) values.as_mut_ptr(),
+      "vmovdqu64 [{output}], zmm0",
+      values = in(reg) values,
+      output = in(reg) output.as_mut_ptr(),
       seed = in(reg) &raw const seed,
       constants = in(reg) CONSTANTS.as_ptr(),
       out("zmm0") _,
@@ -39,6 +46,7 @@ pub(super) unsafe fn splitmix64x8_avx512(values: &mut [u64; 8], seed: u64) {
       out("zmm2") _,
       options(nostack, preserves_flags),
     );
+    output.assume_init()
   }
 }
 
@@ -168,9 +176,8 @@ mod tests {
         .chain((0..128).map(|_| std::array::from_fn(|_| rng.next_u64())))
       {
         let expected = input.map(|value| scalar(value, seed));
-        let mut actual = input;
         // SAFETY: the test checked both required CPU/OS features above.
-        unsafe { splitmix64x8_avx512(&mut actual, seed) };
+        let actual = unsafe { splitmix64x8_avx512(input.as_ptr(), seed) };
         assert_eq!(actual, expected);
       }
     }

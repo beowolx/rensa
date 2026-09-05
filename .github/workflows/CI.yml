@@ -366,6 +366,16 @@ jobs:
               --output-json "${output_json%.json}_prehashed.json" \
               | tee "${output_log%.txt}_prehashed.txt"
 
+            if [ "${label}" = "head" ] && [ "${RENSA_REQUIRE_AVX512:-}" = "1" ]; then
+              # Compare both backends on the same CPU and installed head binary.
+              RENSA_FORCE_KERNEL=avx2 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --rows 256 --repetitions 5 \
+                --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_avx2.json" \
+                | tee "${output_json%.json}_prehashed_avx2.txt"
+            fi
+
             echo "Completed ${label} benchmark."
           }
 
