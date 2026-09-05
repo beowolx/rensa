@@ -34,7 +34,7 @@ from datasketch import MinHash
 from FastSketchLSH import FastSimilaritySketch
 import numpy as np
 from full_benchmark import sha256_file
-from kernel_benchmark import cpu_name, documents, measure
+from kernel_benchmark import cpu_flags, cpu_name, documents, measure, native_binary_sha256
 from rensa import CMinHash, RMinHash
 
 ENGINES = ("rensa_classic", "rensa_rho", "rensa_c", "datasketch", "fastsketch")
@@ -219,6 +219,9 @@ def main():
         "environment": {
             "platform": platform.platform(), "machine": platform.machine(),
             "cpu": cpu_name(), "python": platform.python_version(),
+            "cpu_flags": cpu_flags(),
+            "native_binary_sha256": {name: native_binary_sha256(name)
+                                     for name in ("rensa", "FastSketchLSH")},
             "versions": {name: importlib.metadata.version(name)
                          for name in ("rensa", "datasketch", "FastSketchLSH", "numpy")},
             "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", None),

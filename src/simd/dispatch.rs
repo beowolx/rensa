@@ -8,6 +8,29 @@ enum KernelKind {
   Neon,
   #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
   Avx2,
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  Avx512,
+}
+
+/// A runtime-checked capability for eight-lane AVX-512 token mixing.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[derive(Clone, Copy)]
+pub struct Avx512Mixer(());
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl Avx512Mixer {
+  #[must_use]
+  pub fn detect() -> Option<Self> {
+    matches!(kernel_kind(), KernelKind::Avx512).then_some(Self(()))
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)] // Calling requires this checked CPU capability.
+  pub fn mix(self, values: &mut [u64; 8], seed: u64) {
+    // SAFETY: this capability can only be constructed after runtime detection
+    // confirms AVX-512F/DQ support, including the operating system's state.
+    unsafe { crate::simd::x86::splitmix64x8_avx512(values, seed) };
+  }
 }
 
 #[derive(Clone, Default)]
@@ -123,6 +146,8 @@ const fn kernel_kind_name(kind: KernelKind) -> &'static str {
     KernelKind::Neon => "neon",
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     KernelKind::Avx2 => "avx2",
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => "avx512",
   }
 }
 
@@ -145,6 +170,11 @@ fn forced_kernel_supported(kind: KernelKind) -> bool {
     KernelKind::Neon => std::arch::is_aarch64_feature_detected!("neon"),
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     KernelKind::Avx2 => std::arch::is_x86_feature_detected!("avx2"),
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => {
+      std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512dq")
+    }
   }
 }
 
@@ -164,6 +194,11 @@ fn parse_forced_kernel(value: &str) -> Option<KernelKind> {
     return Some(KernelKind::Avx2);
   }
 
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if value.eq_ignore_ascii_case("avx512") {
+    return Some(KernelKind::Avx512);
+  }
+
   None
 }
 
@@ -178,7 +213,9 @@ fn default_kernel_kind() -> KernelKind {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn default_kernel_kind() -> KernelKind {
-  if std::arch::is_x86_feature_detected!("avx2") {
+  if forced_kernel_supported(KernelKind::Avx512) {
+    KernelKind::Avx512
+  } else if std::arch::is_x86_feature_detected!("avx2") {
     KernelKind::Avx2
   } else {
     KernelKind::Scalar
@@ -228,6 +265,17 @@ pub fn apply_hash_batch_to_values(
         permutations,
         hash_batch,
       );
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => {
+      // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+      unsafe {
+        crate::simd::x86_avx512::apply_hash_batch_to_values_avx512(
+          hash_values,
+          permutations,
+          hash_batch,
+        );
+      }
     }
   }
 }
@@ -299,6 +347,18 @@ pub fn apply_bucket_fallback(
             &pairs[..lanes],
             hashes,
           );
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        KernelKind::Avx512 => {
+          let lanes = count.next_multiple_of(8);
+          // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+          unsafe {
+            crate::simd::x86_avx512::apply_hash_batch_to_values_avx512(
+              &mut values[..lanes],
+              &pairs[..lanes],
+              hashes,
+            );
+          }
         }
       }
     }
@@ -423,8 +483,9 @@ fn scalar_apply_hash_batch_to_values(
 #[cfg(test)]
 mod tests {
   use crate::simd::dispatch::{
-    forced_kernel_supported, kernel_kind_name, parse_forced_kernel,
-    scalar_apply_hash_batch_to_values, KernelKind, PermutationSoA,
+    forced_kernel_supported, kernel_kind, kernel_kind_name,
+    parse_forced_kernel, scalar_apply_hash_batch_to_values, KernelKind,
+    PermutationSoA,
   };
   use crate::utils::permute_hash;
   use rand_core::{RngCore, SeedableRng};
@@ -454,6 +515,8 @@ mod tests {
     assert_eq!(kernel_kind_name(KernelKind::Neon), "neon");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     assert_eq!(kernel_kind_name(KernelKind::Avx2), "avx2");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(kernel_kind_name(KernelKind::Avx512), "avx512");
   }
 
   #[test]
@@ -464,11 +527,21 @@ mod tests {
     assert_eq!(parse_forced_kernel("neon"), Some(KernelKind::Neon));
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     assert_eq!(parse_forced_kernel("avx2"), Some(KernelKind::Avx2));
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(parse_forced_kernel("AVX512"), Some(KernelKind::Avx512));
     assert_eq!(parse_forced_kernel("unknown"), None);
   }
 
   #[test]
   fn forced_kernel_support_mapping_matches_runtime() {
+    eprintln!(
+      "Rensa selected SIMD backend: {}",
+      kernel_kind_name(kernel_kind())
+    );
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::env::var_os("RENSA_REQUIRE_AVX512").is_some() {
+      assert_eq!(kernel_kind(), KernelKind::Avx512);
+    }
     assert!(forced_kernel_supported(KernelKind::Scalar));
     #[cfg(target_arch = "aarch64")]
     assert_eq!(
@@ -479,6 +552,12 @@ mod tests {
     assert_eq!(
       forced_kernel_supported(KernelKind::Avx2),
       std::arch::is_x86_feature_detected!("avx2")
+    );
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(
+      forced_kernel_supported(KernelKind::Avx512),
+      std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512dq")
     );
   }
 

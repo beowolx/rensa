@@ -8,6 +8,7 @@ construction of fresh sketches. Query cases exclude index construction.
 
 import argparse
 import hashlib
+import importlib.machinery
 import importlib.metadata
 import json
 import os
@@ -46,6 +47,26 @@ def cpu_name():
             if line.startswith("model name"):
                 return line.partition(":")[2].strip()
     return platform.processor() or platform.machine()
+
+
+def cpu_flags():
+    """Report OS-advertised CPU features, not the binary's selected kernel."""
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text().splitlines():
+            name, _, value = line.partition(":")
+            if name.strip() in ("flags", "Features"):
+                return sorted(value.split())
+    return None
+
+
+def native_binary_sha256(distribution_name):
+    distribution = importlib.metadata.distribution(distribution_name)
+    return {
+        str(path): hashlib.sha256(distribution.locate_file(path).read_bytes()).hexdigest()
+        for path in distribution.files or ()
+        if str(path).endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES))
+    }
 
 
 def documents(rows, size):
@@ -182,6 +203,8 @@ def main():
         "environment": {
             "platform": platform.platform(), "machine": platform.machine(),
             "cpu": cpu_name(), "logical_cpus": os.cpu_count(),
+            "cpu_flags": cpu_flags(),
+            "native_binary_sha256": {"rensa": native_binary_sha256("rensa")},
             "python": platform.python_version(), "rensa": importlib.metadata.version("rensa"),
             "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", 1),
             "rminhash_algorithm_version": getattr(RMinHash, "ALGORITHM_VERSION", 1),

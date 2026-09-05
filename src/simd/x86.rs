@@ -1,5 +1,47 @@
 use crate::utils::permute_hash;
 
+/// Mixes eight independent token values; coordinate updates remain scalar.
+#[inline]
+pub(super) unsafe fn splitmix64x8_avx512(values: &mut [u64; 8], seed: u64) {
+  const CONSTANTS: [u64; 3] = [
+    0x9e37_79b9_7f4a_7c15,
+    0xbf58_476d_1ce4_e5b9,
+    0x94d0_49bb_1331_11eb,
+  ];
+  // SAFETY: the caller proves AVX-512F/DQ support. The unaligned load/store
+  // access exactly the initialized, exclusively borrowed eight-value array;
+  // broadcasts read one seed and three constants. All used vector registers
+  // are declared clobbered. Assembly retains compatibility with Rust 1.83,
+  // before AVX-512 intrinsics and target_feature were stabilized.
+  unsafe {
+    core::arch::asm!(
+      "vmovdqu64 zmm0, [{values}]",
+      "vpbroadcastq zmm1, [{seed}]",
+      "vpxorq zmm0, zmm0, zmm1",
+      "vpbroadcastq zmm1, [{constants}]",
+      "vpaddq zmm0, zmm0, zmm1",
+      "vpsrlq zmm2, zmm0, 30",
+      "vpxorq zmm0, zmm0, zmm2",
+      "vpbroadcastq zmm1, [{constants} + 8]",
+      "vpmullq zmm0, zmm0, zmm1",
+      "vpsrlq zmm2, zmm0, 27",
+      "vpxorq zmm0, zmm0, zmm2",
+      "vpbroadcastq zmm1, [{constants} + 16]",
+      "vpmullq zmm0, zmm0, zmm1",
+      "vpsrlq zmm2, zmm0, 31",
+      "vpxorq zmm0, zmm0, zmm2",
+      "vmovdqu64 [{values}], zmm0",
+      values = in(reg) values.as_mut_ptr(),
+      seed = in(reg) &raw const seed,
+      constants = in(reg) CONSTANTS.as_ptr(),
+      out("zmm0") _,
+      out("zmm1") _,
+      out("zmm2") _,
+      options(nostack, preserves_flags),
+    );
+  }
+}
+
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
   __m256i, _mm256_loadu_si256, _mm256_min_epu32, _mm256_storeu_si256,
@@ -87,4 +129,50 @@ unsafe fn load_u32x8(ptr: *const u32) -> __m256i {
 unsafe fn store_u32x8(ptr: *mut u32, value: __m256i) {
   // SAFETY: caller guarantees `ptr` is valid for 8 contiguous mutable `u32` values.
   unsafe { _mm256_storeu_si256(ptr.cast::<__m256i>(), value) };
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::simd::x86::splitmix64x8_avx512;
+  use rand_core::{RngCore, SeedableRng};
+  use rand_xoshiro::Xoshiro256PlusPlus;
+
+  fn scalar(mut value: u64, seed: u64) -> u64 {
+    value = (value ^ seed).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+  }
+
+  #[test]
+  fn avx512_mixer_matches_wrapping_scalar_for_every_lane() {
+    if !std::arch::is_x86_feature_detected!("avx512f")
+      || !std::arch::is_x86_feature_detected!("avx512dq")
+    {
+      return;
+    }
+    let edges = [
+      0,
+      1,
+      u64::MAX,
+      u64::MAX - 1,
+      u64::from(u32::MAX),
+      1 << 32,
+      1 << 63,
+      0xaaaa_aaaa_5555_5555,
+    ];
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x4156_5835_3132);
+    for seed in [0, 1, 42, u64::MAX, rng.next_u64()] {
+      for input in std::iter::once(edges)
+        .chain(edges.map(|value| [value; 8]))
+        .chain((0..128).map(|_| std::array::from_fn(|_| rng.next_u64())))
+      {
+        let expected = input.map(|value| scalar(value, seed));
+        let mut actual = input;
+        // SAFETY: the test checked both required CPU/OS features above.
+        unsafe { splitmix64x8_avx512(&mut actual, seed) };
+        assert_eq!(actual, expected);
+      }
+    }
+  }
 }

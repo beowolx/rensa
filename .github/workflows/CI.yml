@@ -9,6 +9,11 @@ on:
       - "*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      performance_only:
+        description: Run only strict performance comparisons against origin/main
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,6 +24,7 @@ permissions:
 
 jobs:
   rust-quality:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     name: Rust Quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -37,10 +43,15 @@ jobs:
         run: |
           lscpu
           cargo test --locked
+      - name: Check minimum supported Rust version
+        run: |
+          rustup toolchain install 1.83.0 --profile minimal
+          cargo +1.83.0 test --locked --lib simd::
       - name: Lint with clippy
         run: cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings -D clippy::pedantic -D clippy::nursery
 
   cargo-deny:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     name: Cargo Deny
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -71,6 +82,7 @@ jobs:
           fail-on-severity: moderate
 
   linux:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -108,6 +120,7 @@ jobs:
 
 
   musllinux:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -140,6 +153,7 @@ jobs:
           path: dist
 
   windows:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -168,6 +182,7 @@ jobs:
           path: dist
 
   macos:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -195,6 +210,7 @@ jobs:
           path: dist
 
   sdist:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -216,6 +232,7 @@ jobs:
     timeout-minutes: 30
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
+      BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.performance_only) }}
       BENCH_DATASET_KEY: ag_news
       BENCH_MAX_ROWS: "10000"
       BENCH_FULL_SMOKE_MAX_ROWS: "2000"
@@ -236,24 +253,42 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Create benchmark directories
-        shell: bash
-        run: |
-          mkdir -p .bench
-
-      - name: Prepare PR base checkout
-        if: github.event_name == 'pull_request'
+      - name: Record benchmark hardware and compilers
         shell: bash
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          echo "Base SHA: ${BASE_SHA}"
-          git fetch --no-tags origin "${BASE_SHA}"
+          mkdir -p .bench
+          git rev-parse HEAD | tee .bench/head_commit.txt
+          lscpu --json > .bench/cpu.json
+          lscpu | tee .bench/cpu.txt
+          {
+            c++ --version
+            rustc -vV
+            cargo --version
+            uv --version
+          } | tee .bench/compilers.txt
+
+      - name: Prepare benchmark base checkout
+        if: env.BENCH_COMPARE == 'true'
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_BASE_SHA}" ]; then
+            BASE_SHA="${PR_BASE_SHA}"
+            git fetch --no-tags origin "${BASE_SHA}"
+          else
+            # Resolve main once, so a manual run compares both builds to one commit.
+            git fetch --no-tags origin main
+            BASE_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
+          printf '%s\n' "${BASE_SHA}" | tee .bench/base_commit.txt
           git worktree add ../rensa-base "${BASE_SHA}"
           echo "BASE_DIR=$(cd ../rensa-base && pwd)" >> "$GITHUB_ENV"
 
-      - name: Run PR base and head benchmarks
-        if: github.event_name == 'pull_request'
+      - name: Run base and head benchmarks
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -266,9 +301,11 @@ jobs:
             "datasketch>=1.9" \
             "tqdm>=4.66"
           uv pip install \
-            --no-cache \
+            --no-cache --no-binary FastSketchLSH --verbose \
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
-            "FastSketchLSH==1.0.1"
+            "FastSketchLSH==1.0.1" 2>&1 | tee .bench/fastsketch_build.txt
+          # Upstream chooses AVX-512 at build time; retain its actual selection.
+          grep -F 'Selected SIMD:' .bench/fastsketch_build.txt | tee .bench/fastsketch_simd.txt
           BENCH_VENV="${GITHUB_WORKSPACE}/.venv"
           BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
           BENCH_MATURIN="${GITHUB_WORKSPACE}/.venv/bin/maturin"
@@ -284,6 +321,11 @@ jobs:
             popd >/dev/null
 
             if [ "${label}" = "head" ]; then
+              if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+                export RENSA_REQUIRE_AVX512=1
+              fi
+              PYO3_PYTHON="${BENCH_PY}" cargo test --locked --lib simd:: -- --nocapture \
+                2>&1 | tee .bench/simd_tests.txt
               "${BENCH_PY}" -m pytest -q \
                 "${GITHUB_WORKSPACE}/tests/test_accuracy.py" \
                 "${GITHUB_WORKSPACE}/tests/test_rensa.py"
@@ -339,8 +381,8 @@ jobs:
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
 
-      - name: Validate PR benchmark outputs
-        if: github.event_name == 'pull_request'
+      - name: Validate benchmark outputs
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -561,7 +603,7 @@ jobs:
           PY
 
       - name: Run full benchmark smoke
-        if: github.event_name == 'pull_request'
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -579,7 +621,7 @@ jobs:
             | tee .bench/full_head_smoke_summary.txt
 
       - name: Run push smoke benchmark
-        if: github.event_name != 'pull_request'
+        if: env.BENCH_COMPARE != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -591,12 +633,18 @@ jobs:
             "datasketch>=1.9" \
             "tqdm>=4.66"
           uv pip install \
-            --no-cache \
+            --no-cache --no-binary FastSketchLSH --verbose \
             --python .venv/bin/python \
-            "FastSketchLSH==1.0.1"
+            "FastSketchLSH==1.0.1" 2>&1 | tee .bench/fastsketch_build.txt
+          grep -F 'Selected SIMD:' .bench/fastsketch_build.txt | tee .bench/fastsketch_simd.txt
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
 
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+            export RENSA_REQUIRE_AVX512=1
+          fi
+          PYO3_PYTHON="${GITHUB_WORKSPACE}/.venv/bin/python" cargo test --locked --lib simd:: -- --nocapture \
+            2>&1 | tee .bench/simd_tests.txt
           .venv/bin/python -m pytest -q tests/test_accuracy.py tests/test_rensa.py
           .venv/bin/python benchmarks/accuracy_benchmark.py \
             --seeds 8 --skip-retrieval \
@@ -641,7 +689,7 @@ jobs:
             | tee .bench/full_head_smoke_summary.txt
 
       - name: Validate push smoke benchmark outputs
-        if: github.event_name != 'pull_request'
+        if: env.BENCH_COMPARE != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -680,8 +728,8 @@ jobs:
             .bench/*.json
             .bench/*.txt
 
-      - name: Cleanup PR base checkout
-        if: always() && github.event_name == 'pull_request'
+      - name: Cleanup benchmark base checkout
+        if: always() && env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -690,6 +738,7 @@ jobs:
           fi
 
   test:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     name: Run Tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -722,7 +771,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: "startsWith(github.ref, 'refs/tags/')"
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || !inputs.performance_only)
     needs: [rust-quality, cargo-deny, linux, musllinux, windows, macos, sdist, performance-check, test]
     permissions:
       contents: read

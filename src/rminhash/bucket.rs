@@ -38,6 +38,40 @@ impl HashValue for ReadOnlyCell<u64> {
 }
 
 #[inline]
+fn for_each_mixed<H: HashValue>(
+  hashes: &[H],
+  seed: u64,
+  mut visit: impl FnMut(u64),
+) {
+  let mut chunks = hashes.chunks_exact(8);
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if hashes.len() >= 8 {
+    if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
+      for chunk in chunks.by_ref() {
+        let mut values = std::array::from_fn(|i| chunk[i].value());
+        mixer.mix(&mut values, seed);
+        for mixed in values {
+          visit(mixed);
+        }
+      }
+      for hash in chunks.remainder() {
+        visit(splitmix64(hash.value() ^ seed));
+      }
+      return;
+    }
+  }
+  for chunk in chunks.by_ref() {
+    let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
+    for hash in values {
+      visit(splitmix64(hash ^ seed));
+    }
+  }
+  for hash in chunks.remainder() {
+    visit(splitmix64(hash.value() ^ seed));
+  }
+}
+
+#[inline]
 #[allow(clippy::cast_possible_truncation)]
 fn bucket_index(mut mixed: u64, count: u32) -> usize {
   let threshold = count.wrapping_neg() % count;
@@ -83,8 +117,7 @@ pub(super) fn apply<H: HashValue>(
         // value and later rounds cannot improve it.
         let seed = permutations[0].1 ^ BUCKET_DOMAIN;
         let shift = 32 - count.trailing_zeros();
-        let mut update = |hash| {
-          let mixed = splitmix64(hash ^ seed);
+        for_each_mixed(remaining, seed, |mixed| {
           #[allow(clippy::cast_possible_truncation)]
           let rank = (mixed >> (32 + RANK_BITS)) as u32;
           // Minima only decrease, so this stale maximum remains an upper
@@ -100,17 +133,7 @@ pub(super) fn apply<H: HashValue>(
           if rank < *value {
             *value = rank;
           }
-        };
-        let mut chunks = remaining.chunks_exact(8);
-        for chunk in chunks.by_ref() {
-          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
-          for hash in values {
-            update(hash);
-          }
-        }
-        for hash in chunks.remainder() {
-          update(hash.value());
-        }
+        });
         return;
       }
       apply_unfiltered(hash_values, permutations, soa, remaining);
@@ -166,8 +189,7 @@ fn apply_unfiltered<H: HashValue>(
     if let Ok(count) = u32::try_from(len) {
       if count.is_power_of_two() {
         let shift = 32 - count.trailing_zeros();
-        let mut update = |hash, conditional| {
-          let mixed = splitmix64(hash ^ stage_seed);
+        let mut update = |mixed: u64, conditional| {
           // Lemire's product selects these bits without rejection for powers
           // of two. A u64 shift also handles one bucket (shift 32).
           #[allow(clippy::cast_possible_truncation)]
@@ -188,43 +210,23 @@ fn apply_unfiltered<H: HashValue>(
         };
         let prefix_len = hashes.len().min(len.saturating_mul(8).max(1024));
         let (initial, remaining) = hashes.split_at(prefix_len);
-        let mut chunks = initial.chunks_exact(8);
-        for chunk in chunks.by_ref() {
-          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
-          for hash in values {
-            update(hash, false);
-          }
-        }
-        for hash in chunks.remainder() {
-          update(hash.value(), false);
-        }
-        let mut chunks = remaining.chunks_exact(8);
-        for chunk in chunks.by_ref() {
-          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
-          for hash in values {
-            update(hash, true);
-          }
-        }
-        for hash in chunks.remainder() {
-          update(hash.value(), true);
-        }
+        for_each_mixed(initial, stage_seed, |mixed| update(mixed, false));
+        for_each_mixed(remaining, stage_seed, |mixed| update(mixed, true));
       } else {
-        for hash in hashes {
-          let mixed = splitmix64(hash.value() ^ stage_seed);
+        for_each_mixed(hashes, stage_seed, |mixed| {
           let bucket = bucket_index(mixed, count);
           #[allow(clippy::cast_possible_truncation)]
           let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
           hash_values[bucket] = hash_values[bucket].min(rank);
-        }
+        });
       }
     } else {
-      for hash in hashes {
-        let mixed = splitmix64(hash.value() ^ stage_seed);
+      for_each_mixed(hashes, stage_seed, |mixed| {
         let bucket = wide_bucket_index(splitmix64(mixed), len);
         #[allow(clippy::cast_possible_truncation)]
         let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
         hash_values[bucket] = hash_values[bucket].min(rank);
-      }
+      });
     }
     let next_prefix = (round + 1) << FRACTION_BITS;
     if !fresh_short && hash_values.iter().all(|&value| value < next_prefix) {
