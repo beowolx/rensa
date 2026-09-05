@@ -17,27 +17,17 @@ const SEED2: u64 = 0x1319_8a2e_0370_7344;
 const PREVENT_TRIVIAL_ZERO_COLLAPSE: u64 = 0xa409_3822_299f_31d0;
 
 #[inline]
-const fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
-  u64::from_le_bytes([
-    bytes[offset],
-    bytes[offset + 1],
-    bytes[offset + 2],
-    bytes[offset + 3],
-    bytes[offset + 4],
-    bytes[offset + 5],
-    bytes[offset + 6],
-    bytes[offset + 7],
-  ])
+fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
+  let mut word = [0; 8];
+  word.copy_from_slice(&bytes[offset..offset + 8]);
+  u64::from_le_bytes(word)
 }
 
 #[inline]
-const fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
-  u32::from_le_bytes([
-    bytes[offset],
-    bytes[offset + 1],
-    bytes[offset + 2],
-    bytes[offset + 3],
-  ])
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+  let mut word = [0; 4];
+  word.copy_from_slice(&bytes[offset..offset + 4]);
+  u32::from_le_bytes(word)
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -251,6 +241,17 @@ mod tests {
 
     for bytes in data {
       assert_eq!(calculate_hash_fast(bytes), reference_hash_fast(bytes));
+    }
+  }
+
+  #[test]
+  fn calculate_hash_fast_matches_reference_for_lengths_and_alignments() {
+    let bytes: Vec<u8> = (0u8..=255).cycle().take(272).collect();
+    for offset in 0..16 {
+      for length in 0..=256 {
+        let input = &bytes[offset..offset + length];
+        assert_eq!(calculate_hash_fast(input), reference_hash_fast(input));
+      }
     }
   }
 

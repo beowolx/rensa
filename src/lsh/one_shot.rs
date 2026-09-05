@@ -469,13 +469,22 @@ impl RMinHashLSH {
     let raw = self.compute_raw_band_hashes(digest_matrix, rows)?;
 
     let band_match_counts = atomic_counters(rows);
-    let raw_match_counts = if recall_rescue.enabled {
+    let needs_rescue = recall_rescue.enabled
+      && (0..rows).any(|row| {
+        required_band_matches[row] == 1
+          && digest_matrix
+            .rho_source_token_count(row)
+            .is_some_and(|count| {
+              count >= recall_rescue.min_tokens
+                && count <= recall_rescue.max_tokens
+            })
+      });
+    let raw_match_counts = if needs_rescue {
       atomic_counters(rows)
     } else {
       Vec::new()
     };
-    let raw_counts_ref =
-      recall_rescue.enabled.then_some(raw_match_counts.as_slice());
+    let raw_counts_ref = needs_rescue.then_some(raw_match_counts.as_slice());
 
     let rest_bands: Vec<usize> = (0..self.num_bands)
       .filter(|band_idx| band_idx % fold != 0)
@@ -554,7 +563,7 @@ impl RMinHashLSH {
       sparse_verify_passes = sparse_verify_passes.saturating_add(passes);
     }
 
-    if recall_rescue.enabled {
+    if needs_rescue {
       let required_matches =
         u32::try_from(recall_rescue.required_band_matches).unwrap_or(u32::MAX);
       for row_index in 0..rows {
@@ -1132,8 +1141,8 @@ impl RMinHashLSH {
 #[cfg(test)]
 mod tests {
   use crate::lsh::one_shot::{
-    atomic_counters, count_scan_band, GroupVerifyContext, RawBandHashes,
-    SparseVerifyConfig,
+    atomic_counters, count_scan_band, window_rest_key, BandFoldingConfig,
+    GroupVerifyContext, RawBandHashes, RecallRescueConfig, SparseVerifyConfig,
   };
   use crate::lsh::RMinHashLSH;
   use crate::rminhash::RMinHashDigestMatrix;
@@ -1239,5 +1248,173 @@ mod tests {
         vec![u32::from(mask[0]), u32::from(mask[1]), 1, 0, 0]
       );
     }
+  }
+
+  // Independent eager reference: count raw collisions against every other row,
+  // and group complete folded keys directly before applying rescue.
+  fn eager_grouped_reference(
+    lsh: &RMinHashLSH,
+    matrix: &RMinHashDigestMatrix,
+    folding: &BandFoldingConfig,
+    required: &[u32],
+    verify: &SparseVerifyConfig,
+    rescue: &RecallRescueConfig,
+  ) -> (Vec<bool>, usize, usize) {
+    let rows = matrix.rows();
+    let raw = lsh.compute_raw_band_hashes(matrix, rows).unwrap();
+    let counters = atomic_counters(rows);
+    let context = GroupVerifyContext {
+      digest_matrix: matrix,
+      required_band_matches: required,
+      sparse_verify: verify,
+    };
+    let mut stats = (0, 0);
+    for window in 0..folding.effective_num_bands {
+      let first = window * folding.rho_band_fold;
+      let mut groups: FxHashMap<(u64, u64), Vec<u32>> = FxHashMap::default();
+      for row in 0..rows {
+        groups
+          .entry((
+            raw.get(row, first),
+            window_rest_key(&raw, first, folding.rho_band_fold, row),
+          ))
+          .or_default()
+          .push(u32::try_from(row).unwrap());
+      }
+      for members in groups.values().filter(|members| members.len() > 1) {
+        let (checks, passes) =
+          RMinHashLSH::process_collision_group(&context, members, &counters);
+        stats.0 += checks;
+        stats.1 += passes;
+      }
+    }
+    let flags = (0..rows)
+      .map(|row| {
+        let matches = counters[row].load(Ordering::Relaxed);
+        let eligible = rescue.enabled
+          && matches == 0
+          && required[row] == 1
+          && matrix.rho_source_token_count(row).is_some_and(|count| {
+            count >= rescue.min_tokens && count <= rescue.max_tokens
+          });
+        let raw_matches = (0..lsh.num_bands)
+          .filter(|&band| {
+            (0..rows).any(|other| {
+              other != row && raw.get(row, band) == raw.get(other, band)
+            })
+          })
+          .count();
+        matches >= required[row]
+          || (eligible && raw_matches >= rescue.required_band_matches)
+      })
+      .collect();
+    (flags, stats.0, stats.1)
+  }
+
+  #[test]
+  fn rescue_eligibility_matches_eager_flags_and_verification_statistics() {
+    let lsh = RMinHashLSH::from_validated(0.5, 4, 4);
+    let corpora = [
+      // No collisions; eligible candidates require rescue scans.
+      vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      // Every row already has folded matches.
+      vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4],
+      // First-band collisions alone meet a rescue threshold of two.
+      vec![1, 2, 3, 4, 1, 6, 3, 8, 9, 10, 11, 12, 9, 14, 11, 16],
+      // Only second bands collide; sparse rows must remain partners.
+      vec![1, 2, 3, 4, 5, 2, 7, 4, 9, 10, 11, 12, 13, 10, 15, 12],
+    ];
+    for data in corpora {
+      let matrix = RMinHashDigestMatrix::test_matrix(
+        4,
+        data,
+        vec![7, 8, 7, 8, 9, 10, 11, 12],
+        vec![1, 1, 1, 0],
+      );
+      for fold in [2, 4] {
+        let folding = BandFoldingConfig {
+          rho_band_fold: fold,
+          effective_num_bands: 4 / fold,
+          effective_band_size: fold,
+        };
+        for required in [[1, 1, 1, 1], [1, 2, 1, 2], [2, 2, 2, 2]] {
+          for (enabled, max_candidates) in
+            [(false, 1), (true, 0), (true, 1), (true, 4)]
+          {
+            let verify = SparseVerifyConfig {
+              enabled,
+              threshold: 0.75,
+              max_candidates,
+            };
+            for (enabled, min_tokens, max_tokens) in
+              [(false, 1, 1), (true, 1, 1), (true, 2, 3), (true, 0, 0)]
+            {
+              for required_band_matches in [1, 2, 4] {
+                let rescue = RecallRescueConfig {
+                  enabled,
+                  min_tokens,
+                  max_tokens,
+                  required_band_matches,
+                };
+                assert_eq!(
+                  lsh.grouped_one_shot_flags(
+                    &matrix,
+                    matrix.rows(),
+                    &folding,
+                    &required,
+                    &verify,
+                    &rescue
+                  ),
+                  Some(eager_grouped_reference(
+                    &lsh, &matrix, &folding, &required, &verify, &rescue
+                  )),
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn rescue_eligibility_large_batch_keeps_ineligible_collision_partners() {
+    let rows = 2048;
+    let data = (0..rows)
+      .flat_map(|row| {
+        let value = u32::try_from(row).unwrap();
+        [value, 17, value, 19]
+      })
+      .collect();
+    let matrix =
+      RMinHashDigestMatrix::test_matrix(4, data, vec![7; rows], vec![1; rows]);
+    let lsh = RMinHashLSH::from_validated(0.5, 4, 4);
+    let folding = BandFoldingConfig {
+      rho_band_fold: 2,
+      effective_num_bands: 2,
+      effective_band_size: 2,
+    };
+    let required: Vec<_> = (0..rows)
+      .map(|row| if row % 2 == 0 { 1 } else { 2 })
+      .collect();
+    let verify = SparseVerifyConfig {
+      enabled: true,
+      threshold: 0.75,
+      max_candidates: 1,
+    };
+    let rescue = RecallRescueConfig {
+      enabled: true,
+      min_tokens: 1,
+      max_tokens: 1,
+      required_band_matches: 2,
+    };
+    assert_eq!(
+      lsh.grouped_one_shot_flags(
+        &matrix, rows, &folding, &required, &verify, &rescue
+      ),
+      Some(eager_grouped_reference(
+        &lsh, &matrix, &folding, &required, &verify, &rescue
+      )),
+    );
   }
 }

@@ -316,25 +316,44 @@ def test_rminhash_rho_source_token_counts_are_reported():
     assert matrix.get_rho_source_token_counts() == [1, 3, 0]
 
 
-def test_rminhash_rho_adaptive_budget_is_deterministic_across_thread_counts():
+@pytest.mark.parametrize("num_perm", [64, 128])
+def test_rminhash_rho_adaptive_budget_is_deterministic_across_thread_counts(num_perm):
     code = """
 import json
-from rensa import RMinHash
-token_sets = [
-    ["tok" + str(i % 5) for i in range(4 + (doc_idx % 40))]
-    for doc_idx in range(96)
-]
+from rensa import RMinHash, RMinHashLSH
+import os
+token_sets = []
+for doc_idx in range(384):
+    size = (0, 1, 7, 8, 31, 64, 97, 256)[doc_idx % 8]
+    tokens = ["tok" + str(i % 37) for i in range(size)]
+    if doc_idx % 6 == 2:
+        tokens = [token + "é" for token in tokens]
+    elif doc_idx % 6 == 3:
+        tokens = [token.encode() for token in tokens]
+    elif doc_idx % 6 == 4:
+        tokens = tuple(tokens)
+    elif doc_idx % 6 == 5:
+        tokens = [bytearray(token.encode()) for token in tokens]
+    token_sets.append(tokens)
+num_perm = int(os.environ["TEST_NUM_PERM"])
 matrix = RMinHash.digest_matrix_from_token_sets_rho(
-    token_sets, num_perm=64, seed=42, probes=4
+    token_sets, num_perm=num_perm, seed=42, probes=4
 )
-print(json.dumps(matrix.to_rows()))
+lsh = RMinHashLSH(0.8, num_perm, 8)
+flags = lsh.query_duplicate_flags_matrix_one_shot(matrix)
+print(json.dumps([matrix.to_rows(), matrix.get_rho_source_token_counts(),
+                 matrix.get_rho_non_empty_counts(), flags,
+                 lsh.get_last_one_shot_sparse_verify_checks(),
+                 lsh.get_last_one_shot_sparse_verify_passes()]))
 """
 
-    def run_with_threads(threads: int) -> list[list[int]]:
+    def run_with_threads(threads: int, raw: bool):
         env = os.environ.copy()
         env["RAYON_NUM_THREADS"] = str(threads)
         env["RENSA_RHO_MEDIUM_TOKEN_BUDGET"] = "20"
         env["RENSA_RHO_MEDIUM_TOKEN_THRESHOLD"] = "96"
+        env["RENSA_RHO_RAW_PARALLEL"] = str(int(raw))
+        env["TEST_NUM_PERM"] = str(num_perm)
         proc = subprocess.run(
             [sys.executable, "-c", code],
             text=True,
@@ -344,7 +363,9 @@ print(json.dumps(matrix.to_rows()))
         )
         return json.loads(proc.stdout)
 
-    assert run_with_threads(1) == run_with_threads(8)
+    expected = run_with_threads(1, False)
+    assert run_with_threads(8, True) == expected
+    assert run_with_threads(8, False) == expected
 
 
 def test_rminhashlsh_sparse_required_band_matches_is_monotonic():

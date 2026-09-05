@@ -20,7 +20,7 @@ from pathlib import Path
 from rensa import CMinHash, RMinHash, RMinHashLSH
 
 CASES = (
-    "r_update", "c_update", "r_batch", "r_prehashed", "c_prehashed",
+    "hash", "r_update", "c_update", "r_batch", "r_prehashed", "c_prehashed",
     "rho", "rho_dedup", "query",
 )
 
@@ -65,6 +65,8 @@ def update_all(cls, docs, num_perm, seed):
 
 
 def operation(case, docs, hashes, num_perm, seed):
+    if case == "hash":
+        return lambda: RMinHash.hash_token_sets(docs), lambda result: result
     if case in ("r_update", "c_update"):
         cls = RMinHash if case == "r_update" else CMinHash
         extract = (lambda result: [s.digest() for s in result]) if case == "r_update" else (
