@@ -37,7 +37,8 @@ pub(super) trait HashValue {
     mixer: crate::simd::dispatch::Avx512Mixer,
     seed: u64,
     bound: u32,
-  ) -> Option<([u64; 8], u8)>
+    output: &mut [u64; 8],
+  ) -> u8
   where
     Self: Sized;
 }
@@ -65,8 +66,9 @@ impl HashValue for u64 {
     mixer: crate::simd::dispatch::Avx512Mixer,
     seed: u64,
     bound: u32,
-  ) -> Option<([u64; 8], u8)> {
-    mixer.mix_below::<{ 32 + RANK_BITS }>(values, seed, bound)
+    output: &mut [u64; 8],
+  ) -> u8 {
+    mixer.mix_below::<{ 32 + RANK_BITS }>(values, seed, bound, output)
   }
 }
 
@@ -93,8 +95,9 @@ impl HashValue for ReadOnlyCell<u64> {
     mixer: crate::simd::dispatch::Avx512Mixer,
     seed: u64,
     bound: u32,
-  ) -> Option<([u64; 8], u8)> {
-    mixer.mix_cells_below::<{ 32 + RANK_BITS }>(values, seed, bound)
+    output: &mut [u64; 8],
+  ) -> u8 {
+    mixer.mix_cells_below::<{ 32 + RANK_BITS }>(values, seed, bound, output)
   }
 }
 
@@ -143,16 +146,15 @@ fn for_each_mixed_below<H: HashValue>(
   if hashes.len() >= 8 {
     if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
       let mut chunks = hashes.chunks_exact(8);
+      let mut mixed = [0; 8];
       for chunk in chunks.by_ref() {
         if let Some(values) = chunk.first_chunk::<8>() {
-          if let Some((mixed, mut mask)) =
-            H::mix_chunk_below(values, mixer, seed, bound)
-          {
-            while mask != 0 {
-              let lane = mask.trailing_zeros() as usize;
-              visit(mixed[lane]);
-              mask &= mask - 1;
-            }
+          let mut mask =
+            H::mix_chunk_below(values, mixer, seed, bound, &mut mixed);
+          while mask != 0 {
+            let lane = mask.trailing_zeros() as usize;
+            visit(mixed[lane]);
+            mask &= mask - 1;
           }
         }
       }

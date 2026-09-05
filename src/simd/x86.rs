@@ -50,14 +50,15 @@ pub(super) unsafe fn splitmix64x8_avx512(
   }
 }
 
-/// Rejects a complete block before materializing mixed values when every rank
-/// is at least the supplied bound. Surviving lane positions are returned in mask.
+/// Returns surviving lane positions, writing all mixed values to output only
+/// when at least one rank is below the supplied bound.
 #[inline]
 pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
   values: *const u64,
   seed: u64,
   bound: u32,
-) -> Option<([u64; 8], u8)> {
+  output: &mut [u64; 8],
+) -> u8 {
   const CONSTANTS: [u64; 3] = [
     0x9e37_79b9_7f4a_7c15,
     0xbf58_476d_1ce4_e5b9,
@@ -67,13 +68,12 @@ pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
     assert!(RANK_SHIFT >= 33 && RANK_SHIFT < 64);
   }
   let state = [seed, u64::from(bound)];
-  let mut output = std::mem::MaybeUninit::<[u64; 8]>::uninit();
   let mask: u32;
   // SAFETY: the caller proves AVX-512F/DQ support and eight readable input
   // values. Every broadcast reads one initialized u64. The final xor only
   // changes bits 0..=32, so ranks beginning at bit 33 can be compared first.
-  // A nonzero mask always reaches the full 64-byte output store. No output is
-  // read when the mask is zero; all vector, mask and GPR changes are declared.
+  // A nonzero mask always reaches the full 64-byte output store; a zero mask
+  // leaves output unchanged. All vector, mask and GPR changes are declared.
   unsafe {
     core::arch::asm!(
       "vmovdqu64 zmm0, [{values}]",
@@ -111,14 +111,11 @@ pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
       out("k1") _,
       options(nostack),
     );
-    if mask == 0 {
-      None
-    } else {
-      // vpcmpuq writes exactly eight mask bits for eight u64 lanes.
-      #[allow(clippy::cast_possible_truncation)]
-      Some((output.assume_init(), mask as u8))
-    }
   }
+  // vpcmpuq writes exactly eight mask bits for eight u64 lanes.
+  #[allow(clippy::cast_possible_truncation)]
+  let mask = mask as u8;
+  mask
 }
 
 #[cfg(target_arch = "x86")]
@@ -262,6 +259,7 @@ mod tests {
       return;
     }
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5241_4e4b);
+    let mut output = [u64::MAX; 8];
     for seed in [0, 42, u64::MAX] {
       for batch in 0..128 {
         let input = if batch == 0 {
@@ -285,22 +283,18 @@ mod tests {
                   mask
                 }
               });
+          let before = output;
           // SAFETY: CPU/OS support and the complete eight-value input were established above.
           let actual = unsafe {
             crate::simd::x86::splitmix64x8_below_avx512::<34>(
               input.as_ptr(),
               seed,
               bound,
+              &mut output,
             )
           };
-          assert_eq!(
-            actual,
-            if mask == 0 {
-              None
-            } else {
-              Some((expected, mask))
-            }
-          );
+          assert_eq!(actual, mask);
+          assert_eq!(output, if mask == 0 { before } else { expected });
         }
       }
     }

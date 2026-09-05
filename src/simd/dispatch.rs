@@ -56,13 +56,15 @@ impl Avx512Mixer {
     values: &[u64; 8],
     seed: u64,
     bound: u32,
-  ) -> Option<([u64; 8], u8)> {
+    output: &mut [u64; 8],
+  ) -> u8 {
     // SAFETY: this capability proves AVX-512F/DQ; the array provides all eight values.
     unsafe {
       crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
         values.as_ptr(),
         seed,
         bound,
+        output,
       )
     }
   }
@@ -74,13 +76,15 @@ impl Avx512Mixer {
     values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
     seed: u64,
     bound: u32,
-  ) -> Option<([u64; 8], u8)> {
+    output: &mut [u64; 8],
+  ) -> u8 {
     // SAFETY: same whole-array, transparent-layout and feature proof as mix_cells.
     unsafe {
       crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
         values.as_ptr().cast::<u64>(),
         seed,
         bound,
+        output,
       )
     }
   }
@@ -618,14 +622,17 @@ mod tests {
       let buffer = PyBuffer::<u64>::get(&object).unwrap();
       let cells = buffer.as_slice(py).unwrap();
       let chunk = cells[1..].first_chunk::<8>().unwrap();
+      let mut raw_output = [17; 8];
+      let mut cell_output = raw_output;
       for seed in [0, 42, u64::MAX] {
         let expected = mixer.mix(&values, seed);
         assert_eq!(mixer.mix_cells(chunk, seed), expected);
         for bound in [0, 1, 1 << 25, 1 << 30] {
           assert_eq!(
-            mixer.mix_below::<34>(&values, seed, bound),
-            mixer.mix_cells_below::<34>(chunk, seed, bound),
+            mixer.mix_below::<34>(&values, seed, bound, &mut raw_output),
+            mixer.mix_cells_below::<34>(chunk, seed, bound, &mut cell_output),
           );
+          assert_eq!(raw_output, cell_output);
         }
       }
       assert_eq!(

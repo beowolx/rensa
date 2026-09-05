@@ -14,6 +14,10 @@ on:
         description: Run only strict performance comparisons against origin/main
         type: boolean
         default: false
+      require_avx512:
+        description: Fail before benchmarking if the runner lacks AVX-512F/DQ
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -256,12 +260,19 @@ jobs:
 
       - name: Record benchmark hardware and compilers
         shell: bash
+        env:
+          REQUIRE_AVX512: ${{ inputs.require_avx512 || false }}
         run: |
           set -euo pipefail
           mkdir -p .bench
           git rev-parse HEAD | tee .bench/head_commit.txt
           lscpu --json > .bench/cpu.json
           lscpu | tee .bench/cpu.txt
+          if [ "${REQUIRE_AVX512}" = "true" ] && \
+             { ! grep -qw avx512f /proc/cpuinfo || ! grep -qw avx512dq /proc/cpuinfo; }; then
+            echo "Requested AVX-512F/DQ is unavailable on this runner." >&2
+            exit 1
+          fi
           {
             c++ --version
             rustc -vV
