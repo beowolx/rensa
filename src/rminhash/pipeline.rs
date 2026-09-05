@@ -131,9 +131,7 @@ impl RMinHash {
     }
 
     let flat = std::mem::take(token_hashes_chunk);
-    let flat_capacity = flat.capacity();
     let ranges = std::mem::take(token_hash_ranges);
-    let ranges_capacity = ranges.capacity();
     let rows = ranges.len();
     let matrix_start = matrix_data.len();
     matrix_data.resize(matrix_start + rows * context.num_perm, u32::MAX);
@@ -157,8 +155,10 @@ impl RMinHash {
       });
     });
 
-    *token_hashes_chunk = Vec::with_capacity(flat_capacity);
-    *token_hash_ranges = Vec::with_capacity(ranges_capacity);
+    *token_hashes_chunk = job.flat;
+    token_hashes_chunk.clear();
+    *token_hash_ranges = job.ranges;
+    token_hash_ranges.clear();
   }
 
   pub(in crate::rminhash) fn build_token_hash_rows(
@@ -396,9 +396,7 @@ impl RMinHash {
 
         if token_hash_ranges.len() == config.doc_chunk_size {
           let flat = std::mem::take(&mut token_hashes_chunk);
-          let flat_capacity = flat.capacity();
           let ranges = std::mem::take(&mut token_hash_ranges);
-          let ranges_capacity = ranges.capacity();
           let row_count = ranges.len();
           let output_start = chunk_row_start * num_perm;
           let job = DigestChunkJob {
@@ -416,8 +414,10 @@ impl RMinHash {
             permutation_cache.as_mut(),
           );
           chunk_row_start += row_count;
-          token_hashes_chunk = Vec::with_capacity(flat_capacity);
-          token_hash_ranges = Vec::with_capacity(ranges_capacity);
+          token_hashes_chunk = job.flat;
+          token_hashes_chunk.clear();
+          token_hash_ranges = job.ranges;
+          token_hash_ranges.clear();
         }
       }
 

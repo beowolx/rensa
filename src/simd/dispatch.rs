@@ -33,7 +33,7 @@ pub(super) const fn split_u64_words(value: u64) -> (u32, u32) {
 impl PermutationSoA {
   #[must_use]
   #[cfg(not(target_arch = "aarch64"))]
-  pub fn from_permutations(permutations: &[(u64, u64)]) -> Self {
+  pub const fn from_permutations(permutations: &[(u64, u64)]) -> Self {
     Self {
       len: permutations.len(),
     }
@@ -436,6 +436,87 @@ mod tests {
         }
       }
       assert_eq!(soa_values, reference_values);
+    }
+  }
+
+  fn assert_kernels_match_naive(
+    initial: &[u32],
+    permutations: &[(u64, u64)],
+    hashes: &[u64],
+  ) {
+    let mut expected = initial.to_vec();
+    for (value, &(a, b)) in expected.iter_mut().zip(permutations) {
+      for &hash in hashes {
+        // Independent wide-integer oracle: truncation modulo 2^64, then high word.
+        let result = (u128::from(a) * u128::from(hash) + u128::from(b)) >> 32;
+        *value =
+          (*value).min(u32::try_from(result & u128::from(u32::MAX)).unwrap());
+      }
+    }
+    let mut scalar = initial.to_vec();
+    scalar_apply_hash_batch_to_values(&mut scalar, permutations, hashes);
+    assert_eq!(scalar, expected);
+
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+      let mut actual = initial.to_vec();
+      crate::simd::arm64_neon::apply_hash_batch_to_values_neon(
+        &mut actual,
+        &PermutationSoA::from_permutations(permutations),
+        hashes,
+      );
+      assert_eq!(actual, expected, "NEON mismatch");
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+      let mut actual = initial.to_vec();
+      crate::simd::x86::apply_hash_batch_to_values_avx2(
+        &mut actual,
+        permutations,
+        hashes,
+      );
+      assert_eq!(actual, expected, "AVX2 mismatch");
+    }
+  }
+
+  #[test]
+  fn kernels_match_naive_for_all_small_sizes_and_tails() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5441_494c);
+    for num_perm in 0..=33 {
+      let permutations: Vec<_> = (0..num_perm)
+        .map(|_| (rng.next_u64(), rng.next_u64()))
+        .collect();
+      for num_hashes in 0..=17 {
+        let hashes: Vec<_> = (0..num_hashes).map(|_| rng.next_u64()).collect();
+        for num_values in [num_perm / 2, num_perm, num_perm + 3] {
+          let initial: Vec<_> =
+            (0..num_values).map(|_| rng.next_u32()).collect();
+          assert_kernels_match_naive(&initial, &permutations, &hashes);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn kernels_match_naive_for_full_width_carries_and_overflow() {
+    let words = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+    let mut boundaries = Vec::new();
+    for &high in &words {
+      for &low in &words {
+        boundaries.push((high << 32) | low);
+      }
+    }
+    let permutations: Vec<_> = boundaries
+      .iter()
+      .flat_map(|&a| boundaries.iter().map(move |&b| (a, b)))
+      .collect();
+    for hash in boundaries {
+      // Single hashes ensure a smaller minimum cannot hide an incorrect lane.
+      assert_kernels_match_naive(
+        &vec![u32::MAX; permutations.len()],
+        &permutations,
+        &[hash],
+      );
     }
   }
 }

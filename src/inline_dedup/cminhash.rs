@@ -233,7 +233,7 @@ impl CMinHashDeduplicator {
     }
 
     for existing_minhash in self.existing_signatures.values() {
-      if minhash.jaccard_unchecked(existing_minhash) >= self.threshold {
+      if minhash.jaccard_at_least_unchecked(existing_minhash, self.threshold) {
         return Ok(true);
       }
     }
@@ -269,7 +269,7 @@ impl CMinHashDeduplicator {
     let mut duplicates = Vec::new();
 
     for (key, existing_minhash) in &self.existing_signatures {
-      if minhash.jaccard_unchecked(existing_minhash) >= self.threshold {
+      if minhash.jaccard_at_least_unchecked(existing_minhash, self.threshold) {
         duplicates.push(key.clone());
       }
     }

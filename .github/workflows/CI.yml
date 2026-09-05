@@ -34,7 +34,9 @@ jobs:
         with:
           python-version: "3.9"
       - name: Run Rust tests
-        run: cargo test --locked
+        run: |
+          lscpu
+          cargo test --locked
       - name: Lint with clippy
         run: cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings -D clippy::pedantic -D clippy::nursery
 
@@ -487,6 +489,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-check-artifacts
+          include-hidden-files: true
           path: |
             .bench/*.json
             .bench/*.txt

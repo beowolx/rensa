@@ -65,6 +65,8 @@ The global allocator is MiMalloc, which handles the batch-allocate-then-free pat
 
 Rensa also includes C-MinHash, based on the [C-MinHash paper](https://arxiv.org/abs/2109.03337). It uses a two-stage scheme (sigma then pi) that reduces the need for k independent permutations by deriving the k slots from a small parameter set. In this implementation, that means `sigma_a/sigma_b` and `pi_c/pi_d`, with precomputed pi terms for speed. The paper proves tighter variance bounds than standard MinHash. In practice, both variants produce similar results and R-MinHash is usually a bit faster. Use R-MinHash unless you have a specific reason not to.
 
+For batches with at least 128 tokens and 128 permutations, C-MinHash sorts the transformed token values and finds the minimum for each wrapping offset by binary search. This produces the same signature with O(n log n + k log n) work instead of O(nk), using an additional 8-byte temporary value per token. Streaming duplicate checks stop comparing a pair once its remaining signature slots cannot meet the threshold.
+
 ## Installation
 
 ```bash
@@ -203,7 +205,7 @@ for doc in document_stream:
 | -------------------------------- | ---------------------------------------------------------- |
 | `__init__(num_perm, seed)`       | Create a MinHash with `num_perm` permutations              |
 | `update(items)`                  | Add items (list of strings, bytes, or iterables)           |
-| `jaccard(other)`                 | Estimate Jaccard similarity (requires matching `num_perm`) |
+| `jaccard(other)`                 | Estimate Jaccard similarity (requires matching `num_perm` and `seed`) |
 | `digest()`                       | Return the signature as a list of integers                 |
 | `from_token_sets(...)`           | Build many MinHash objects from token iterables            |
 | `digests_from_token_sets(...)`   | Compute many digests in one call                           |

@@ -177,15 +177,19 @@ fn count_scan_band(
   bucket_state_by_hash.clear();
   for row_index in 0..raw.rows {
     let band_hash = raw.get(row_index, band_idx);
-    if let Some(state) = bucket_state_by_hash.get_mut(&band_hash) {
-      if *state & RESCUE_COLLIDED_BIT == 0 {
-        let first_row = rescue_state_first_row(*state);
-        *state |= RESCUE_COLLIDED_BIT;
-        raw_match_counts[first_row].fetch_add(1, Ordering::Relaxed);
+    match bucket_state_by_hash.entry(band_hash) {
+      Entry::Vacant(entry) => {
+        entry.insert(usize_to_u64_lowbits(row_index));
       }
-      raw_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
-    } else {
-      bucket_state_by_hash.insert(band_hash, usize_to_u64_lowbits(row_index));
+      Entry::Occupied(mut entry) => {
+        let state = entry.get_mut();
+        if *state & RESCUE_COLLIDED_BIT == 0 {
+          let first_row = rescue_state_first_row(*state);
+          *state |= RESCUE_COLLIDED_BIT;
+          raw_match_counts[first_row].fetch_add(1, Ordering::Relaxed);
+        }
+        raw_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
+      }
     }
   }
 }
@@ -772,11 +776,14 @@ impl RMinHashLSH {
         {
           flags[row_index] = true;
         }
-        if let Some(&first_row) = first_row_by_hash.get(&band_hash) {
-          flags[row_index] = true;
-          flags[first_row] = true;
-        } else {
-          first_row_by_hash.insert(band_hash, row_index);
+        match first_row_by_hash.entry(band_hash) {
+          Entry::Vacant(entry) => {
+            entry.insert(row_index);
+          }
+          Entry::Occupied(entry) => {
+            flags[row_index] = true;
+            flags[*entry.get()] = true;
+          }
         }
       }
     }
@@ -870,6 +877,35 @@ impl RMinHashLSH {
   ) -> (usize, usize) {
     let mut sparse_verify_checks = 0usize;
     let mut sparse_verify_passes = 0usize;
+
+    if let &[left, right] = members {
+      let left = left as usize;
+      let right = right as usize;
+      let needs_verify = ctx.sparse_verify.enabled
+        && (ctx.required_band_matches[left] > 1
+          || ctx.required_band_matches[right] > 1);
+      let matched = if needs_verify {
+        if ctx.sparse_verify.max_candidates == 0 {
+          return (0, 0);
+        }
+        sparse_verify_checks = 2;
+        let passed = Self::sparse_verify_pair_passes(
+          ctx.digest_matrix,
+          left,
+          right,
+          ctx.sparse_verify.threshold,
+        );
+        sparse_verify_passes = if passed { 2 } else { 0 };
+        passed
+      } else {
+        true
+      };
+      if matched {
+        band_match_counts[left].fetch_add(1, Ordering::Relaxed);
+        band_match_counts[right].fetch_add(1, Ordering::Relaxed);
+      }
+      return (sparse_verify_checks, sparse_verify_passes);
+    }
 
     for &row_index in members {
       let row_index = row_index as usize;
@@ -994,19 +1030,24 @@ impl RMinHashLSH {
         },
         |precomputed| precomputed.hashes[row_index * self.num_bands + band_idx],
       );
-      if let Some(bucket_state) = bucket_state_by_hash.get_mut(&band_hash) {
-        if *bucket_state & RESCUE_COLLIDED_BIT == 0 {
-          let first_row = rescue_state_first_row(*bucket_state);
-          *bucket_state |= RESCUE_COLLIDED_BIT;
-          if rescue_candidate_mask[first_row] == 1 {
-            rescue_band_match_counts[first_row].fetch_add(1, Ordering::Relaxed);
+      match bucket_state_by_hash.entry(band_hash) {
+        Entry::Vacant(entry) => {
+          entry.insert(usize_to_u64_lowbits(row_index));
+        }
+        Entry::Occupied(mut entry) => {
+          let bucket_state = entry.get_mut();
+          if *bucket_state & RESCUE_COLLIDED_BIT == 0 {
+            let first_row = rescue_state_first_row(*bucket_state);
+            *bucket_state |= RESCUE_COLLIDED_BIT;
+            if rescue_candidate_mask[first_row] == 1 {
+              rescue_band_match_counts[first_row]
+                .fetch_add(1, Ordering::Relaxed);
+            }
+          }
+          if *rescue_candidate == 1 {
+            rescue_band_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
           }
         }
-        if *rescue_candidate == 1 {
-          rescue_band_match_counts[row_index].fetch_add(1, Ordering::Relaxed);
-        }
-      } else {
-        bucket_state_by_hash.insert(band_hash, usize_to_u64_lowbits(row_index));
       }
     }
   }
@@ -1084,6 +1125,119 @@ impl RMinHashLSH {
         band_match_counts[row_index]
           .store(required_band_matches[row_index], Ordering::Relaxed);
       }
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::lsh::one_shot::{
+    atomic_counters, count_scan_band, GroupVerifyContext, RawBandHashes,
+    SparseVerifyConfig,
+  };
+  use crate::lsh::RMinHashLSH;
+  use crate::rminhash::RMinHashDigestMatrix;
+  use rustc_hash::FxHashMap;
+  use std::sync::atomic::Ordering;
+
+  #[test]
+  fn two_member_verification_preserves_counts_and_statistics() {
+    for enabled in [false, true] {
+      for max_candidates in [0, 1, 4] {
+        for required in [[1, 1], [1, 2], [2, 1], [2, 2]] {
+          for active in [vec![1, 1], vec![1, 0], vec![0, 1]] {
+            for matching in [false, true] {
+              let signatures = if matching {
+                vec![7, 8, 7, 8]
+              } else {
+                vec![7, 8, 9, 10]
+              };
+              let matrix = RMinHashDigestMatrix::test_matrix(
+                1,
+                vec![0, 0],
+                signatures,
+                active.clone(),
+              );
+              let config = SparseVerifyConfig {
+                enabled,
+                threshold: 0.75,
+                max_candidates,
+              };
+              let ctx = GroupVerifyContext {
+                digest_matrix: &matrix,
+                required_band_matches: &required,
+                sparse_verify: &config,
+              };
+              let counters = atomic_counters(2);
+              let actual =
+                RMinHashLSH::process_collision_group(&ctx, &[0, 1], &counters);
+              let needs_verify = enabled && required.contains(&2);
+              let checked = needs_verify && max_candidates > 0;
+              let passed = matching || active.contains(&0);
+              let matched = !needs_verify || (checked && passed);
+              assert_eq!(
+                actual,
+                (usize::from(checked) * 2, usize::from(checked && passed) * 2)
+              );
+              for counter in &counters {
+                assert_eq!(counter.load(Ordering::Relaxed), u32::from(matched));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn band_counts_count_each_colliding_row_once_and_reset_scratch() {
+    let raw = RawBandHashes {
+      num_bands: 2,
+      rows: 5,
+      hashes: vec![10, 1, 10, 2, 10, 3, 20, 4, 30, 4],
+    };
+    let counters = atomic_counters(raw.rows);
+    let mut scratch = FxHashMap::default();
+    count_scan_band(&raw, 0, &counters, &mut scratch);
+    count_scan_band(&raw, 1, &counters, &mut scratch);
+    let counts: Vec<_> = counters
+      .iter()
+      .map(|count| count.load(Ordering::Relaxed))
+      .collect();
+    assert_eq!(counts, vec![1, 1, 1, 1, 1]);
+  }
+
+  #[test]
+  fn simple_flags_and_rescue_counts_preserve_first_and_later_members() {
+    let matrix = RMinHashDigestMatrix::test_matrix(
+      1,
+      vec![10, 10, 10, 20, 30],
+      Vec::new(),
+      Vec::new(),
+    );
+    let lsh = RMinHashLSH::from_validated(0.5, 1, 1);
+    assert_eq!(
+      lsh.simple_one_shot_flags(&matrix, 5, 1, 1, 1, false),
+      vec![true, true, true, false, false],
+    );
+    for mask in [[1, 0, 1, 1, 1], [0, 1, 1, 1, 1]] {
+      let counters = atomic_counters(5);
+      lsh.recall_rescue_band_counts(
+        &matrix,
+        None,
+        0,
+        &mask,
+        &counters,
+        &mut FxHashMap::default(),
+      );
+      let counts: Vec<_> = counters
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect();
+      assert_eq!(
+        counts,
+        vec![u32::from(mask[0]), u32::from(mask[1]), 1, 0, 0]
+      );
     }
   }
 }

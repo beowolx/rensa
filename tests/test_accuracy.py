@@ -74,3 +74,18 @@ def test_rho_empty_identical_and_disjoint_sets():
     assert any(value != 2**32 - 1 for value in rows[2])
     # Matching empty buckets are not evidence that the source sets overlap.
     assert all(a != b or a == 2**32 - 1 for a, b in zip(rows[2], rows[4]))
+
+
+@pytest.mark.parametrize("queue_capacity", [0, 2])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_batch_chunk_reuse_preserves_each_signature(monkeypatch, queue_capacity, streaming):
+    monkeypatch.setenv("RENSA_DOC_CHUNK_SIZE", "256")
+    monkeypatch.setenv("RENSA_PIPELINE_QUEUE_CAP", str(queue_capacity))
+    documents = [[f"row-{row}", f"group-{row % 7}"] for row in range(600)]
+    expected = []
+    for tokens in documents:
+        sketch = RMinHash(num_perm=17, seed=42)
+        sketch.update(tokens)
+        expected.append(sketch.digest())
+    source = (tokens for tokens in documents) if streaming else documents
+    assert RMinHash.digest_matrix_from_token_sets(source, 17, 42).to_rows() == expected

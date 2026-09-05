@@ -146,6 +146,25 @@ impl CMinHash {
     ratio_usize(equal_count, self.num_perm)
   }
 
+  #[inline]
+  pub(crate) fn jaccard_at_least_unchecked(
+    &self,
+    other: &Self,
+    threshold: f64,
+  ) -> bool {
+    let mut mismatches = 0;
+    for (left, right) in
+      self.hash_values.chunks(8).zip(other.hash_values.chunks(8))
+    {
+      mismatches += left.iter().zip(right).filter(|(a, b)| a != b).count();
+      // Even if all remaining lanes match, this pair cannot reach threshold.
+      if ratio_usize(self.num_perm - mismatches, self.num_perm) < threshold {
+        return false;
+      }
+    }
+    true
+  }
+
   fn apply_sigma_batch_to_values(
     hash_values: &mut [u64],
     pi_precomputed: &[u64],
@@ -204,6 +223,25 @@ impl CMinHash {
     pi_c: u64,
     pi_precomputed: &[u64],
   ) {
+    if token_hashes.len() >= 128 && hash_values.len() >= 128 {
+      let a = pi_c.wrapping_mul(sigma_a);
+      let b = pi_c.wrapping_mul(sigma_b);
+      let mut bases: Vec<u64> = token_hashes
+        .iter()
+        .map(|&hash| a.wrapping_mul(hash).wrapping_add(b))
+        .collect();
+      bases.sort_unstable();
+
+      for (value, &pi) in hash_values.iter_mut().zip(pi_precomputed) {
+        // Wrapping addition is smallest at the first base that wraps, or
+        // the smallest base when none wraps. Equal bases wrap exactly to zero.
+        let index = bases.partition_point(|&base| base < pi.wrapping_neg());
+        let base = bases.get(index).copied().unwrap_or(bases[0]);
+        *value = (*value).min(base.wrapping_add(pi));
+      }
+      return;
+    }
+
     let mut sigma_batch = SigmaBatch::default();
     for &token_hash in token_hashes {
       let sigma_h = sigma_a.wrapping_mul(token_hash).wrapping_add(sigma_b);
@@ -304,5 +342,127 @@ impl CMinHash {
   /// Updates the `CMinHash` with a new set of items from a vector of strings.
   pub fn update_vec(&mut self, items: Vec<String>) {
     self.update_iter(items);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::cminhash::{CMinHash, CMinHashParams};
+  use rand_core::{RngCore, SeedableRng};
+  use rand_xoshiro::Xoshiro256PlusPlus;
+
+  #[test]
+  fn token_hash_updates_match_naive_wrapping_permutations() {
+    for seed in [0, 1, 42, u64::MAX] {
+      let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+      for num_perm in [1, 16, 128, 129, 512] {
+        let params = CMinHashParams::new(num_perm, seed);
+        for token_len in [0, 1, 31, 32, 127, 128, 1024] {
+          let mut hashes: Vec<u64> =
+            (0..token_len).map(|_| rng.next_u64()).collect();
+          for (index, hash) in hashes.iter_mut().take(4).enumerate() {
+            *hash = if index % 2 == 0 { 0 } else { u64::MAX };
+          }
+          for populated in [false, true] {
+            let initial: Vec<u64> = (0..num_perm)
+              .map(|_| if populated { rng.next_u64() } else { u64::MAX })
+              .collect();
+            let mut expected = initial.clone();
+            for &hash in &hashes {
+              let sigma = params
+                .sigma_a
+                .wrapping_mul(hash)
+                .wrapping_add(params.sigma_b);
+              for (k, value) in expected.iter_mut().enumerate() {
+                let permuted = params
+                  .pi_c
+                  .wrapping_mul(sigma.wrapping_add(k as u64))
+                  .wrapping_add(params.pi_d);
+                *value = (*value).min(permuted);
+              }
+            }
+            let mut actual = initial.clone();
+            CMinHash::apply_token_hashes_to_values(
+              &mut actual,
+              &hashes,
+              params.sigma_a,
+              params.sigma_b,
+              params.pi_c,
+              &params.pi_precomputed,
+            );
+            assert_eq!(actual, expected);
+
+            let mut incremental = initial;
+            for chunk in hashes.chunks(129) {
+              CMinHash::apply_token_hashes_to_values(
+                &mut incremental,
+                chunk,
+                params.sigma_a,
+                params.sigma_b,
+                params.pi_c,
+                &params.pi_precomputed,
+              );
+            }
+            assert_eq!(incremental, expected);
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn sorted_successors_handle_exact_wrap_and_zero_offset() {
+    let hashes = [0, u64::MAX].repeat(64);
+    let pi: Vec<u64> = [0, 1, u64::MAX, 2].repeat(32);
+    let mut actual = vec![u64::MAX; pi.len()];
+    CMinHash::apply_token_hashes_to_values(&mut actual, &hashes, 1, 0, 1, &pi);
+    let expected: Vec<u64> = pi
+      .iter()
+      .map(|&offset| offset.min(u64::MAX.wrapping_add(offset)))
+      .collect();
+    assert_eq!(actual, expected);
+  }
+  #[test]
+  fn threshold_predicate_matches_full_jaccard_at_float_boundaries(
+  ) -> pyo3::PyResult<()> {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(78);
+    for num_perm in [1, 7, 8, 17, 63, 129] {
+      let mut left = CMinHash::new(num_perm, 42)?;
+      let mut right = CMinHash::new(num_perm, 42)?;
+      for matching in 0..=num_perm {
+        for (index, (a, b)) in left
+          .hash_values
+          .iter_mut()
+          .zip(&mut right.hash_values)
+          .enumerate()
+        {
+          *a = rng.next_u64();
+          *b = if index < matching { *a } else { !*a };
+        }
+        // Shuffle both signatures together to distribute matches throughout
+        // the chunks, while retaining exactly the chosen number of matches.
+        for index in 1..num_perm {
+          let other =
+            usize::try_from(rng.next_u64() % (index as u64 + 1)).unwrap();
+          left.hash_values.swap(index, other);
+          right.hash_values.swap(index, other);
+        }
+        let similarity = left.jaccard_unchecked(&right);
+        let below = if similarity == 0.0 {
+          0.0
+        } else {
+          f64::from_bits(similarity.to_bits() - 1)
+        };
+        let above = f64::from_bits(similarity.to_bits() + 1);
+        for threshold in [0.0, 1.0, 0.8, similarity, below, above] {
+          assert_eq!(
+            left.jaccard_at_least_unchecked(&right, threshold),
+            similarity >= threshold,
+            "num_perm={num_perm}, matching={matching}, threshold={threshold}"
+          );
+        }
+      }
+    }
+    Ok(())
   }
 }

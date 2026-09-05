@@ -2,11 +2,15 @@ use crate::utils::permute_hash;
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::{
-  __m256i, _mm256_loadu_si256, _mm256_min_epu32, _mm256_storeu_si256,
+  __m256i, _mm256_add_epi32, _mm256_add_epi64, _mm256_blend_epi32,
+  _mm256_loadu_si256, _mm256_min_epu32, _mm256_mul_epu32, _mm256_mullo_epi32,
+  _mm256_set1_epi32, _mm256_srli_epi64, _mm256_storeu_si256,
 };
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-  __m256i, _mm256_loadu_si256, _mm256_min_epu32, _mm256_storeu_si256,
+  __m256i, _mm256_add_epi32, _mm256_add_epi64, _mm256_blend_epi32,
+  _mm256_loadu_si256, _mm256_min_epu32, _mm256_mul_epu32, _mm256_mullo_epi32,
+  _mm256_set1_epi32, _mm256_srli_epi64, _mm256_storeu_si256,
 };
 
 pub(super) fn apply_hash_batch_to_values_avx2(
@@ -31,6 +35,7 @@ pub(super) fn apply_hash_batch_to_values_avx2(
   }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #[target_feature(enable = "avx2")]
 unsafe fn apply_hash_batch_to_values_avx2_impl(
   hash_values: &mut [u32],
@@ -43,19 +48,32 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
   for (values, perms) in value_chunks.by_ref().zip(perm_chunks.by_ref()) {
     // SAFETY: `values` comes from `chunks_exact_mut(8)`, so it has exactly 8 lanes.
     let mut current = unsafe { load_u32x8(values.as_ptr()) };
+    // Split coefficients once per chunk, outside the hash loop. Keep the
+    // existing AoS representation so construction and scalar dispatch are unchanged.
+    let a_lo: [u32; 8] = std::array::from_fn(|lane| perms[lane].0 as u32);
+    let a_hi: [u32; 8] =
+      std::array::from_fn(|lane| (perms[lane].0 >> 32) as u32);
+    let b_even: [u64; 4] = std::array::from_fn(|lane| perms[lane * 2].1);
+    let b_odd: [u64; 4] = std::array::from_fn(|lane| perms[lane * 2 + 1].1);
+    // SAFETY: each local array contains exactly 32 readable bytes.
+    let a_lo = unsafe { load_u32x8(a_lo.as_ptr()) };
+    let a_hi = unsafe { load_u32x8(a_hi.as_ptr()) };
+    let b_even = unsafe { load_u32x8(b_even.as_ptr().cast()) };
+    let b_odd = unsafe { load_u32x8(b_odd.as_ptr().cast()) };
+    let a_lo_odd = _mm256_srli_epi64(a_lo, 32);
     for &item_hash in hash_batch {
-      let permuted = [
-        permute_hash(item_hash, perms[0].0, perms[0].1),
-        permute_hash(item_hash, perms[1].0, perms[1].1),
-        permute_hash(item_hash, perms[2].0, perms[2].1),
-        permute_hash(item_hash, perms[3].0, perms[3].1),
-        permute_hash(item_hash, perms[4].0, perms[4].1),
-        permute_hash(item_hash, perms[5].0, perms[5].1),
-        permute_hash(item_hash, perms[6].0, perms[6].1),
-        permute_hash(item_hash, perms[7].0, perms[7].1),
-      ];
-      // SAFETY: `permuted` is a local `[u32; 8]`, valid for an 8-lane load.
-      let permuted_vec = unsafe { load_u32x8(permuted.as_ptr()) };
+      let h_lo = _mm256_set1_epi32(item_hash as i32);
+      let h_hi = _mm256_set1_epi32((item_hash >> 32) as i32);
+      // high32(a*h+b) = high32(a_lo*h_lo+b) + a_hi*h_lo + a_lo*h_hi
+      // modulo 2^32. Full-width b additions include the low-word carry.
+      let even = _mm256_add_epi64(_mm256_mul_epu32(a_lo, h_lo), b_even);
+      let odd = _mm256_add_epi64(_mm256_mul_epu32(a_lo_odd, h_lo), b_odd);
+      let upper = _mm256_blend_epi32(_mm256_srli_epi64(even, 32), odd, 0xaa);
+      let cross = _mm256_add_epi32(
+        _mm256_mullo_epi32(a_hi, h_lo),
+        _mm256_mullo_epi32(a_lo, h_hi),
+      );
+      let permuted_vec = _mm256_add_epi32(upper, cross);
       current = _mm256_min_epu32(current, permuted_vec);
     }
     // SAFETY: `values` is still a valid mutable 8-lane chunk here.
@@ -76,12 +94,14 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
 }
 
 #[inline]
+#[allow(clippy::cast_ptr_alignment)] // loadu accepts unaligned addresses.
 unsafe fn load_u32x8(ptr: *const u32) -> __m256i {
   // SAFETY: caller guarantees `ptr` is valid for 8 contiguous `u32` values.
   unsafe { _mm256_loadu_si256(ptr.cast::<__m256i>()) }
 }
 
 #[inline]
+#[allow(clippy::cast_ptr_alignment)] // storeu accepts unaligned addresses.
 unsafe fn store_u32x8(ptr: *mut u32, value: __m256i) {
   // SAFETY: caller guarantees `ptr` is valid for 8 contiguous mutable `u32` values.
   unsafe { _mm256_storeu_si256(ptr.cast::<__m256i>(), value) };
