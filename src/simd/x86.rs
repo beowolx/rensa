@@ -48,6 +48,20 @@ unsafe fn apply_hash_batch_to_values_avx2_impl(
   for (values, perms) in value_chunks.by_ref().zip(perm_chunks.by_ref()) {
     // SAFETY: `values` comes from `chunks_exact_mut(8)`, so it has exactly 8 lanes.
     let mut current = unsafe { load_u32x8(values.as_ptr()) };
+    // Short batches do not amortize the vector coefficient setup.
+    if hash_batch.len() < 16 {
+      for &item_hash in hash_batch {
+        let permuted: [u32; 8] = std::array::from_fn(|lane| {
+          permute_hash(item_hash, perms[lane].0, perms[lane].1)
+        });
+        // SAFETY: the local array contains eight readable lanes.
+        let permuted = unsafe { load_u32x8(permuted.as_ptr()) };
+        current = _mm256_min_epu32(current, permuted);
+      }
+      // SAFETY: values contains exactly eight writable lanes.
+      unsafe { store_u32x8(values.as_mut_ptr(), current) };
+      continue;
+    }
     // Split coefficients once per chunk, outside the hash loop. Keep the
     // existing AoS representation so construction and scalar dispatch are unchanged.
     let a_lo: [u32; 8] = std::array::from_fn(|lane| perms[lane].0 as u32);

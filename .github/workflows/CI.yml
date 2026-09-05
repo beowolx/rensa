@@ -295,7 +295,7 @@ jobs:
               | tee "${output_log}"
 
             RAYON_NUM_THREADS=1 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/kernel_benchmark.py" \
-              --rows 256 --repetitions 5 --sizes 8 128 4096 --num-perm 128 512 \
+              --rows 256 --repetitions 5 --sizes 1 8 32 128 4096 --num-perm 128 512 \
               --output-json "${output_json%.json}_kernels.json" \
               | tee "${output_log%.txt}_kernels.txt"
 
