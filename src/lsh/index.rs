@@ -29,34 +29,6 @@ impl RMinHashLSH {
     }
   }
 
-  pub(in crate::lsh) fn validate_state(&self) -> PyResult<()> {
-    let expected_band_size =
-      Self::validate_params(self.threshold, self.num_perm, self.num_bands)?;
-    if self.band_size != expected_band_size {
-      return Err(PyValueError::new_err(format!(
-        "invalid RMinHashLSH state: band_size {} does not match expected {}",
-        self.band_size, expected_band_size
-      )));
-    }
-    if self.hash_tables.len() != self.num_bands {
-      return Err(PyValueError::new_err(format!(
-        "invalid RMinHashLSH state: hash_tables length {} does not match num_bands {}",
-        self.hash_tables.len(),
-        self.num_bands
-      )));
-    }
-    for (key, band_hashes) in &self.key_bands {
-      if band_hashes.len() != self.num_bands {
-        return Err(PyValueError::new_err(format!(
-          "invalid RMinHashLSH state: key {key} stores {} band hashes, expected {}",
-          band_hashes.len(),
-          self.num_bands
-        )));
-      }
-    }
-    Ok(())
-  }
-
   pub(in crate::lsh) fn ensure_digest_len(
     &self,
     digest_len: usize,

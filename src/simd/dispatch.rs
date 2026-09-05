@@ -232,6 +232,72 @@ pub fn apply_hash_batch_to_values(
   }
 }
 
+pub fn apply_bucket_fallback(
+  hash_values: &mut [u32],
+  permutations: &[(u64, u64)],
+  hashes: &[u64],
+  rank_bits: u32,
+) {
+  debug_assert!((1..32).contains(&rank_bits));
+  let fallback = u32::MAX << (32 - rank_bits);
+  let discarded = (1 << rank_bits) - 1;
+  let len = hash_values.len().min(permutations.len());
+  let kind = kernel_kind();
+  let mut cursor = 0;
+  while cursor < len {
+    let mut indices = [0; 8];
+    let mut pairs = [(0, 0); 8];
+    let mut values = [u32::MAX; 8];
+    let mut count = 0;
+    while cursor < len && count < 8 {
+      if hash_values[cursor] >= fallback {
+        indices[count] = cursor;
+        pairs[count] = permutations[cursor];
+        // Preserve every raw rank represented by the truncated fraction.
+        values[count] = (hash_values[cursor] << rank_bits) | discarded;
+        count += 1;
+      }
+      cursor += 1;
+    }
+    if count == 0 {
+      break;
+    }
+    if count < 4 {
+      for (value, &(a, b)) in values[..count].iter_mut().zip(&pairs) {
+        for &hash in hashes {
+          *value = (*value).min(permute_hash(hash, a, b));
+        }
+      }
+    } else {
+      match kind {
+        KernelKind::Scalar => {
+          scalar_apply_hash_batch_to_values(&mut values, &pairs, hashes);
+        }
+        #[cfg(target_arch = "aarch64")]
+        KernelKind::Neon => {
+          let lanes = if count == 4 { 4 } else { 8 };
+          crate::simd::arm64_neon::apply_hash_batch_to_values_neon_compact(
+            &mut values[..lanes],
+            &pairs,
+            hashes,
+          );
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        KernelKind::Avx2 => {
+          crate::simd::x86::apply_hash_batch_to_values_avx2(
+            &mut values,
+            &pairs,
+            hashes,
+          );
+        }
+      }
+    }
+    for (&index, &value) in indices[..count].iter().zip(&values) {
+      hash_values[index] = fallback | (value >> rank_bits);
+    }
+  }
+}
+
 fn scalar_apply_hash_batch_to_values(
   hash_values: &mut [u32],
   permutations: &[(u64, u64)],

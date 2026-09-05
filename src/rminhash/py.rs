@@ -5,7 +5,7 @@ use crate::py_input::{
 };
 use crate::rminhash::{
   RMinHash, RMinHashDigestMatrix, ReduceResult, DEFAULT_RHO_PROBES,
-  HASH_BATCH_SIZE,
+  HASH_BATCH_SIZE, PY_STATE_PREFIX,
 };
 use crate::utils::ratio_usize;
 use pyo3::exceptions::PyValueError;
@@ -89,6 +89,10 @@ impl RMinHashDigestMatrix {
 
 #[pymethods]
 impl RMinHash {
+  /// Signature algorithm version; signatures from different versions are incompatible.
+  #[classattr]
+  const ALGORITHM_VERSION: u32 = 2;
+
   /// Creates a new `RMinHash` instance.
   ///
   /// # Arguments
@@ -423,12 +427,16 @@ impl RMinHash {
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
-    let decoded: Self =
-      postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize RMinHash state: {err}"
-        ))
-      })?;
+    let payload = state.as_bytes().strip_prefix(PY_STATE_PREFIX).ok_or_else(|| {
+      PyValueError::new_err(
+        "unsupported RMinHash state version; rebuild the sketch from its tokens",
+      )
+    })?;
+    let decoded: Self = postcard::from_bytes(payload).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to deserialize RMinHash state: {err}"
+      ))
+    })?;
     decoded.validate_state()?;
     *self = decoded;
     Ok(())
@@ -438,11 +446,12 @@ impl RMinHash {
     &self,
     py: Python<'py>,
   ) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = postcard::to_allocvec(self).map_err(|err| {
-      PyValueError::new_err(format!(
-        "failed to serialize RMinHash state: {err}"
-      ))
-    })?;
+    let encoded =
+      postcard::to_extend(self, PY_STATE_PREFIX.to_vec()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to serialize RMinHash state: {err}"
+        ))
+      })?;
     Ok(PyBytes::new(py, &encoded))
   }
 

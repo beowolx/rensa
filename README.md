@@ -8,7 +8,7 @@ Rensa (Swedish for "clean") computes MinHash signatures for similarity estimatio
 
 It ships two MinHash variants:
 
-- **R-MinHash**: Full-set MinHash with SIMD multiply-shift permutations and 32-bit signature slots.
+- **R-MinHash**: Full-set similarity sketching with seeded bucket rounds, a SIMD fallback, and 32-bit signature slots.
 - **C-MinHash**: A practical approximation of [circulant MinHash](https://proceedings.mlr.press/v162/li22m.html), with 64-bit signature slots and nonlinear permutations.
 
 The separate **rho batch path** samples token positions to accelerate duplicate detection. Its recall depends on document length and token order, so its speed should be evaluated together with retrieval accuracy. Use the classic full-set APIs when you need order-invariant Jaccard estimates.
@@ -35,31 +35,29 @@ These agreement metrics are from the same full benchmark run as the speed number
 
 ## How R-MinHash works
 
-MinHash estimates Jaccard similarity between sets. Apply k random hash functions to a set, keep the minimum value from each. Two sets sharing many elements will produce similar minimums, and the fraction of matching slots estimates the Jaccard index.
+MinHash estimates Jaccard similarity from the fraction of matching signature slots. R-MinHash version 2 uses every input token and a fixed family of hash functions for each `(num_perm, seed)`. Reordering tokens, repeating tokens, or dividing them across incremental updates produces the same signature.
 
-Standard implementations generate each permutation as `(a * hash(x) + b) mod p`, where p is a large prime (typically the Mersenne prime 2^61 - 1). Mathematically clean, but modular reduction is still more expensive than a simple bit shift on modern CPUs.
+The sketch uses three seeded bucket rounds. In each round, a token's hash chooses one of the `num_perm` slots and a rank within that round. Each slot keeps its smallest rank, with earlier rounds taking priority. For a nonempty set, any slot left empty after these rounds receives the actual minimum of its own separately seeded fallback hash over all tokens in the set. Fallback values are computed from tokens, not copied from another bucket. Taking the minimum across updates preserves the same result as processing their union at once.
 
-R-MinHash replaces the modular reduction with **multiply-shift hashing**:
+This is a practical variant of [Fast Similarity Sketching](https://arxiv.org/abs/1704.04370), truncated to a fixed number of bucket rounds before fallback. It uses SplitMix64 mixing for bucket selection and nonlinear mixing followed by seeded affine multiply-shift hashes for fallback. These are approximations to fully random hash functions; the published algorithm's concentration and expected-time guarantees are not established for this variant. Rensa checks its bias, estimation error, and retrieval accuracy against exact Jaccard in `benchmarks/accuracy_benchmark.py`.
 
-```
-signature[i] = min { (a[i] * hash(x) + b[i]) >> 32 }  for all x in set
-```
+Each `u32` slot stores a 2-bit round tag and a 30-bit rank. At 128 slots, the signature values occupy 512 bytes, excluding object and allocation overhead.
 
-Instead of reducing mod a prime, take the upper 32 bits of the 64-bit multiply-add. This is a proven universal hash family ([Dietzfelbinger et al., 1997](https://doi.org/10.1006/jagm.1997.0873)). In R-MinHash, it is used as a practical approximation that keeps deduplication results very close to datasketch in benchmarks while making the hot path cheaper.
-
-This choice has a useful side effect: since the output is naturally 32 bits, signatures are stored as `u32` — 4 bytes per slot instead of 8. For 128 permutations, that's 512 bytes per signature. Half the memory, and twice as many signature slots fit in a cache line.
+`RMinHash.ALGORITHM_VERSION` is **2**. **Rebuild existing R-MinHash signatures and LSH indexes from their original tokens:** legacy serialized sketches and indexes are rejected, and raw digest arrays from different algorithm versions must not be mixed. The separate rho representation is not interchangeable with an R-MinHash signature.
 
 ### Performance engineering
 
 On top of the algorithm, Rensa applies several low-level optimizations.
 
-Input elements are hashed with a fast non-cryptographic hash that mirrors `rustc_hash::FxHasher` semantics while avoiding trait dispatch in the hot path. MinHash needs uniform distribution, not collision resistance, so there's no reason to pay for a cryptographic hash function.
+Input elements are hashed with a fast non-cryptographic hash that mirrors `rustc_hash::FxHasher` semantics while avoiding trait dispatch in the hot path. The sketch then applies its seeded mixing stages to these token hashes.
 
-Elements are hashed in groups of 32. Permutations are applied to each batch in chunks of 16, using a fixed-size temporary array (`[u32; 16]`) that is register-friendly. This gives the compiler room to optimize tight loops and keeps working data cache-local.
+Dense inputs often fill every slot during the bucket rounds, allowing the kernel to skip fallback work. When many slots need fallback, a SIMD kernel evaluates the same fallback hashes together; when few remain, only those slots are evaluated. These paths change how the fixed hash family is evaluated, so short and long documents remain comparable and incremental updates preserve their meaning.
 
-The (a, b) permutation pairs are deterministic, derived from a seed via Xoshiro256++. They are initialized at construction and reused across updates to avoid recomputing setup state on every incremental update. Permutation tables are shared process-wide per `(num_perm, seed)`, so constructing or cloning many `RMinHash` objects with the same parameters costs O(1) in `num_perm`.
+Fallback coefficients are deterministic, derived from a seed via Xoshiro256++, and reused across updates. Their tables and SIMD layouts are shared process-wide per `(num_perm, seed)` to avoid repeated parameter setup. Constructing or cloning a sketch still requires O(`num_perm`) work to allocate or copy its signature values.
 
-Token extraction reads compact ASCII `str` data inline (the common case for tokenized text) instead of round-tripping through `PyUnicode_AsUTF8AndSize`. For batch sketching over lists of ASCII/bytes tokens, worker threads read list items and string payloads directly from CPython object memory (safe because the calling thread holds the GIL and never runs Python during the build), so extraction itself is parallelized instead of bottlenecking on one producer thread; rows containing other token types fall back to the GIL thread. One-shot LSH deduplication groups rows by raw band hashes with intrusive chains (no per-bucket allocations), refines fold windows by exact hash-pair equality, and reuses the same scans' collision counts for its recall-rescue pass, with band scans fanned out across threads when a Rayon pool is available.
+Token extraction reads compact ASCII `str` data inline (the common case for tokenized text) instead of round-tripping through `PyUnicode_AsUTF8AndSize`.
+
+The separate rho batch path can parallelize extraction for lists of ASCII/bytes tokens: worker threads read list items and string payloads directly from CPython object memory while the calling thread holds the GIL and runs no Python callbacks. Rows containing other token types fall back to the GIL thread. Rho's one-shot LSH deduplication groups rows by raw band hashes with intrusive chains, refines fold windows by exact hash-pair equality, and reuses collision counts for its recall-rescue pass. Band scans run in parallel when a Rayon pool is available.
 
 The global allocator is MiMalloc, which handles the batch-allocate-then-free pattern better than the system default. Rensa disables MiMalloc's eager arena commit at module load (unless overridden via `MIMALLOC_ARENA_EAGER_COMMIT`), which keeps peak RSS flat when many threads allocate short-lived sketch buffers.
 
@@ -67,7 +65,7 @@ The global allocator is MiMalloc, which handles the batch-allocate-then-free pat
 
 Rensa follows the input rotation in Algorithm 3 of Xiaoyun Li and Ping Li's [C-MinHash paper](https://proceedings.mlr.press/v162/li22m/li22m.pdf): `h[k] = min(pi(sigma(x) - (k + 1)))`, with subtraction modulo 2^64. Two separately seeded [SplitMix64 finalizers](https://prng.di.unimi.it/splitmix64.c) provide nonlinear bijections over token hashes. These are compact pseudorandom approximations; the paper's unbiasedness and lower-variance proofs assume uniformly random permutation vectors and do not establish those guarantees for this implementation. Accuracy is checked empirically against exact Jaccard.
 
-`CMinHash.ALGORITHM_VERSION` is **2**. Version 1 used affine maps that produced biased estimates on structured hashes and highly correlated signature slots. Its sorted-successor optimization depended on that faulty construction and has been removed. Version 2 performs O(nk) work, with bounded token batches. **Rebuild existing C-MinHash signatures and indexes from their original tokens:** legacy serialized C-MinHash states are rejected, and old digest arrays must not be mixed with version 2 arrays. R-MinHash signatures are unchanged.
+`CMinHash.ALGORITHM_VERSION` is **2**. Version 1 used affine maps that produced biased estimates on structured hashes and highly correlated signature slots. Its sorted-successor optimization depended on that faulty construction and has been removed. Version 2 performs O(nk) work, with bounded token batches. **Rebuild existing C-MinHash signatures and indexes from their original tokens:** legacy serialized C-MinHash states are rejected, and old digest arrays must not be mixed with version 2 arrays.
 
 Streaming duplicate checks stop comparing a pair once its remaining signature slots cannot meet the threshold.
 

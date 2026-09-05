@@ -11,6 +11,8 @@ fn checked_key(start_key: usize, offset: usize) -> PyResult<usize> {
   })
 }
 
+const PY_STATE_PREFIX: &[u8] = b"Rensa:RMinHashLSH:2\0";
+
 #[pymethods]
 impl RMinHashLSH {
   /// Creates a new `RMinHashLSH` instance.
@@ -347,13 +349,16 @@ impl RMinHashLSH {
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
-    let decoded: Self =
-      postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize RMinHashLSH state: {err}"
-        ))
-      })?;
-    decoded.validate_state()?;
+    let payload = state.as_bytes().strip_prefix(PY_STATE_PREFIX).ok_or_else(|| {
+      PyValueError::new_err(
+        "unsupported RMinHashLSH state version; rebuild the index from its tokens",
+      )
+    })?;
+    let decoded: Self = postcard::from_bytes(payload).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to deserialize RMinHashLSH state: {err}"
+      ))
+    })?;
     *self = decoded;
     Ok(())
   }
@@ -362,11 +367,12 @@ impl RMinHashLSH {
     &self,
     py: Python<'py>,
   ) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = postcard::to_allocvec(self).map_err(|err| {
-      PyValueError::new_err(format!(
-        "failed to serialize RMinHashLSH state: {err}"
-      ))
-    })?;
+    let encoded =
+      postcard::to_extend(self, PY_STATE_PREFIX.to_vec()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to serialize RMinHashLSH state: {err}"
+        ))
+      })?;
     Ok(PyBytes::new(py, &encoded))
   }
 

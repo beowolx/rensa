@@ -5,7 +5,7 @@ import statistics
 
 import pytest
 
-from rensa import CMinHash, RMinHash
+from rensa import CMinHash, RMinHash, RMinHashLSH
 
 
 @pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])
@@ -78,6 +78,95 @@ def test_cminhash_jaccard_error_reduces_with_more_permutations(prehashed):
     assert errors_by_width[128] < 0.07
     assert errors_by_width[512] < 0.04
     assert errors_by_width[512] < 0.75 * errors_by_width[128]
+
+
+@pytest.mark.parametrize(
+    "prehashed,left_size,right_size,overlap",
+    [
+        (False, 2, 2, 1),
+        (True, 2, 2, 1),
+        (False, 16, 1024, 16),
+        (True, 64, 1024, 64),
+        (False, 128, 160, 128),
+        (False, 1024, 1280, 1024),
+        (False, 2048, 3072, 1536),
+    ],
+)
+def test_rminhash_accuracy_across_cardinalities(
+    prehashed, left_size, right_size, overlap
+):
+    left = list(range(left_size))
+    right = left[left_size - overlap:] + list(
+        range(left_size, left_size + right_size - overlap)
+    )
+    rows = [left, right]
+    if not prehashed:
+        rows = [[f"cardinality-token-{value}" for value in row] for row in rows]
+    digest = (
+        RMinHash.digest_matrix_from_token_hash_sets
+        if prehashed
+        else RMinHash.digest_matrix_from_token_sets
+    )
+    exact = overlap / (left_size + right_size - overlap)
+    mse_by_width = {}
+    seed_count = 96
+    for num_perm in (128, 512):
+        errors = []
+        for seed in range(seed_count):
+            first, second = digest(rows, num_perm=num_perm, seed=seed).to_rows()
+            estimate = sum(a == b for a, b in zip(first, second)) / num_perm
+            errors.append(estimate - exact)
+        # Compare aggregate error with classical independent MinHash variance.
+        # The allowance covers finite fixed-seed sampling, not a changed target.
+        reference_variance = exact * (1 - exact) / num_perm
+        assert abs(statistics.mean(errors)) < 4 * math.sqrt(reference_variance / seed_count)
+        mse_by_width[num_perm] = statistics.mean(error**2 for error in errors)
+        assert mse_by_width[num_perm] < 1.65 * reference_variance
+    assert mse_by_width[512] < 0.6 * mse_by_width[128]
+
+
+@pytest.mark.parametrize("num_perm", [128, 129])
+def test_rminhash_long_sets_preserve_order_duplicates_and_incremental_updates(num_perm):
+    tokens = [f"long-token-{index}" for index in range(8193)]
+    rows = RMinHash.digest_matrix_from_token_sets(
+        [tokens, list(reversed(tokens)), tokens * 2], num_perm=num_perm, seed=42
+    ).to_rows()
+    assert rows[0] == rows[1] == rows[2]
+    for chunk_size in (1, 31, 257, len(tokens)):
+        incremental = RMinHash(num_perm=num_perm, seed=42)
+        for start in range(0, len(tokens), chunk_size):
+            incremental.update(tokens[start:start + chunk_size])
+        incremental.update([])
+        incremental.update(tokens[::3])
+        assert incremental.digest() == rows[0]
+
+
+def test_rminhash_batch_and_object_queries_agree_across_document_sizes():
+    short = [f"short-{index}" for index in range(128)]
+    long = [f"long-{index}" for index in range(2048)]
+    documents = [
+        short,
+        short + [f"short-extra-{index}" for index in range(32)],
+        long,
+        long + [f"long-extra-{index}" for index in range(512)],
+        list(reversed(long)),
+        ["unrelated"],
+    ]
+    signatures = RMinHash.from_token_sets(documents, num_perm=128, seed=42)
+    matrix = RMinHash.digest_matrix_from_token_sets(documents, num_perm=128, seed=42)
+    index = RMinHashLSH(threshold=0.8, num_perm=128, num_bands=8)
+    for key, signature in enumerate(signatures):
+        index.insert(key, signature)
+    expected = [
+        any(candidate != key for candidate in index.query(signature))
+        for key, signature in enumerate(signatures)
+    ]
+    batch_index = RMinHashLSH(threshold=0.8, num_perm=128, num_bands=8)
+    assert batch_index.query_duplicate_flags_matrix_one_shot(matrix) == expected
+    assert expected[2] and expected[4]
+    assert not expected[5]
+    for left, right in [(signatures[0], signatures[1]), (signatures[2], signatures[3])]:
+        assert index.is_similar(left, right) == (left.jaccard(right) >= 0.8)
 
 
 @pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])

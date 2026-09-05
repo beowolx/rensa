@@ -52,7 +52,37 @@ pub(super) fn apply_hash_batch_to_values_neon(
   unsafe {
     apply_hash_batch_to_values_neon_impl(
       hash_values,
-      permutations_soa,
+      permutations_soa.a_hi(),
+      permutations_soa.a_lo(),
+      permutations_soa.b_hi(),
+      permutations_soa.b_lo(),
+      hash_batch,
+    );
+  }
+}
+
+#[inline]
+pub(super) fn apply_hash_batch_to_values_neon_compact(
+  hash_values: &mut [u32],
+  permutations: &[(u64, u64); 8],
+  hash_batch: &[u64],
+) {
+  let a_hi: [_; 8] =
+    std::array::from_fn(|index| split_u64_words(permutations[index].0).1);
+  let a_lo: [_; 8] =
+    std::array::from_fn(|index| split_u64_words(permutations[index].0).0);
+  let b_hi: [_; 8] =
+    std::array::from_fn(|index| split_u64_words(permutations[index].1).1);
+  let b_lo: [_; 8] =
+    std::array::from_fn(|index| split_u64_words(permutations[index].1).0);
+  // SAFETY: dispatch guarantees NEON support before calling this function.
+  unsafe {
+    apply_hash_batch_to_values_neon_impl(
+      hash_values,
+      &a_hi,
+      &a_lo,
+      &b_hi,
+      &b_lo,
       hash_batch,
     );
   }
@@ -61,14 +91,13 @@ pub(super) fn apply_hash_batch_to_values_neon(
 #[target_feature(enable = "neon")]
 unsafe fn apply_hash_batch_to_values_neon_impl(
   hash_values: &mut [u32],
-  permutations_soa: &PermutationSoA,
+  a_hi: &[u32],
+  a_lo: &[u32],
+  b_hi: &[u32],
+  b_lo: &[u32],
   hash_batch: &[u64],
 ) {
-  let perm_len = permutations_soa.len().min(hash_values.len());
-  let a_hi = permutations_soa.a_hi();
-  let a_lo = permutations_soa.a_lo();
-  let b_hi = permutations_soa.b_hi();
-  let b_lo = permutations_soa.b_lo();
+  let perm_len = a_hi.len().min(hash_values.len());
   let mut index = 0usize;
   while index + 8 <= perm_len {
     // SAFETY: this chunk is within perm_len, bounded by all slice lengths.

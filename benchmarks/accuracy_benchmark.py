@@ -180,6 +180,7 @@ def main():
                            for key, value in vars(args).items()},
                "versions": {name: version(name) for name in ("rensa", "datasketch", "FastSketchLSH")},
                "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", 1),
+               "rminhash_algorithm_version": getattr(RMinHash, "ALGORITHM_VERSION", 1),
                "environment": {key: value for key, value in sorted(os.environ.items())
                                if key.startswith(("RENSA_", "RAYON_"))},
                "retrieval_config": {"num_perm": 128, "num_bands": 8},

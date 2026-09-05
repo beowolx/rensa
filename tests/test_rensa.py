@@ -73,16 +73,44 @@ def test_minhash_jaccard_rejects_seed_mismatch(minhash_type):
         left.jaccard(right)
 
 
-def test_rminhash_serialization_roundtrip():
-    m = RMinHash(num_perm=5, seed=2023)
-    m.update(["serialize", "this"])
-    digest_before = m.digest()
-
+@pytest.mark.parametrize("num_perm", [5, 128, 129])
+def test_rminhash_serialization_roundtrip_and_legacy_rejection(num_perm):
     import pickle
-    data = pickle.dumps(m)
-    m2 = pickle.loads(data)
 
-    assert m2.digest() == digest_before, "Deserialized RMinHash should have the same digest"
+    sketch = RMinHash(num_perm=num_perm, seed=42)
+    sketch.update(["first", "second"])
+    restored = pickle.loads(pickle.dumps(sketch))
+    assert restored.digest() == sketch.digest()
+    restored.update(["third"])
+    sketch.update(["third"])
+    assert restored.digest() == sketch.digest()
+    assert RMinHash.ALGORITHM_VERSION == 2
+
+    # Actual state emitted by version 1 for k=2, seed=42, {a,b}.
+    legacy = bytes.fromhex("022a02b4ecd38e02b9a6aff201")
+    before = sketch.digest()
+    with pytest.raises(ValueError, match="rebuild"):
+        sketch.__setstate__(legacy)
+    assert sketch.digest() == before
+
+
+def test_lsh_serialization_roundtrip_and_legacy_rejection():
+    import pickle
+
+    sketch = RMinHash(num_perm=128, seed=42)
+    sketch.update(["first", "second"])
+    index = RMinHashLSH(threshold=0.8, num_perm=128, num_bands=8)
+    index.insert(0, sketch)
+    restored = pickle.loads(pickle.dumps(index))
+    assert restored.query(sketch) == [0]
+
+    # Actual version 1 index containing key 0 and the {a,b} sketch above.
+    legacy = bytes.fromhex(
+        "9a9999999999e93f020102010194c48cabbca2f1ac1c010001000194c48cabbca2f1ac1c"
+    )
+    with pytest.raises(ValueError, match="rebuild"):
+        restored.__setstate__(legacy)
+    assert restored.query(sketch) == [0]
 
 
 def test_cminhash_serialization_roundtrip_and_legacy_rejection():

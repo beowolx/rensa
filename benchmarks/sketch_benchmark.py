@@ -26,6 +26,7 @@ THREAD_ENV = (
 )
 for variable in THREAD_ENV:
     os.environ[variable] = "1"
+os.environ["RENSA_PIPELINE_QUEUE_CAP"] = "0"
 
 from datasketch import MinHash
 from FastSketchLSH import FastSimilaritySketch
@@ -144,6 +145,7 @@ def main():
             "versions": {name: importlib.metadata.version(name)
                          for name in ("rensa", "datasketch", "FastSketchLSH", "numpy")},
             "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", None),
+            "rminhash_algorithm_version": getattr(RMinHash, "ALGORITHM_VERSION", 1),
             "flags": {key: value for key, value in sorted(os.environ.items())
                       if key in THREAD_ENV or key.startswith("RENSA_")},
         },
