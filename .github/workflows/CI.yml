@@ -242,6 +242,7 @@ jobs:
       HF_HOME: ${{ github.workspace }}/.hf-cache
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.performance_only) }}
+      BENCH_PAIRED: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_only && inputs.baseline_sha != '' }}
       BENCH_DATASET_KEY: ag_news
       BENCH_MAX_ROWS: "10000"
       BENCH_FULL_SMOKE_MAX_ROWS: "2000"
@@ -345,6 +346,20 @@ jobs:
             VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release
             popd >/dev/null
 
+            if [ "${BENCH_PAIRED}" = "true" ]; then
+              "${BENCH_PY}" - "${GITHUB_WORKSPACE}/.bench/${label}-native/rensa.so" <<'PY'
+          import importlib
+          from pathlib import Path
+          import shutil
+          import sys
+
+          source = Path(importlib.import_module("rensa.rensa").__file__)
+          destination = Path(sys.argv[1])
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(source, destination)
+          PY
+            fi
+
             if [ "${label}" = "head" ]; then
               if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
                 export RENSA_REQUIRE_AVX512=1
@@ -429,6 +444,67 @@ jobs:
             "${GITHUB_WORKSPACE}/.bench/base.json" \
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
+
+      - name: Compare frozen builds in alternating pairs
+        if: env.BENCH_PAIRED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+            export RENSA_REQUIRE_AVX512=1
+          fi
+          PAIRED_FAMILY="$("${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          versions = [json.loads(Path(f".bench/{label}_kernels.json").read_text())
+                      ["environment"]["rminhash_algorithm_version"]
+                      for label in ("base", "head")]
+          print("same" if versions[0] == versions[1] else "migration")
+          PY
+          )"
+          if [ "${PAIRED_FAMILY}" = "migration" ]; then
+            echo "Paired signature-identity diagnostic skipped for algorithm migration." | tee .bench/paired_skip.txt
+            exit 0
+          fi
+          "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/paired_sketch_benchmark.py \
+            --base-extension .bench/base-native/rensa.so \
+            --head-extension .bench/head-native/rensa.so \
+            --prehashed --rows 256 --max-input-tokens 8388608 \
+            --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+            --repetitions 6 --min-sample-seconds 0.1 --warmup-seconds 0.2 \
+            --output-json .bench/paired_prehashed.json | tee .bench/paired_prehashed.txt
+          "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          paired = json.loads(Path(".bench/paired_prehashed.json").read_text())
+          cases = {(row["tokens_per_row"], row["num_perm"]): row for row in paired["results"]}
+          if len(cases) != len(paired["results"]):
+              raise SystemExit("Duplicate paired benchmark cases")
+          for label in ("base", "head"):
+              reference = json.loads(Path(f".bench/{label}_prehashed.json").read_text())
+              environment = reference["environment"]
+              for key in ("cpu_flags", "flags"):
+                  if paired["environment"][key] != environment[key]:
+                      raise SystemExit(f"Paired {label} environment mismatch: {key}")
+              if paired["environment"]["fastsketch_binary_sha256"] != environment["native_binary_sha256"]["FastSketchLSH"]:
+                  raise SystemExit(f"Paired {label} FastSketch binary differs")
+              if paired["extensions"][label]["sha256"] not in environment["native_binary_sha256"]["rensa"].values():
+                  raise SystemExit(f"Frozen {label} binary differs from the measured build")
+              if paired["extensions"][label]["algorithm_version"] != environment["rminhash_algorithm_version"]:
+                  raise SystemExit(f"Frozen {label} algorithm version differs from the measured build")
+              for engine, sample in (("rensa_classic", label), ("fastsketch", "fastsketch")):
+                  expected = {(row["tokens_per_row"], row["num_perm"]): row
+                              for row in reference["results"] if row["engine"] == engine}
+                  if cases.keys() != expected.keys():
+                      raise SystemExit(f"Paired {label}/{engine} case matrix mismatch")
+                  for key, row in cases.items():
+                      if (row["input_sha256"] != expected[key]["input_sha256"]
+                              or row["samples"][sample]["sha256"] != expected[key]["sha256"]):
+                          raise SystemExit(f"Paired {label}/{engine} fingerprint mismatch: {key}")
+          print("Paired diagnostic matches both frozen builds and every reference fingerprint.")
+          PY
 
       - name: Validate repeated-token backend diagnostics
         if: env.BENCH_COMPARE == 'true'
