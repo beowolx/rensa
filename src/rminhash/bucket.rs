@@ -253,7 +253,7 @@ pub(super) fn apply<H: HashValue>(
   let early_filter = hashes.len() >= 65_536
     && hashes.len() < 1 << 20
     && len.is_power_of_two()
-    && hashes.len() / len >= 128
+    && hashes.len() / len >= 256
     && crate::simd::dispatch::Avx512Mixer::detect().is_some();
   if (hashes.len() >= 1 << 20 || early_filter) && len.is_power_of_two() {
     if let Ok(count) = u32::try_from(len) {
@@ -733,8 +733,12 @@ mod tests {
         let late: Vec<_> = (0..4099).map(|_| rng.next_u64()).collect();
         reference(&mut expected, &permutations, &late);
         assert_ne!(expected, initial, "fixture needs a late improvement");
-        let mut hashes: Vec<_> =
-          base.iter().copied().cycle().take(65_536).collect();
+        let mut hashes: Vec<_> = base
+          .iter()
+          .copied()
+          .cycle()
+          .take(65_536.max(count * 256))
+          .collect();
         hashes.extend_from_slice(&late);
         let prefix = hashes.len() / 2;
         let mut prefix_values = vec![u32::MAX; count];
