@@ -208,6 +208,8 @@ def main():
         parser.error("repeat-cardinality must be positive")
     if "fastsketch" in args.engines and any(k & (k - 1) or k > 4096 for k in args.num_perm):
         parser.error("FastSketch requires power-of-two num-perm no greater than 4096")
+    if "fastsketch" in args.engines and not args.prehashed and 0 in args.sizes and not args.token_cache:
+        parser.error("FastSketch's byte API rejects empty rows; use prehashed mode for size zero")
     if not 0 <= args.seed <= 2**32 - 1:
         parser.error("seed must fit the shared unsigned 32-bit seed range")
     if not all(0 <= value < float("inf") for value in (args.min_sample_seconds, args.warmup_seconds)):

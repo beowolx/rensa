@@ -71,6 +71,62 @@ pub(super) fn apply<H: HashValue>(
   hashes: &[H],
 ) {
   let len = hash_values.len().min(permutations.len());
+  if hashes.len() >= 1 << 20 && len.is_power_of_two() {
+    if let Ok(count) = u32::try_from(len) {
+      let end = len.saturating_mul(512).max(65_536).min(hashes.len());
+      let (initial, remaining) = hashes.split_at(end);
+      apply_unfiltered(hash_values, permutations, soa, initial);
+      let hash_values = &mut hash_values[..len];
+      let upper_bound = hash_values.iter().copied().max().unwrap_or(u32::MAX);
+      if upper_bound <= (1 << FRACTION_BITS) / 32 {
+        // The bound is below 2^30, so every coordinate has a round-zero
+        // value and later rounds cannot improve it.
+        let seed = permutations[0].1 ^ BUCKET_DOMAIN;
+        let shift = 32 - count.trailing_zeros();
+        let mut update = |hash| {
+          let mixed = splitmix64(hash ^ seed);
+          #[allow(clippy::cast_possible_truncation)]
+          let rank = (mixed >> (32 + RANK_BITS)) as u32;
+          // Minima only decrease, so this stale maximum remains an upper
+          // bound on every coordinate throughout the remaining input.
+          if rank >= upper_bound {
+            return;
+          }
+          #[allow(clippy::cast_possible_truncation)]
+          let bucket = (u64::from(mixed as u32) >> shift) as usize;
+          // SAFETY: count is this slice's power-of-two length, 2^p. Shifting
+          // a 32-bit word by 32-p produces an index strictly below count.
+          let value = unsafe { hash_values.get_unchecked_mut(bucket) };
+          if rank < *value {
+            *value = rank;
+          }
+        };
+        let mut chunks = remaining.chunks_exact(8);
+        for chunk in chunks.by_ref() {
+          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
+          for hash in values {
+            update(hash);
+          }
+        }
+        for hash in chunks.remainder() {
+          update(hash.value());
+        }
+        return;
+      }
+      apply_unfiltered(hash_values, permutations, soa, remaining);
+      return;
+    }
+  }
+  apply_unfiltered(hash_values, permutations, soa, hashes);
+}
+
+fn apply_unfiltered<H: HashValue>(
+  hash_values: &mut [u32],
+  permutations: &[(u64, u64)],
+  soa: &PermutationSoA,
+  hashes: &[H],
+) {
+  let len = hash_values.len().min(permutations.len());
   if len == 0 || hashes.is_empty() {
     return;
   }
@@ -247,8 +303,8 @@ pub(super) fn apply<H: HashValue>(
 #[cfg(test)]
 mod tests {
   use crate::rminhash::bucket::{
-    apply, bucket_index, BUCKET_DOMAIN, BUCKET_ROUNDS, FALLBACK,
-    FALLBACK_DOMAIN, FRACTION_BITS, RANK_BITS, ROUND_DOMAIN,
+    apply, apply_unfiltered, bucket_index, BUCKET_DOMAIN, BUCKET_ROUNDS,
+    FALLBACK, FALLBACK_DOMAIN, FRACTION_BITS, RANK_BITS, ROUND_DOMAIN,
   };
   use crate::rminhash::rho::splitmix64;
   use crate::simd::dispatch::PermutationSoA;
@@ -470,6 +526,61 @@ mod tests {
           actual, expected,
           "chunk boundaries changed an incremental minimum"
         );
+      }
+    }
+  }
+
+  #[test]
+  fn very_late_rank_filter_preserves_updates_and_repeated_rows() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x4c41_5445);
+    for count in [128, 512] {
+      let permutations: Vec<_> = (0..count)
+        .map(|_| (rng.next_u64() | 1, rng.next_u64()))
+        .collect();
+      let soa = PermutationSoA::from_permutations(&permutations);
+      let count_u32 = u32::try_from(count).unwrap();
+      let end = (count * 512).max(65_536);
+      for enabled in [true, false] {
+        let base = if enabled {
+          (0..end).map(|_| rng.next_u64()).collect::<Vec<_>>()
+        } else {
+          let mut representatives = vec![None; count];
+          let mut missing = count;
+          while missing != 0 {
+            let hash = rng.next_u64();
+            let mixed = splitmix64(hash ^ permutations[0].1 ^ BUCKET_DOMAIN);
+            if mixed >> (32 + RANK_BITS) < (1 << FRACTION_BITS) / 2 {
+              continue;
+            }
+            let bucket = bucket_index(mixed, count_u32);
+            if representatives[bucket].replace(hash).is_none() {
+              missing -= 1;
+            }
+          }
+          representatives.into_iter().flatten().collect()
+        };
+        let mut expected = vec![u32::MAX; count];
+        apply_unfiltered(&mut expected, &permutations, &soa, &base);
+        let initial = expected.clone();
+        assert_eq!(
+          expected.iter().copied().max().unwrap() <= (1 << FRACTION_BITS) / 32,
+          enabled
+        );
+        let late: Vec<_> = (0..4099).map(|_| rng.next_u64()).collect();
+        reference(&mut expected, &permutations, &late);
+        assert_ne!(expected, initial, "fixture needs a late improvement");
+        let mut hashes: Vec<_> =
+          base.iter().copied().cycle().take(1 << 20).collect();
+        hashes.extend_from_slice(&late);
+        let mut actual = vec![u32::MAX; count];
+        apply(&mut actual, &permutations, &soa, &hashes);
+        assert_eq!(actual, expected);
+        hashes.reverse();
+        let mut actual = vec![u32::MAX; count];
+        for chunk in hashes.chunks(end - 1) {
+          apply(&mut actual, &permutations, &soa, chunk);
+        }
+        assert_eq!(actual, expected);
       }
     }
   }
