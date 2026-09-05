@@ -1,3 +1,4 @@
+use pyo3::buffer::PyUntypedBuffer;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList, PyTuple};
@@ -15,11 +16,23 @@ const TOKEN_TYPE_ERROR: &str =
   "each item must be str, bytes, bytearray, or a C-contiguous u8 buffer";
 const BYTE_TOKEN_TYPE_ERROR: &str =
   "each item must be bytes, bytearray, or a C-contiguous u8 buffer";
-const PREHASHED_TOKEN_TYPE_ERROR: &str =
+pub const PREHASHED_TOKEN_TYPE_ERROR: &str =
   "each item must be an unsigned 64-bit integer";
 const BUFFER_TYPE_ERROR: &str =
   "buffer inputs must be C-contiguous and byte-sized (u8)";
 const SEQUENCE_SIZE_ERROR: &str = "sequence size does not fit in usize";
+
+pub fn buffer_has_native_byte_order(buffer: &PyUntypedBuffer) -> bool {
+  if buffer.item_size() == 1 {
+    return true;
+  }
+  // PyO3 0.29 accepts big-endian formats on little-endian hosts.
+  match buffer.format().to_bytes().first() {
+    Some(b'<') => cfg!(target_endian = "little"),
+    Some(b'>' | b'!') => cfg!(target_endian = "big"),
+    _ => true,
+  }
+}
 
 pub fn hash_token(item: &Bound<'_, PyAny>) -> PyResult<u64> {
   ptr_hash::hash_token_ptr(item.py(), item.as_ptr())
@@ -136,9 +149,16 @@ pub fn extend_prehashed_token_values_from_document(
   if prehashed::try_extend_prehashed_u64_buffer(document, output)? {
     return Ok(());
   }
+  extend_prehashed_token_values_from_iterable(document, output)
+}
 
+pub fn extend_prehashed_token_values_from_iterable(
+  document: &Bound<'_, PyAny>,
+  output: &mut Vec<u64>,
+) -> PyResult<()> {
   if let Ok(py_list) = document.cast::<PyList>() {
-    // SAFETY: list access is guarded by CPython list checks and GIL.
+    // SAFETY: CPython list checks and the GIL guard access. The unsigned
+    // conversion requires a PyLongObject and does not call Python __index__.
     unsafe {
       let object_ptr = py_list.as_ptr();
       let length = ffi::PyList_GET_SIZE(object_ptr);

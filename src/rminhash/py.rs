@@ -298,6 +298,9 @@ impl RMinHash {
 
   /// Computes `RMinHash` digests in a compact row-major matrix from one flat
   /// token-hash buffer and row offsets.
+  /// Row offsets are snapshotted before acquiring or copying token values.
+  /// Large buffers in single-thread mode are read directly while retaining
+  /// the GIL, including when the input view is readonly.
   ///
   /// # Errors
   ///
@@ -313,11 +316,9 @@ impl RMinHash {
     seed: u64,
   ) -> PyResult<RMinHashDigestMatrix> {
     Self::validate_num_perm(num_perm)?;
-    let flat_hashes = Self::parse_flat_token_hashes(token_hashes)?;
-    let offsets = Self::parse_row_offsets(row_offsets)?;
-    Self::build_digest_matrix_from_flat_token_hashes(
-      &flat_hashes,
-      &offsets,
+    Self::build_digest_matrix_from_flat_python_hashes(
+      token_hashes,
+      row_offsets,
       num_perm,
       seed,
     )

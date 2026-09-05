@@ -284,7 +284,9 @@ jobs:
             popd >/dev/null
 
             if [ "${label}" = "head" ]; then
-              "${BENCH_PY}" -m pytest -q "${GITHUB_WORKSPACE}/tests/test_accuracy.py"
+              "${BENCH_PY}" -m pytest -q \
+                "${GITHUB_WORKSPACE}/tests/test_accuracy.py" \
+                "${GITHUB_WORKSPACE}/tests/test_rensa.py"
             fi
 
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
@@ -311,9 +313,16 @@ jobs:
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
               --engines rensa_classic fastsketch --rows 256 --repetitions 5 \
               --min-sample-seconds 0.1 \
-              --sizes 1 8 32 128 1024 4096 --num-perm 128 512 \
+              --sizes 1 8 32 128 1024 4096 16384 --num-perm 128 512 \
               --output-json "${output_json%.json}_sketches.json" \
               | tee "${output_log%.txt}_sketches.txt"
+
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+              --prehashed --rows 256 --repetitions 5 --min-sample-seconds 0.05 \
+              --max-input-tokens 8388608 \
+              --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+              --output-json "${output_json%.json}_prehashed.json" \
+              | tee "${output_log%.txt}_prehashed.txt"
 
             echo "Completed ${label} benchmark."
           }
@@ -483,63 +492,72 @@ jobs:
                       rmses.append(math.sqrt(sum(cell["count"] * cell["rmse"] ** 2 for cell in cells) / count))
                   check_rmse(f"k={k}, n={size}", *rmses, 1.20)
 
-          with open(".bench/head_sketches.json", encoding="utf-8") as handle:
-              head_sketches = json.load(handle)
-          with open(".bench/base_sketches.json", encoding="utf-8") as handle:
-              base_sketches = json.load(handle)
-          if head_sketches["config"] != base_sketches["config"] or head_sketches["environment"]["flags"] != base_sketches["environment"]["flags"]:
-              raise SystemExit("native sketch benchmark config/environment mismatch")
-          if head_sketches["config"]["repetitions"] < 5 or head_sketches["config"]["min_sample_seconds"] < 0.1:
-              raise SystemExit("native sketch performance gates require at least five 0.1-second samples")
-          sketch_versions = (base_sketches["environment"]["rminhash_algorithm_version"],
-                             head_sketches["environment"]["rminhash_algorithm_version"])
-          if sketch_versions != algorithm_versions["rminhash"]:
-              raise SystemExit("native sketch R-MinHash algorithm version mismatch")
-          native_cases = []
-          expected = {(engine, size, k) for engine in ("rensa_classic", "fastsketch")
-                      for size in (1, 8, 32, 128, 1024, 4096) for k in (128, 512)}
-          for payload in (head_sketches, base_sketches):
-              cases = {(result["engine"], result["tokens_per_row"], result["num_perm"]): result for result in payload["results"]}
-              if cases.keys() != expected or len(payload["results"]) != len(expected):
-                  raise SystemExit("native sketch benchmark cases mismatch or duplicates")
-              native_cases.append(cases)
-          native_log_ratios = []
-          native_regressions = []
-          for key, result in native_cases[0].items():
-              baseline = native_cases[1][key]
-              competitor = native_cases[0][("fastsketch", key[1], key[2])]
-              if len({result["input_sha256"], baseline["input_sha256"], competitor["input_sha256"]}) != 1:
-                  raise SystemExit(f"native sketch input mismatch: {key}")
-              if result["sha256"] != baseline["sha256"] and not (r_migration and key[0] == "rensa_classic"):
-                  raise SystemExit(f"native sketch output changed: {key}")
-              if not all(0 < item["median_seconds"] < float("inf") for item in (result, baseline, competitor)):
-                  raise SystemExit(f"invalid native sketch timing: {key}")
-              if key[0] == "rensa_classic":
-                  native_log_ratios.append(math.log(result["median_seconds"]) - math.log(baseline["median_seconds"]))
-                  print(f"Native R-MinHash n={key[1]}, k={key[2]}: head={result['median_seconds']:.6f}s, "
-                        f"base={baseline['median_seconds']:.6f}s, FastSketch={competitor['median_seconds']:.6f}s; "
-                        f"{baseline['median_seconds'] / result['median_seconds']:.3f}x versus base, "
-                        f"{competitor['median_seconds'] / result['median_seconds']:.3f}x versus FastSketch")
-                  if result["median_seconds"] > 1.05 * competitor["median_seconds"]:
-                      regression = f"FAIL: Native R-MinHash exceeds FastSketch by more than 5%: n={key[1]}, k={key[2]}"
-                      print(regression)
-                      native_regressions.append(regression)
-                  else:
-                      print(f"PASS: Native R-MinHash meets FastSketch speed gate (5% tolerance): n={key[1]}, k={key[2]}")
-                  if result["median_seconds"] > 1.20 * baseline["median_seconds"]:
-                      regression = f"Native R-MinHash exceeds 20% per-case slowdown: n={key[1]}, k={key[2]}"
-                      if r_migration:
-                          print(f"{regression}; v1->v2 family migration uses aggregate performance and accuracy gates")
-                      else:
+          sketch_regressions = []
+          for suite, sizes, min_sample in (
+              ("sketches", (1, 8, 32, 128, 1024, 4096, 16384), 0.1),
+              ("prehashed", (0, 1, 8, 128, 4096, 65536, 1048576), 0.05),
+          ):
+              print(f"Validating {suite} benchmark")
+              with open(f".bench/head_{suite}.json", encoding="utf-8") as handle:
+                  head_sketches = json.load(handle)
+              with open(f".bench/base_{suite}.json", encoding="utf-8") as handle:
+                  base_sketches = json.load(handle)
+              if head_sketches["config"] != base_sketches["config"] or head_sketches["environment"]["flags"] != base_sketches["environment"]["flags"]:
+                  raise SystemExit("native sketch benchmark config/environment mismatch")
+              if head_sketches["config"]["repetitions"] < 5 or head_sketches["config"]["min_sample_seconds"] < min_sample:
+                  raise SystemExit(f"{suite} gates require at least five {min_sample}-second samples")
+              if head_sketches["config"]["prehashed"] != (suite == "prehashed"):
+                  raise SystemExit(f"{suite} input mode mismatch")
+              sketch_versions = (base_sketches["environment"]["rminhash_algorithm_version"],
+                                 head_sketches["environment"]["rminhash_algorithm_version"])
+              if sketch_versions != algorithm_versions["rminhash"]:
+                  raise SystemExit("native sketch R-MinHash algorithm version mismatch")
+              native_cases = []
+              expected = {(engine, size, k) for engine in ("rensa_classic", "fastsketch")
+                          for size in sizes for k in (128, 512)}
+              for payload in (head_sketches, base_sketches):
+                  cases = {(result["engine"], result["tokens_per_row"], result["num_perm"]): result for result in payload["results"]}
+                  if cases.keys() != expected or len(payload["results"]) != len(expected):
+                      raise SystemExit("native sketch benchmark cases mismatch or duplicates")
+                  native_cases.append(cases)
+              native_log_ratios = []
+              native_regressions = []
+              for key, result in native_cases[0].items():
+                  baseline = native_cases[1][key]
+                  competitor = native_cases[0][("fastsketch", key[1], key[2])]
+                  if len({result["input_sha256"], baseline["input_sha256"], competitor["input_sha256"]}) != 1:
+                      raise SystemExit(f"native sketch input mismatch: {key}")
+                  if result["sha256"] != baseline["sha256"] and not (r_migration and key[0] == "rensa_classic"):
+                      raise SystemExit(f"native sketch output changed: {key}")
+                  if not all(0 < item["median_seconds"] < float("inf") for item in (result, baseline, competitor)):
+                      raise SystemExit(f"invalid native sketch timing: {key}")
+                  if key[0] == "rensa_classic":
+                      native_log_ratios.append(math.log(result["median_seconds"]) - math.log(baseline["median_seconds"]))
+                      print(f"{suite} R-MinHash n={key[1]}, k={key[2]}: head={result['median_seconds']:.6f}s, "
+                            f"base={baseline['median_seconds']:.6f}s, FastSketch={competitor['median_seconds']:.6f}s; "
+                            f"{baseline['median_seconds'] / result['median_seconds']:.3f}x versus base, "
+                            f"{competitor['median_seconds'] / result['median_seconds']:.3f}x versus FastSketch")
+                      if result["median_seconds"] > 1.05 * competitor["median_seconds"]:
+                          regression = f"FAIL: Native R-MinHash exceeds FastSketch by more than 5%: n={key[1]}, k={key[2]}"
+                          print(regression)
                           native_regressions.append(regression)
-          # Equal weight per size/width prevents long cases from dominating.
-          native_mean_log_ratio = sum(native_log_ratios) / len(native_log_ratios)
-          if native_mean_log_ratio > math.log(1.10):
-              native_regressions.append("Native R-MinHash geometric-mean slowdown exceeds 10%")
-          print(f"Native R-MinHash geometric-mean slowdown across {len(native_log_ratios)} cases: "
-                f"{math.expm1(native_mean_log_ratio):.2%}; maximum allowed: 10%")
-          if native_regressions:
-              raise SystemExit("\n".join(native_regressions))
+                      else:
+                          print(f"PASS: Native R-MinHash meets FastSketch speed gate (5% tolerance): n={key[1]}, k={key[2]}")
+                      if result["median_seconds"] > 1.20 * baseline["median_seconds"]:
+                          regression = f"Native R-MinHash exceeds 20% per-case slowdown: n={key[1]}, k={key[2]}"
+                          if r_migration:
+                              print(f"{regression}; v1->v2 family migration uses aggregate performance and accuracy gates")
+                          else:
+                              native_regressions.append(regression)
+              # Equal weight per size/width prevents long cases from dominating.
+              native_mean_log_ratio = sum(native_log_ratios) / len(native_log_ratios)
+              if native_mean_log_ratio > math.log(1.10):
+                  native_regressions.append("Native R-MinHash geometric-mean slowdown exceeds 10%")
+              print(f"{suite} R-MinHash geometric-mean slowdown across {len(native_log_ratios)} cases: "
+                    f"{math.expm1(native_mean_log_ratio):.2%}; maximum allowed: 10%")
+              sketch_regressions.extend(f"{suite}: {failure}" for failure in native_regressions)
+          if sketch_regressions:
+              raise SystemExit("\n".join(sketch_regressions))
           PY
 
       - name: Run full benchmark smoke
@@ -579,7 +597,7 @@ jobs:
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
 
-          .venv/bin/python -m pytest -q tests/test_accuracy.py
+          .venv/bin/python -m pytest -q tests/test_accuracy.py tests/test_rensa.py
           .venv/bin/python benchmarks/accuracy_benchmark.py \
             --seeds 8 --skip-retrieval \
             --output-json .bench/head_accuracy.json \
@@ -588,9 +606,16 @@ jobs:
           .venv/bin/python benchmarks/sketch_benchmark.py \
             --engines rensa_classic fastsketch --rows 256 --repetitions 5 \
             --min-sample-seconds 0.1 \
-            --sizes 1 8 32 128 1024 4096 --num-perm 128 512 \
+            --sizes 1 8 32 128 1024 4096 16384 --num-perm 128 512 \
             --output-json .bench/head_sketches.json \
             | tee .bench/head_sketches.txt
+
+          .venv/bin/python benchmarks/sketch_benchmark.py \
+            --prehashed --rows 256 --repetitions 5 --min-sample-seconds 0.05 \
+            --max-input-tokens 8388608 \
+            --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+            --output-json .bench/head_prehashed.json \
+            | tee .bench/head_prehashed.txt
 
           .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET_KEY}" \

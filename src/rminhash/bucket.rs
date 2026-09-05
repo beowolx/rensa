@@ -8,6 +8,7 @@ use crate::rminhash::rho::splitmix64;
 use crate::simd::dispatch::{
   apply_bucket_fallback, apply_hash_batch_to_values, PermutationSoA,
 };
+use pyo3::buffer::ReadOnlyCell;
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 const RANK_BITS: u32 = 2;
@@ -17,6 +18,24 @@ const FALLBACK: u32 = BUCKET_ROUNDS << FRACTION_BITS;
 const BUCKET_DOMAIN: u64 = 0x6a09_e667_f3bc_c909;
 const ROUND_DOMAIN: u64 = 0x3c6e_f372_fe94_f82b;
 const FALLBACK_DOMAIN: u64 = 0xbb67_ae85_84ca_a73b;
+
+pub(super) trait HashValue {
+  fn value(&self) -> u64;
+}
+
+impl HashValue for u64 {
+  #[inline]
+  fn value(&self) -> u64 {
+    *self
+  }
+}
+
+impl HashValue for ReadOnlyCell<u64> {
+  #[inline]
+  fn value(&self) -> u64 {
+    self.get()
+  }
+}
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
@@ -45,11 +64,11 @@ fn wide_bucket_index(mut mixed: u64, count: usize) -> usize {
   }
 }
 
-pub(super) fn apply(
+pub(super) fn apply<H: HashValue>(
   hash_values: &mut [u32],
   permutations: &[(u64, u64)],
   soa: &PermutationSoA,
-  hashes: &[u64],
+  hashes: &[H],
 ) {
   let len = hash_values.len().min(permutations.len());
   if len == 0 || hashes.is_empty() {
@@ -75,8 +94,8 @@ pub(super) fn apply(
       &mut small[..hashes.len()]
     };
     let fallback_seed = permutations[0].0 ^ FALLBACK_DOMAIN;
-    for (value, &hash) in mixed.iter_mut().zip(hashes) {
-      *value = splitmix64(hash ^ fallback_seed);
+    for (value, hash) in mixed.iter_mut().zip(hashes) {
+      *value = splitmix64(hash.value() ^ fallback_seed);
     }
     apply_hash_batch_to_values(hash_values, permutations, soa, mixed);
     for value in hash_values.iter_mut() {
@@ -89,16 +108,62 @@ pub(super) fn apply(
       ^ u64::from(round).wrapping_mul(ROUND_DOMAIN);
     let prefix = round << FRACTION_BITS;
     if let Ok(count) = u32::try_from(len) {
-      for &hash in hashes {
-        let mixed = splitmix64(hash ^ stage_seed);
-        let bucket = bucket_index(mixed, count);
-        #[allow(clippy::cast_possible_truncation)]
-        let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
-        hash_values[bucket] = hash_values[bucket].min(rank);
+      if count.is_power_of_two() {
+        let shift = 32 - count.trailing_zeros();
+        let mut update = |hash, conditional| {
+          let mixed = splitmix64(hash ^ stage_seed);
+          // Lemire's product selects these bits without rejection for powers
+          // of two. A u64 shift also handles one bucket (shift 32).
+          #[allow(clippy::cast_possible_truncation)]
+          let bucket = (u64::from(mixed as u32) >> shift) as usize;
+          #[allow(clippy::cast_possible_truncation)]
+          let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
+          // SAFETY: count equals this slice's length and is 2^p, with p in
+          // 0..=31. The low word is < 2^32, so shifting it by 32-p yields
+          // bucket < 2^p = count, including p=0 (a u64 shift by 32).
+          let value = unsafe { hash_values.get_unchecked_mut(bucket) };
+          if conditional {
+            if rank < *value {
+              *value = rank;
+            }
+          } else {
+            *value = (*value).min(rank);
+          }
+        };
+        let prefix_len = hashes.len().min(len.saturating_mul(8).max(1024));
+        let (initial, remaining) = hashes.split_at(prefix_len);
+        let mut chunks = initial.chunks_exact(8);
+        for chunk in chunks.by_ref() {
+          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
+          for hash in values {
+            update(hash, false);
+          }
+        }
+        for hash in chunks.remainder() {
+          update(hash.value(), false);
+        }
+        let mut chunks = remaining.chunks_exact(8);
+        for chunk in chunks.by_ref() {
+          let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
+          for hash in values {
+            update(hash, true);
+          }
+        }
+        for hash in chunks.remainder() {
+          update(hash.value(), true);
+        }
+      } else {
+        for hash in hashes {
+          let mixed = splitmix64(hash.value() ^ stage_seed);
+          let bucket = bucket_index(mixed, count);
+          #[allow(clippy::cast_possible_truncation)]
+          let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
+          hash_values[bucket] = hash_values[bucket].min(rank);
+        }
       }
     } else {
-      for &hash in hashes {
-        let mixed = splitmix64(hash ^ stage_seed);
+      for hash in hashes {
+        let mixed = splitmix64(hash.value() ^ stage_seed);
         let bucket = wide_bucket_index(splitmix64(mixed), len);
         #[allow(clippy::cast_possible_truncation)]
         let rank = prefix | (mixed >> (32 + RANK_BITS)) as u32;
@@ -130,7 +195,8 @@ pub(super) fn apply(
     let capacity = len.min(512);
     let mut seen = FxHashSet::with_capacity_and_hasher(capacity, FxBuildHasher);
     heap = Vec::with_capacity(capacity);
-    for &hash in hashes {
+    for hash in hashes {
+      let hash = hash.value();
       if seen.insert(hash) {
         heap.push(splitmix64(hash ^ fallback_seed));
       }
@@ -150,8 +216,8 @@ pub(super) fn apply(
       heap = vec![0; hashes.len()];
       &mut heap
     };
-    for (value, &hash) in mixed.iter_mut().zip(hashes) {
-      *value = splitmix64(hash ^ fallback_seed);
+    for (value, hash) in mixed.iter_mut().zip(hashes) {
+      *value = splitmix64(hash.value() ^ fallback_seed);
     }
     mixed
   };
@@ -355,6 +421,55 @@ mod tests {
             "fallback deduplication changed the signature"
           );
         }
+      }
+    }
+  }
+
+  #[test]
+  fn long_rows_keep_late_improvements_across_incremental_updates() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0042_4f55_4e44);
+    for count in [8, 128, 512] {
+      let permutations: Vec<_> = (0..count)
+        .map(|_| (rng.next_u64() | 1, rng.next_u64()))
+        .collect();
+      let soa = PermutationSoA::from_permutations(&permutations);
+      let count_u32 = u32::try_from(count).unwrap();
+      let block_len = (count * 8).max(1024);
+      let stage_seed = permutations[0].1 ^ BUCKET_DOMAIN;
+      let mut representatives = vec![None; count];
+      let mut missing = count;
+      while missing != 0 {
+        let hash = rng.next_u64();
+        let bucket = bucket_index(splitmix64(hash ^ stage_seed), count_u32);
+        if representatives[bucket].replace(hash).is_none() {
+          missing -= 1;
+        }
+      }
+      let mut hashes: Vec<_> = representatives.into_iter().flatten().collect();
+      hashes.extend((count..block_len).map(|_| rng.next_u64()));
+      let prefix_len = hashes.len();
+      let mut initial = vec![u32::MAX; count];
+      reference(&mut initial, &permutations, &hashes);
+      assert!(initial.iter().all(|&value| value < 1 << FRACTION_BITS));
+
+      hashes.extend((0..block_len * 3 + 3).map(|_| rng.next_u64()));
+      hashes.extend_from_within(..count);
+      let mut expected = vec![u32::MAX; count];
+      reference(&mut expected, &permutations, &hashes);
+      assert_ne!(expected, initial, "fixture must contain later improvements");
+
+      let mut actual = vec![u32::MAX; count];
+      apply(&mut actual, &permutations, &soa, &hashes);
+      assert_eq!(actual, expected);
+      hashes.reverse();
+      for split in [1, prefix_len - 1, prefix_len, prefix_len + 1] {
+        let mut actual = vec![u32::MAX; count];
+        apply(&mut actual, &permutations, &soa, &hashes[..split]);
+        apply(&mut actual, &permutations, &soa, &hashes[split..]);
+        assert_eq!(
+          actual, expected,
+          "chunk boundaries changed an incremental minimum"
+        );
       }
     }
   }

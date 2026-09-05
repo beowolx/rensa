@@ -25,7 +25,9 @@ pub fn try_extend_prehashed_u64_buffer(
   let Ok(buffer) = PyBuffer::<u64>::get(document) else {
     return Ok(false);
   };
-  if !buffer.is_c_contiguous() {
+  if !buffer.is_c_contiguous()
+    || !crate::py_input::buffer_has_native_byte_order(&buffer)
+  {
     return Err(crate::py_input::convert::py_err_to_type_error(
       crate::py_input::PREHASHED_TOKEN_TYPE_ERROR,
     ));

@@ -183,6 +183,8 @@ c_digests64 = CMinHash.digests64_from_token_hash_sets(
 )
 ```
 
+`RMinHash.digest_matrix_from_flat_token_hashes(values, offsets, num_perm, seed)` accepts flat token hashes and row boundaries. Typed token buffers must contain contiguous native-endian `uint64` values. Large buffers in single-thread mode are read directly while retaining the GIL; parallel processing uses an owned copy. Row offsets are read before acquiring the token buffer.
+
 ### Streaming deduplication
 
 For continuous data streams, use the built-in deduplicator:
@@ -267,7 +269,7 @@ uv run python benchmarks/full_benchmark.py
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
 - `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for token hashing, classic and rho sketching, streaming C-MinHash insertion, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
-- `benchmarks/sketch_benchmark.py`: batch sketch construction on identical byte tokens across classic R-MinHash, C-MinHash, rho, Datasketch and FastSketch. Input preparation and digest normalization are outside timing.
+- `benchmarks/sketch_benchmark.py`: batch sketch construction on identical byte tokens across classic R-MinHash, C-MinHash, rho, Datasketch and FastSketch. Input preparation and digest normalization are outside timing. Use `--prehashed --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512` to compare the R-MinHash and FastSketch flat-buffer APIs through million-token rows; input size is capped by reducing the row count. Add `--repeat-cardinality 4` to measure repeated inputs.
 - `benchmarks/accuracy_benchmark.py`: bias, RMSE and threshold classification against exact Jaccard, plus separate query-all retrieval precision/recall on aligned and reordered pairs. For example: `uv run python benchmarks/accuracy_benchmark.py --output-json .bench/accuracy.json`.
 
 Kernel measurements run each case, input size, and permutation count in a fresh subprocess by default, with 200 ms of untimed warmup and at least 100 ms per sample. Use `--in-process` only for diagnosis. For noisy multi-thread measurements, increase `--min-sample-seconds` and alternate the order of the builds. Keep all samples; large timing dispersion makes a comparison inconclusive.

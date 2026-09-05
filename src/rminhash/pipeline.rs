@@ -1,4 +1,7 @@
-use crate::py_input::extend_prehashed_token_values_from_document;
+use crate::py_input::{
+  buffer_has_native_byte_order, extend_prehashed_token_values_from_document,
+  extend_prehashed_token_values_from_iterable, PREHASHED_TOKEN_TYPE_ERROR,
+};
 use crate::rminhash::permutation_cache::AdaptivePermutationCache;
 use crate::rminhash::send_ptr::SendPtr;
 use crate::rminhash::{
@@ -7,12 +10,14 @@ use crate::rminhash::{
 };
 use crate::simd::dispatch::PermutationSoA;
 use pyo3::buffer::{Element, PyBuffer};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyList, PyTuple};
 use rayon::prelude::*;
 use std::sync::mpsc;
 use std::thread;
+
+const MIN_FLAT_BUFFER_HASHES: usize = 65_536;
 
 fn new_permutation_cache(
   config: DigestBuildConfig,
@@ -186,6 +191,73 @@ impl RMinHash {
     Ok(values)
   }
 
+  pub(in crate::rminhash) fn build_digest_matrix_from_flat_python_hashes(
+    token_hashes: &Bound<'_, PyAny>,
+    row_offsets: &Bound<'_, PyAny>,
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<RMinHashDigestMatrix> {
+    let offsets = Self::parse_row_offsets(row_offsets)?;
+    let values = if let Ok(buffer) = PyBuffer::<u64>::get(token_hashes) {
+      if !buffer.is_c_contiguous() || !buffer_has_native_byte_order(&buffer) {
+        return Err(PyTypeError::new_err(PREHASHED_TOKEN_TYPE_ERROR));
+      }
+      if buffer.item_count() >= MIN_FLAT_BUFFER_HASHES
+        && rayon::current_num_threads() == 1
+        && DigestBuildConfig::from_env().max_perm_cache_hashes == 0
+      {
+        return Self::build_digest_matrix_from_flat_buffer(
+          token_hashes.py(),
+          &buffer,
+          &offsets,
+          num_perm,
+          seed,
+        );
+      }
+      buffer.to_vec(token_hashes.py())?
+    } else {
+      let mut values = Vec::new();
+      extend_prehashed_token_values_from_iterable(token_hashes, &mut values)?;
+      values
+    };
+    Self::build_digest_matrix_from_flat_token_hashes(
+      &values, &offsets, num_perm, seed,
+    )
+  }
+
+  fn build_digest_matrix_from_flat_buffer(
+    py: Python<'_>,
+    buffer: &PyBuffer<u64>,
+    offsets: &[usize],
+    num_perm: usize,
+    seed: u64,
+  ) -> PyResult<RMinHashDigestMatrix> {
+    Self::validate_flat_row_offsets(offsets, buffer.item_count())?;
+    let rows = offsets.len() - 1;
+    let mut data = vec![u32::MAX; checked_matrix_len(rows, num_perm)?];
+    let shared = crate::rminhash::shared_permutations(num_perm, seed);
+    let values = buffer
+      .as_slice(py)
+      .ok_or_else(|| PyTypeError::new_err(PREHASHED_TOKEN_TYPE_ERROR))?;
+    // Keep the GIL and buffer alive throughout traversal. ReadOnlyCell copies
+    // each value without assuming readonly views have no writable aliases.
+    for (row, bounds) in data.chunks_exact_mut(num_perm).zip(offsets.windows(2))
+    {
+      crate::rminhash::bucket::apply(
+        row,
+        &shared.pairs,
+        &shared.soa,
+        &values[bounds[0]..bounds[1]],
+      );
+    }
+    Ok(RMinHashDigestMatrix {
+      num_perm,
+      rows,
+      data,
+      rho_sidecar: None,
+    })
+  }
+
   fn extract_row_offset(item: &Bound<'_, PyAny>) -> PyResult<usize> {
     let value = item
       .extract::<u64>()
@@ -205,7 +277,7 @@ impl RMinHash {
     let Ok(buffer) = PyBuffer::<T>::get(values) else {
       return Ok(false);
     };
-    if !buffer.is_c_contiguous() {
+    if !buffer.is_c_contiguous() || !buffer_has_native_byte_order(&buffer) {
       return Err(PyValueError::new_err(FLAT_ROW_OFFSET_TYPE_ERROR));
     }
     let slice = unsafe {

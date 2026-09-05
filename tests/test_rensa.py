@@ -321,6 +321,174 @@ def test_rminhash_flat_token_hash_matrix_matches_default_path():
     assert from_flat_buffers == baseline
 
 
+@pytest.mark.parametrize("digest", [
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets(
+        [values], 16, 42).to_rows(), id="r_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes(
+        values, [0, len(values)], 16, 42).to_rows(), id="r_flat"),
+    pytest.param(lambda values: CMinHash.digests64_from_token_hash_sets(
+        [values], 16, 42), id="c_batch"),
+])
+def test_prehashed_requires_integer_values(digest):
+    class IndexValue:
+        def __index__(self):
+            raise AssertionError("prehashed conversion must not invoke __index__")
+
+    class IntegerValue(int):
+        def __index__(self):
+            raise AssertionError("integer subclasses must use their stored value")
+
+    assert digest([1, IntegerValue(2)]) == digest([1, 2])
+    with pytest.raises(TypeError, match="unsigned 64-bit integer"):
+        digest([1, IndexValue()])
+
+
+@pytest.mark.parametrize("digest", [
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets(
+        [values], 16, 42).to_rows(), id="r_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets_rho(
+        [values], 16, 42).to_rows(), id="rho_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes(
+        values, [0, len(values)], 16, 42).to_rows(), id="r_flat"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes_rho(
+        values, [0, len(values)], 16, 42).to_rows(), id="rho_flat"),
+    pytest.param(lambda values: CMinHash.digests64_from_token_hash_sets(
+        [values], 16, 42), id="c_batch"),
+])
+def test_prehashed_integer_buffers_require_native_byte_order(digest):
+    np = pytest.importorskip("numpy")
+    values = [1, 0x0102030405060708, (1 << 64) - 2]
+    native = np.array(values, dtype=np.uint64)
+    expected = digest(values)
+    assert digest(native) == expected
+    assert digest(memoryview(native).toreadonly()) == expected
+
+    foreign = np.array(values, dtype=np.dtype(np.uint64).newbyteorder("S"))
+    with pytest.raises(TypeError, match="unsigned 64-bit integer"):
+        digest(foreign)
+
+
+@pytest.mark.parametrize("width", [2, 4, 8])
+@pytest.mark.parametrize("digest", [
+    RMinHash.digest_matrix_from_flat_token_hashes,
+    RMinHash.digest_matrix_from_flat_token_hashes_rho,
+])
+def test_row_offset_buffers_do_not_reinterpret_foreign_byte_order(width, digest):
+    np = pytest.importorskip("numpy")
+    values = [1, 2, 3]
+    native = np.array([0, 1, 3], dtype=f"u{width}")
+    expected = digest(values, [0, 1, 3], 16, 42).to_rows()
+    assert digest(values, native, 16, 42).to_rows() == expected
+
+    foreign = native.astype(native.dtype.newbyteorder("S"))
+    try:
+        actual = digest(values, foreign, 16, 42).to_rows()
+    except ValueError as error:
+        assert "row_offsets must be an unsigned integer" in str(error)
+    else:
+        # A rejected typed view may fall back to correct numeric iteration.
+        assert actual == expected
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_rminhash_large_flat_buffer_views_match_owned_inputs(threads):
+    code = """
+from array import array
+import sys
+from rensa import RMinHash
+
+size = 3 * 65536 + 19
+mask = (1 << 64) - 1
+original = array('Q', ((i * 0x9e3779b97f4a7c15) & mask for i in range(size)))
+storage = array('Q', [7]) + original + array('Q', [11])
+view = memoryview(storage)[1:-1]
+readonly = view.toreadonly()
+boundaries = [0, 0, 65535, 65536, 65536, size]
+
+for k in (17, 128):
+    for offsets in (boundaries, [0, size]):
+        expected = RMinHash.digest_matrix_from_flat_token_hashes(
+            list(original), offsets, k, 42).to_rows()
+        offset_view = memoryview(array('Q', offsets)).toreadonly()
+        for source in (original, view, readonly):
+            actual = RMinHash.digest_matrix_from_flat_token_hashes(
+                source, offset_view, k, 42).to_rows()
+            assert actual == expected
+assert storage[0] == 7 and storage[-1] == 11
+assert list(view) == list(original)
+
+# Offset iteration runs before token snapshots for every size/input path.
+before = RMinHash.digest_matrix_from_flat_token_hashes([42], [0, 1], 128, 42).to_rows()
+changed = RMinHash.digest_matrix_from_flat_token_hashes([42, 99], [0, 2], 128, 42).to_rows()
+assert changed != before
+for length in (8, 65537):
+    for values in (array('Q', [42]) * length, [42] * length):
+        sources = [values]
+        if isinstance(values, array):
+            sources.append(memoryview(values).toreadonly())
+        for source in sources:
+            values[-1] = 42
+            iterations = []
+            class ChangingOffsets:
+                def __iter__(self):
+                    iterations.append(True)
+                    values[-1] = 99
+                    return iter([0, length])
+            actual = RMinHash.digest_matrix_from_flat_token_hashes(
+                source, ChangingOffsets(), 128, 42).to_rows()
+            assert actual == changed
+            assert iterations == [True]
+
+# A readonly view still has a writable alias. Later calls must observe writes.
+view[:] = memoryview(array('Q', [99]) * size)
+expected = RMinHash.digest_matrix_from_flat_token_hashes([99], [0, 1], 128, 42)
+actual = RMinHash.digest_matrix_from_flat_token_hashes(readonly, [0, size], 128, 42)
+assert actual.to_rows() == expected.to_rows()
+
+for offsets in ([], [0], [1, size], [0, size - 1], [0, size + 1], [0, 2, 1, size]):
+    try:
+        RMinHash.digest_matrix_from_flat_token_hashes(readonly, offsets, 128, 42)
+    except ValueError as error:
+        assert 'row_offsets must start at 0' in str(error)
+    else:
+        raise AssertionError('invalid row offsets were accepted')
+try:
+    RMinHash.digest_matrix_from_flat_token_hashes(view[::2], [0, (size + 1) // 2], 128, 42)
+except TypeError as error:
+    assert 'unsigned 64-bit integer' in str(error)
+else:
+    raise AssertionError('noncontiguous input was accepted')
+
+if sys.version_info >= (3, 12):
+    class Exporter:
+        def __init__(self, values):
+            self.values = values
+            self.events = []
+        def __buffer__(self, flags):
+            self.events.append('acquire')
+            return memoryview(self.values)
+        def __release_buffer__(self, view):
+            self.events.append('release')
+        def __iter__(self):
+            return iter(self.values)
+    for values in (array('Q', [1, 2]), original, array('B', [1, 2])):
+        exporter = Exporter(values)
+        expected = RMinHash.digest_matrix_from_flat_token_hashes(
+            list(values), [0, len(values)], 17, 42).to_rows()
+        actual = RMinHash.digest_matrix_from_flat_token_hashes(
+            exporter, [0, len(values)], 17, 42).to_rows()
+        assert actual == expected
+        assert exporter.events == ['acquire', 'release']
+print('PASS')
+"""
+    env = dict(os.environ, RAYON_NUM_THREADS=str(threads),
+               RENSA_MAX_PERM_CACHE_HASHES="0")
+    result = subprocess.run([sys.executable, "-c", code], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PASS"
+
+
 def test_rminhash_rho_matrix_apis_are_consistent():
     token_sets = [
         ["alpha", "beta", "gamma"],
