@@ -77,9 +77,87 @@ pub(super) unsafe fn apply_hash_batch_to_values_avx512(
   }
 }
 
+/// Updates only fallback coordinates, mixing eight tokens per vector.
+///
+/// # Safety
+/// The caller must establish AVX-512F and AVX-512DQ CPU/OS support.
+pub(super) unsafe fn apply_bucket_fallback_avx512(
+  hash_values: &mut [u32],
+  permutations: &[(u64, u64)],
+  hashes: &[u64],
+  rank_bits: u32,
+) {
+  debug_assert!((1..32).contains(&rank_bits));
+  let fallback = u32::MAX << (32 - rank_bits);
+  let discarded = (1 << rank_bits) - 1;
+  let blocks = hashes.len() / 8;
+  let tail = &hashes[blocks * 8..];
+
+  for (value, (a, b)) in hash_values.iter_mut().zip(permutations) {
+    if *value < fallback {
+      continue;
+    }
+    // Recover the greatest raw rank represented by the stored fraction.
+    let mut minimum = (*value << rank_bits) | discarded;
+    if blocks != 0 {
+      // SAFETY: the caller proves AVX-512F/DQ support. Broadcasts read the
+      // initialized a/b scalars and four-byte minimum. The token loop reads
+      // blocks * 8 initialized hashes. The final store writes only minimum.
+      // All modified registers are declared, including flags via omission
+      // of preserves_flags. No target_feature or AVX-512 intrinsics are
+      // needed, retaining Rust 1.83 compatibility.
+      unsafe {
+        core::arch::asm!(
+          "vpbroadcastq zmm0, [{a}]",
+          "vpbroadcastq zmm1, [{b}]",
+          "vpbroadcastd zmm2, [{minimum}]",
+          "vpsrlq zmm2, zmm2, 32",
+          "2:",
+          "vmovdqu64 zmm3, [{cursor}]",
+          "vpmullq zmm3, zmm3, zmm0",
+          "vpaddq zmm3, zmm3, zmm1",
+          "vpsrlq zmm3, zmm3, 32",
+          "vpminuq zmm2, zmm2, zmm3",
+          "add {cursor}, 64",
+          "dec {count}",
+          "jnz 2b",
+          // Reduce all eight u64 lanes: halves, 128-bit pairs, then neighbors.
+          "vshufi64x2 zmm3, zmm2, zmm2, 0x4e",
+          "vpminuq zmm2, zmm2, zmm3",
+          "vshufi64x2 zmm3, zmm2, zmm2, 0xb1",
+          "vpminuq zmm2, zmm2, zmm3",
+          "vpshufd zmm3, zmm2, 0x4e",
+          "vpminuq zmm2, zmm2, zmm3",
+          "vmovd [{minimum}], xmm2",
+          a = in(reg) a,
+          b = in(reg) b,
+          minimum = in(reg) &raw mut minimum,
+          cursor = inout(reg) hashes.as_ptr() => _,
+          count = inout(reg) blocks => _,
+          out("zmm0") _,
+          out("zmm1") _,
+          out("zmm2") _,
+          out("zmm3") _,
+          options(nostack),
+        );
+      }
+    }
+    // Zero is final; the early exit also keeps this short tail scalar.
+    for &hash in tail {
+      if minimum == 0 {
+        break;
+      }
+      minimum = minimum.min(permute_hash(hash, *a, *b));
+    }
+    *value = fallback | (minimum >> rank_bits);
+  }
+}
+
 #[cfg(test)]
 mod tests {
-  use crate::simd::x86_avx512::apply_hash_batch_to_values_avx512;
+  use crate::simd::x86_avx512::{
+    apply_bucket_fallback_avx512, apply_hash_batch_to_values_avx512,
+  };
   use rand_core::{RngCore, SeedableRng};
   use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -159,6 +237,89 @@ mod tests {
             );
           }
           assert_eq!(actual, expected, "width={width}, hashes={hash_len}");
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn avx512_bucket_fallback_reduces_every_vector_lane() {
+    if !supported() {
+      return;
+    }
+    for lane in 0..8 {
+      let mut hashes = [u64::MAX; 40];
+      hashes[8 + lane] = 0;
+      let mut values = [u32::MAX];
+      // SAFETY: both required CPU/OS features were detected above.
+      unsafe {
+        apply_bucket_fallback_avx512(&mut values, &[(1, 0)], &hashes, 2);
+      }
+      assert_eq!(values, [0xc000_0000], "minimum in lane {lane}");
+    }
+  }
+
+  #[test]
+  fn avx512_bucket_fallback_matches_scalar_at_boundaries_and_tails() {
+    if !supported() {
+      return;
+    }
+    let edges = [
+      0,
+      1,
+      u64::MAX,
+      u64::MAX - 1,
+      u64::from(u32::MAX),
+      1 << 32,
+      1 << 63,
+    ];
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+    for width in [0, 1, 3, 7, 8, 9, 31, 32, 33, 127, 128, 129, 511, 512] {
+      let permutations: Vec<_> = (0..width)
+        .map(|lane| {
+          if lane < edges.len() {
+            (edges[lane], edges[edges.len() - lane - 1])
+          } else {
+            (rng.next_u64(), rng.next_u64())
+          }
+        })
+        .collect();
+      for hash_len in [0, 1, 7, 8, 9, 31, 32, 33, 39, 40, 127, 128, 129] {
+        let hashes: Vec<_> = (0..hash_len)
+          .map(|lane| {
+            if lane < edges.len() {
+              edges[lane]
+            } else {
+              rng.next_u64()
+            }
+          })
+          .collect();
+        for rank_bits in [1, 2, 8, 31] {
+          let fallback = u32::MAX << (32 - rank_bits);
+          let boundaries = [0, fallback - 1, fallback, fallback + 1, u32::MAX];
+          let mut actual: Vec<_> = (0..width + 3)
+            .map(|lane| boundaries[lane % boundaries.len()])
+            .collect();
+          let mut expected = actual.clone();
+          for (value, &(a, b)) in expected[1..].iter_mut().zip(&permutations) {
+            for &hash in &hashes {
+              *value =
+                (*value).min(fallback | (reference(hash, a, b) >> rank_bits));
+            }
+          }
+          // SAFETY: both required CPU/OS features were detected above.
+          unsafe {
+            apply_bucket_fallback_avx512(
+              &mut actual[1..],
+              &permutations,
+              &hashes,
+              rank_bits,
+            );
+          }
+          assert_eq!(
+            actual, expected,
+            "width={width}, hashes={hash_len}, rank_bits={rank_bits}"
+          );
         }
       }
     }

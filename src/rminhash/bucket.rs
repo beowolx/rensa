@@ -30,6 +30,16 @@ pub(super) trait HashValue {
   ) -> [u64; 8]
   where
     Self: Sized;
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  fn mix_chunk_below(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+  ) -> Option<([u64; 8], u8)>
+  where
+    Self: Sized;
 }
 
 impl HashValue for u64 {
@@ -47,6 +57,17 @@ impl HashValue for u64 {
   ) -> [u64; 8] {
     mixer.mix(values, seed)
   }
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[inline]
+  fn mix_chunk_below(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+  ) -> Option<([u64; 8], u8)> {
+    mixer.mix_below::<{ 32 + RANK_BITS }>(values, seed, bound)
+  }
 }
 
 impl HashValue for ReadOnlyCell<u64> {
@@ -63,6 +84,17 @@ impl HashValue for ReadOnlyCell<u64> {
     seed: u64,
   ) -> [u64; 8] {
     mixer.mix_cells(values, seed)
+  }
+
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[inline]
+  fn mix_chunk_below(
+    values: &[Self; 8],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+  ) -> Option<([u64; 8], u8)> {
+    mixer.mix_cells_below::<{ 32 + RANK_BITS }>(values, seed, bound)
   }
 }
 
@@ -101,6 +133,50 @@ fn for_each_mixed<H: HashValue>(
 }
 
 #[inline]
+fn for_each_mixed_below<H: HashValue>(
+  hashes: &[H],
+  seed: u64,
+  bound: u32,
+  mut visit: impl FnMut(u64),
+) {
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if hashes.len() >= 8 {
+    if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
+      let mut chunks = hashes.chunks_exact(8);
+      for chunk in chunks.by_ref() {
+        if let Some(values) = chunk.first_chunk::<8>() {
+          if let Some((mixed, mut mask)) =
+            H::mix_chunk_below(values, mixer, seed, bound)
+          {
+            while mask != 0 {
+              let lane = mask.trailing_zeros() as usize;
+              visit(mixed[lane]);
+              mask &= mask - 1;
+            }
+          }
+        }
+      }
+      for hash in chunks.remainder() {
+        let mixed = splitmix64(hash.value() ^ seed);
+        #[allow(clippy::cast_possible_truncation)]
+        let rank = (mixed >> (32 + RANK_BITS)) as u32;
+        if rank < bound {
+          visit(mixed);
+        }
+      }
+      return;
+    }
+  }
+  for_each_mixed(hashes, seed, |mixed| {
+    #[allow(clippy::cast_possible_truncation)]
+    let rank = (mixed >> (32 + RANK_BITS)) as u32;
+    if rank < bound {
+      visit(mixed);
+    }
+  });
+}
+
+#[inline]
 #[allow(clippy::cast_possible_truncation)]
 fn bucket_index(mut mixed: u64, count: u32) -> usize {
   let threshold = count.wrapping_neg() % count;
@@ -134,26 +210,40 @@ pub(super) fn apply<H: HashValue>(
   hashes: &[H],
 ) {
   let len = hash_values.len().min(permutations.len());
-  if hashes.len() >= 1 << 20 && len.is_power_of_two() {
+  #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+  let early_filter = false;
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  let early_filter = hashes.len() >= 65_536
+    && hashes.len() < 1 << 20
+    && len.is_power_of_two()
+    && hashes.len() / len >= 128
+    && crate::simd::dispatch::Avx512Mixer::detect().is_some();
+  if (hashes.len() >= 1 << 20 || early_filter) && len.is_power_of_two() {
     if let Ok(count) = u32::try_from(len) {
-      let end = len.saturating_mul(512).max(65_536).min(hashes.len());
+      let (end, maximum_bound) = if early_filter {
+        // Vector rejection makes a less selective bound useful, but require
+        // enough tokens per coordinate before splitting the bucket passes.
+        (hashes.len() / 2, (1 << FRACTION_BITS) / 8)
+      } else {
+        (
+          len.saturating_mul(512).max(65_536).min(hashes.len()),
+          (1 << FRACTION_BITS) / 32,
+        )
+      };
       let (initial, remaining) = hashes.split_at(end);
       apply_unfiltered(hash_values, permutations, soa, initial);
       let hash_values = &mut hash_values[..len];
       let upper_bound = hash_values.iter().copied().max().unwrap_or(u32::MAX);
-      if upper_bound <= (1 << FRACTION_BITS) / 32 {
+      if upper_bound <= maximum_bound {
         // The bound is below 2^30, so every coordinate has a round-zero
         // value and later rounds cannot improve it.
         let seed = permutations[0].1 ^ BUCKET_DOMAIN;
         let shift = 32 - count.trailing_zeros();
-        for_each_mixed(remaining, seed, |mixed| {
+        // Minima only decrease, so this stale maximum remains an upper bound
+        // on every coordinate throughout the remaining input.
+        for_each_mixed_below(remaining, seed, upper_bound, |mixed| {
           #[allow(clippy::cast_possible_truncation)]
           let rank = (mixed >> (32 + RANK_BITS)) as u32;
-          // Minima only decrease, so this stale maximum remains an upper
-          // bound on every coordinate throughout the remaining input.
-          if rank >= upper_bound {
-            return;
-          }
           #[allow(clippy::cast_possible_truncation)]
           let bucket = (u64::from(mixed as u32) >> shift) as usize;
           // SAFETY: count is this slice's power-of-two length, 2^p. Shifting
@@ -557,6 +647,72 @@ mod tests {
           actual, expected,
           "chunk boundaries changed an incremental minimum"
         );
+      }
+    }
+  }
+
+  #[test]
+  fn earlier_vector_filter_preserves_repeated_rows_and_late_improvements() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0045_4152_4c59);
+    for count in [128, 512] {
+      let permutations: Vec<_> = (0..count)
+        .map(|_| (rng.next_u64() | 1, rng.next_u64()))
+        .collect();
+      let soa = PermutationSoA::from_permutations(&permutations);
+      let count_u32 = u32::try_from(count).unwrap();
+      for enabled in [true, false] {
+        let mut representatives = vec![None; count];
+        let mut missing = count;
+        while missing != 0 {
+          let hash = rng.next_u64();
+          let mixed = splitmix64(hash ^ permutations[0].1 ^ BUCKET_DOMAIN);
+          let rank = mixed >> (32 + RANK_BITS);
+          if (enabled && rank >= (1 << FRACTION_BITS) / 16)
+            || (!enabled && rank < (1 << FRACTION_BITS) / 2)
+          {
+            continue;
+          }
+          let bucket = bucket_index(mixed, count_u32);
+          if representatives[bucket].replace(hash).is_none() {
+            missing -= 1;
+          }
+        }
+        let base: Vec<_> = representatives.into_iter().flatten().collect();
+        let mut expected = vec![u32::MAX; count];
+        reference(&mut expected, &permutations, &base);
+        assert_eq!(
+          expected.iter().copied().max().unwrap() <= (1 << FRACTION_BITS) / 8,
+          enabled
+        );
+        let initial = expected.clone();
+        let late: Vec<_> = (0..4099).map(|_| rng.next_u64()).collect();
+        reference(&mut expected, &permutations, &late);
+        assert_ne!(expected, initial, "fixture needs a late improvement");
+        let mut hashes: Vec<_> =
+          base.iter().copied().cycle().take(65_536).collect();
+        hashes.extend_from_slice(&late);
+        let prefix = hashes.len() / 2;
+        let mut prefix_values = vec![u32::MAX; count];
+        apply_unfiltered(
+          &mut prefix_values,
+          &permutations,
+          &soa,
+          &hashes[..prefix],
+        );
+        assert_eq!(prefix_values, initial);
+        let mut actual = vec![u32::MAX; count];
+        apply(&mut actual, &permutations, &soa, &hashes);
+        assert_eq!(actual, expected);
+        for split in [prefix - 1, prefix + 1] {
+          let mut actual = vec![u32::MAX; count];
+          apply(&mut actual, &permutations, &soa, &hashes[..split]);
+          apply(&mut actual, &permutations, &soa, &hashes[split..]);
+          assert_eq!(actual, expected);
+        }
+        hashes.reverse();
+        let mut actual = vec![u32::MAX; count];
+        apply(&mut actual, &permutations, &soa, &hashes);
+        assert_eq!(actual, expected);
       }
     }
   }

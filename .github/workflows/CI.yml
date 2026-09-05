@@ -232,6 +232,7 @@ jobs:
     timeout-minutes: 30
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.performance_only) }}
       BENCH_DATASET_KEY: ag_news
       BENCH_MAX_ROWS: "10000"
@@ -374,6 +375,20 @@ jobs:
                 --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
                 --output-json "${output_json%.json}_prehashed_avx2.json" \
                 | tee "${output_json%.json}_prehashed_avx2.txt"
+
+              "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --repeat-cardinality 4 --rows 8 \
+                --repetitions 5 --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_repeated.json" \
+                | tee "${output_json%.json}_prehashed_repeated.txt"
+
+              RENSA_FORCE_KERNEL=avx2 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --repeat-cardinality 4 --rows 8 \
+                --repetitions 5 --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_repeated_avx2.json" \
+                | tee "${output_json%.json}_prehashed_repeated_avx2.txt"
             fi
 
             echo "Completed ${label} benchmark."
@@ -390,6 +405,52 @@ jobs:
             "${GITHUB_WORKSPACE}/.bench/base.json" \
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
+
+      - name: Validate repeated-token backend diagnostics
+        if: env.BENCH_COMPARE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -qw avx512f /proc/cpuinfo || ! grep -qw avx512dq /proc/cpuinfo; then
+            exit 0
+          fi
+          "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY' | tee .bench/validation_repeated.txt
+          import json
+
+          reports = []
+          for suffix, backend in (("", None), ("_avx2", "avx2")):
+              with open(f".bench/head_prehashed_repeated{suffix}.json", encoding="utf-8") as handle:
+                  report = json.load(handle)
+              if report["environment"]["flags"].pop("RENSA_FORCE_KERNEL", None) != backend:
+                  raise SystemExit("repeated-token diagnostic backend mismatch")
+              reports.append(report)
+          default, avx2 = reports
+          if default["config"] != avx2["config"] or default["environment"] != avx2["environment"]:
+              raise SystemExit("repeated-token diagnostic config/environment mismatch")
+          expected_config = {"prehashed": True, "engines": ["rensa_classic"],
+                             "repeat_cardinality": 4, "rows": 8, "repetitions": 5,
+                             "min_sample_seconds": 0.05, "max_input_tokens": 8388608,
+                             "sizes": [65536, 1048576], "num_perm": [128, 512], "in_process": False}
+          if any(default["config"][key] != value for key, value in expected_config.items()):
+              raise SystemExit("repeated-token diagnostic matrix mismatch")
+          expected_cases = {(size, k) for size in (65536, 1048576) for k in (128, 512)}
+          rows = []
+          for report in reports:
+              cases = {(row["tokens_per_row"], row["num_perm"]): row for row in report["results"]}
+              if cases.keys() != expected_cases or len(report["results"]) != len(expected_cases):
+                  raise SystemExit("repeated-token diagnostic cases missing or duplicated")
+              if any(row["engine"] != "rensa_classic" or row["rows"] != 8
+                     or row["distinct_tokens_per_row"] != 4 for row in cases.values()):
+                  raise SystemExit("repeated-token diagnostic inputs mismatch")
+              rows.append(cases)
+          for case, result in rows[0].items():
+              forced = rows[1][case]
+              if any(result[key] != forced[key] for key in ("input_sha256", "sha256")):
+                  raise SystemExit(f"repeated-token diagnostic hash mismatch: {case}")
+              print(f"PASS: repeated tokens n={case[0]}, k={case[1]}: "
+                    f"default={result['median_seconds']:.6f}s, avx2={forced['median_seconds']:.6f}s; "
+                    f"avx2/default={forced['median_seconds'] / result['median_seconds']:.3f}x")
+          PY
 
       - name: Validate benchmark outputs
         if: env.BENCH_COMPARE == 'true'

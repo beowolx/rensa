@@ -48,6 +48,42 @@ impl Avx512Mixer {
       crate::simd::x86::splitmix64x8_avx512(values.as_ptr().cast::<u64>(), seed)
     }
   }
+
+  #[inline]
+  #[allow(clippy::unused_self)]
+  pub fn mix_below<const RANK_SHIFT: u32>(
+    self,
+    values: &[u64; 8],
+    seed: u64,
+    bound: u32,
+  ) -> Option<([u64; 8], u8)> {
+    // SAFETY: this capability proves AVX-512F/DQ; the array provides all eight values.
+    unsafe {
+      crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
+        values.as_ptr(),
+        seed,
+        bound,
+      )
+    }
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)]
+  pub fn mix_cells_below<const RANK_SHIFT: u32>(
+    self,
+    values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
+    seed: u64,
+    bound: u32,
+  ) -> Option<([u64; 8], u8)> {
+    // SAFETY: same whole-array, transparent-layout and feature proof as mix_cells.
+    unsafe {
+      crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
+        values.as_ptr().cast::<u64>(),
+        seed,
+        bound,
+      )
+    }
+  }
 }
 
 #[derive(Clone, Default)]
@@ -285,6 +321,17 @@ pub fn apply_hash_batch_to_values(
     }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     KernelKind::Avx512 => {
+      if hash_batch.len() == 1
+        && hash_values.len() >= 512
+        && forced_kernel_supported(KernelKind::Avx2)
+      {
+        crate::simd::x86::apply_hash_batch_to_values_avx2(
+          hash_values,
+          permutations,
+          hash_batch,
+        );
+        return;
+      }
       // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
       unsafe {
         crate::simd::x86_avx512::apply_hash_batch_to_values_avx512(
@@ -309,6 +356,19 @@ pub fn apply_bucket_fallback(
   let discarded = (1 << rank_bits) - 1;
   let len = hash_values.len().min(permutations.len());
   let kind = kernel_kind();
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if hashes.len() > 32 && kind == KernelKind::Avx512 {
+    // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+    unsafe {
+      crate::simd::x86_avx512::apply_bucket_fallback_avx512(
+        hash_values,
+        permutations,
+        hashes,
+        rank_bits,
+      );
+    }
+    return;
+  }
   let mut cursor = 0;
   while cursor < len {
     let mut indices = [0; PACKED_LANES];
@@ -561,6 +621,12 @@ mod tests {
       for seed in [0, 42, u64::MAX] {
         let expected = mixer.mix(&values, seed);
         assert_eq!(mixer.mix_cells(chunk, seed), expected);
+        for bound in [0, 1, 1 << 25, 1 << 30] {
+          assert_eq!(
+            mixer.mix_below::<34>(&values, seed, bound),
+            mixer.mix_cells_below::<34>(chunk, seed, bound),
+          );
+        }
       }
       assert_eq!(
         cells
