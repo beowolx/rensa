@@ -56,6 +56,33 @@ pub(super) fn apply(
     return;
   }
   let hash_values = &mut hash_values[..len];
+  let fresh_short = hashes.len() <= 32
+    && len >= 128
+    && hash_values[0] == u32::MAX
+    && hash_values
+      .iter()
+      .fold(u32::MAX, |combined, &value| combined & value)
+      == u32::MAX;
+  // Three rounds cannot fill these rows, so write their fallback in place.
+  if fresh_short {
+    let mut tiny;
+    let mut small;
+    let mixed = if hashes.len() <= 8 {
+      tiny = [0; 8];
+      &mut tiny[..hashes.len()]
+    } else {
+      small = [0; 32];
+      &mut small[..hashes.len()]
+    };
+    let fallback_seed = permutations[0].0 ^ FALLBACK_DOMAIN;
+    for (value, &hash) in mixed.iter_mut().zip(hashes) {
+      *value = splitmix64(hash ^ fallback_seed);
+    }
+    apply_hash_batch_to_values(hash_values, permutations, soa, mixed);
+    for value in hash_values.iter_mut() {
+      *value = FALLBACK | (*value >> RANK_BITS);
+    }
+  }
   for round in 0..BUCKET_ROUNDS {
     let stage_seed = permutations[0].1
       ^ BUCKET_DOMAIN
@@ -79,9 +106,12 @@ pub(super) fn apply(
       }
     }
     let next_prefix = (round + 1) << FRACTION_BITS;
-    if hash_values.iter().all(|&value| value < next_prefix) {
+    if !fresh_short && hash_values.iter().all(|&value| value < next_prefix) {
       return;
     }
+  }
+  if fresh_short {
+    return;
   }
 
   let missing = hash_values
@@ -278,7 +308,7 @@ mod tests {
         .map(|_| (rng.next_u64() | 1, rng.next_u64()))
         .collect();
       let soa = PermutationSoA::from_permutations(&permutations);
-      for size in [count, count * 2, count * 8] {
+      for size in [31, 32, 33, count, count * 2, count * 8] {
         let hashes: Vec<_> = (0..size).map(|_| rng.next_u64()).collect();
         let mut expected = vec![u32::MAX; count];
         reference(&mut expected, &permutations, &hashes);

@@ -62,27 +62,28 @@ pub(super) fn apply_hash_batch_to_values_neon(
 }
 
 #[inline]
-pub(super) fn apply_hash_batch_to_values_neon_compact(
+pub(super) fn apply_hash_batch_to_values_neon_compact<const N: usize>(
   hash_values: &mut [u32],
-  permutations: &[(u64, u64); 8],
+  permutations: &[(u64, u64); N],
   hash_batch: &[u64],
 ) {
-  let a_hi: [_; 8] =
-    std::array::from_fn(|index| split_u64_words(permutations[index].0).1);
-  let a_lo: [_; 8] =
-    std::array::from_fn(|index| split_u64_words(permutations[index].0).0);
-  let b_hi: [_; 8] =
-    std::array::from_fn(|index| split_u64_words(permutations[index].1).1);
-  let b_lo: [_; 8] =
-    std::array::from_fn(|index| split_u64_words(permutations[index].1).0);
+  let len = hash_values.len().min(permutations.len());
+  let mut a_hi = [0; N];
+  let mut a_lo = [0; N];
+  let mut b_hi = [0; N];
+  let mut b_lo = [0; N];
+  for (index, &(a, b)) in permutations[..len].iter().enumerate() {
+    (a_lo[index], a_hi[index]) = split_u64_words(a);
+    (b_lo[index], b_hi[index]) = split_u64_words(b);
+  }
   // SAFETY: dispatch guarantees NEON support before calling this function.
   unsafe {
     apply_hash_batch_to_values_neon_impl(
       hash_values,
-      &a_hi,
-      &a_lo,
-      &b_hi,
-      &b_lo,
+      &a_hi[..len],
+      &a_lo[..len],
+      &b_hi[..len],
+      &b_lo[..len],
       hash_batch,
     );
   }

@@ -238,6 +238,7 @@ pub fn apply_bucket_fallback(
   hashes: &[u64],
   rank_bits: u32,
 ) {
+  const PACKED_LANES: usize = 128;
   debug_assert!((1..32).contains(&rank_bits));
   let fallback = u32::MAX << (32 - rank_bits);
   let discarded = (1 << rank_bits) - 1;
@@ -245,11 +246,11 @@ pub fn apply_bucket_fallback(
   let kind = kernel_kind();
   let mut cursor = 0;
   while cursor < len {
-    let mut indices = [0; 8];
-    let mut pairs = [(0, 0); 8];
-    let mut values = [u32::MAX; 8];
+    let mut indices = [0; PACKED_LANES];
+    let mut pairs = [(0, 0); PACKED_LANES];
+    let mut values = [u32::MAX; PACKED_LANES];
     let mut count = 0;
-    while cursor < len && count < 8 {
+    while cursor < len && count < PACKED_LANES {
       if hash_values[cursor] >= fallback {
         indices[count] = cursor;
         pairs[count] = permutations[cursor];
@@ -271,11 +272,19 @@ pub fn apply_bucket_fallback(
     } else {
       match kind {
         KernelKind::Scalar => {
-          scalar_apply_hash_batch_to_values(&mut values, &pairs, hashes);
+          scalar_apply_hash_batch_to_values(
+            &mut values[..count],
+            &pairs[..count],
+            hashes,
+          );
         }
         #[cfg(target_arch = "aarch64")]
         KernelKind::Neon => {
-          let lanes = if count == 4 { 4 } else { 8 };
+          let lanes = if count == 4 {
+            4
+          } else {
+            count.next_multiple_of(8)
+          };
           crate::simd::arm64_neon::apply_hash_batch_to_values_neon_compact(
             &mut values[..lanes],
             &pairs,
@@ -284,9 +293,10 @@ pub fn apply_bucket_fallback(
         }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         KernelKind::Avx2 => {
+          let lanes = count.next_multiple_of(8);
           crate::simd::x86::apply_hash_batch_to_values_avx2(
-            &mut values,
-            &pairs,
+            &mut values[..lanes],
+            &pairs[..lanes],
             hashes,
           );
         }

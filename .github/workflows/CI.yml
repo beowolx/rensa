@@ -520,6 +520,12 @@ jobs:
                         f"base={baseline['median_seconds']:.6f}s, FastSketch={competitor['median_seconds']:.6f}s; "
                         f"{baseline['median_seconds'] / result['median_seconds']:.3f}x versus base, "
                         f"{competitor['median_seconds'] / result['median_seconds']:.3f}x versus FastSketch")
+                  if result["median_seconds"] > 1.05 * competitor["median_seconds"]:
+                      regression = f"FAIL: Native R-MinHash exceeds FastSketch by more than 5%: n={key[1]}, k={key[2]}"
+                      print(regression)
+                      native_regressions.append(regression)
+                  else:
+                      print(f"PASS: Native R-MinHash meets FastSketch speed gate (5% tolerance): n={key[1]}, k={key[2]}")
                   if result["median_seconds"] > 1.20 * baseline["median_seconds"]:
                       regression = f"Native R-MinHash exceeds 20% per-case slowdown: n={key[1]}, k={key[2]}"
                       if r_migration:
