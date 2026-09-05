@@ -74,7 +74,7 @@ def operation(case, docs, hashes, num_perm, seed):
             index = CMinHashDeduplicator(0.8, num_perm, seed)
             flags = index.add_pairs(entries)
             return index, flags
-        return insert, lambda result: [len(result[0]), result[1]]
+        return insert, lambda result: [result[0].len(), result[1]]
     if case in ("r_update", "c_update"):
         cls = RMinHash if case == "r_update" else CMinHash
         extract = (lambda result: [s.digest() for s in result]) if case == "r_update" else (
