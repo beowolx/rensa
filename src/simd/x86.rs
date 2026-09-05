@@ -53,6 +53,7 @@ pub(super) unsafe fn splitmix64x8_avx512(
 /// Returns surviving lane positions, writing all mixed values to output only
 /// when at least one rank is below the supplied bound.
 #[inline]
+#[cfg(target_arch = "x86")]
 pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
   values: *const u64,
   seed: u64,
@@ -116,6 +117,109 @@ pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
   #[allow(clippy::cast_possible_truncation)]
   let mask = mask as u8;
   mask
+}
+
+/// Updates complete blocks of eight tokens below a fixed rank bound.
+/// Returns the consumed prefix length; the caller processes the tail in Rust.
+///
+/// # Safety
+/// AVX-512F/DQ must be available, and `input` must address `input_len` readable `u64` values.
+#[cfg(target_arch = "x86_64")]
+pub(super) unsafe fn apply_buckets_below_avx512(
+  input: *const u64,
+  input_len: usize,
+  seed: u64,
+  bound: u32,
+  hash_values: &mut [u32],
+) -> usize {
+  const CONSTANTS: [u64; 3] = [
+    0x9e37_79b9_7f4a_7c15,
+    0xbf58_476d_1ce4_e5b9,
+    0x94d0_49bb_1331_11eb,
+  ];
+  let Ok(width) = u32::try_from(hash_values.len()) else {
+    return 0;
+  };
+  let blocks = input_len / 8;
+  if !width.is_power_of_two() || blocks == 0 {
+    return 0;
+  }
+  let shift = 32 - width.trailing_zeros();
+  let state = [seed, u64::from(bound)];
+  let mut scratch = [0u64; 8];
+  // SAFETY: input supplies blocks * 8 tokens. The checked width is 2^p,
+  // p in 0..=31; zero-extending the low word and shifting by 32-p gives
+  // a valid coordinate, including width one. Every scratch read follows
+  // its complete 64-byte store, with a lane in 0..8 from the nonzero mask.
+  // Updates occur in lane order, so duplicate coordinates preserve minima.
+  // All modified registers and flags are declared. Constants remain live
+  // across the whole span, with no per-block stack state or broadcasts.
+  unsafe {
+    core::arch::asm!(
+      "vpbroadcastq zmm2, [{state}]",
+      "vpbroadcastq zmm3, [{constants}]",
+      "vpbroadcastq zmm4, [{constants} + 8]",
+      "vpbroadcastq zmm5, [{constants} + 16]",
+      "vpbroadcastq zmm6, [{state} + 8]",
+      "2:",
+      "vmovdqu64 zmm0, [{cursor}]",
+      "vpxorq zmm0, zmm0, zmm2",
+      "vpaddq zmm0, zmm0, zmm3",
+      "vpsrlq zmm1, zmm0, 30",
+      "vpxorq zmm0, zmm0, zmm1",
+      "vpmullq zmm0, zmm0, zmm4",
+      "vpsrlq zmm1, zmm0, 27",
+      "vpxorq zmm0, zmm0, zmm1",
+      "vpmullq zmm0, zmm0, zmm5",
+      // The final xor changes only bits 0..=32, leaving these ranks intact.
+      "vpsrlq zmm1, zmm0, 34",
+      "vpcmpuq k1, zmm1, zmm6, 1",
+      "kortestw k1, k1",
+      "jz 3f",
+      "vpsrlq zmm1, zmm0, 31",
+      "vpxorq zmm0, zmm0, zmm1",
+      "vmovdqu64 [{scratch}], zmm0",
+      "kmovw {mask:e}, k1",
+      "4:",
+      "bsf {lane:e}, {mask:e}",
+      "mov {mixed}, [{scratch} + {lane} * 8]",
+      "mov {bucket:e}, {mixed:e}",
+      "shr {bucket}, cl",
+      "shr {mixed}, 34",
+      "cmp dword ptr [{values} + {bucket} * 4], {mixed:e}",
+      "jbe 5f",
+      "mov dword ptr [{values} + {bucket} * 4], {mixed:e}",
+      "5:",
+      "lea {lane:e}, [{mask} - 1]",
+      "and {mask:e}, {lane:e}",
+      "jnz 4b",
+      "3:",
+      "add {cursor}, 64",
+      "dec {count}",
+      "jnz 2b",
+      state = in(reg) state.as_ptr(),
+      constants = in(reg) CONSTANTS.as_ptr(),
+      scratch = inout(reg) scratch.as_mut_ptr() => _,
+      values = inout(reg) hash_values.as_mut_ptr() => _,
+      cursor = inout(reg) input => _,
+      count = inout(reg) blocks => _,
+      inout("rcx") u64::from(shift) => _,
+      mask = lateout(reg) _,
+      lane = lateout(reg) _,
+      mixed = lateout(reg) _,
+      bucket = lateout(reg) _,
+      out("zmm0") _,
+      out("zmm1") _,
+      out("zmm2") _,
+      out("zmm3") _,
+      out("zmm4") _,
+      out("zmm5") _,
+      out("zmm6") _,
+      out("k1") _,
+      options(nostack),
+    );
+  }
+  blocks * 8
 }
 
 #[cfg(target_arch = "x86")]
@@ -252,6 +356,7 @@ mod tests {
   }
 
   #[test]
+  #[cfg(target_arch = "x86")]
   fn avx512_rank_mask_matches_scalar_at_exact_boundaries() {
     if !std::arch::is_x86_feature_detected!("avx512f")
       || !std::arch::is_x86_feature_detected!("avx512dq")
@@ -295,6 +400,85 @@ mod tests {
           };
           assert_eq!(actual, mask);
           assert_eq!(output, if mask == 0 { before } else { expected });
+        }
+      }
+    }
+  }
+  #[test]
+  #[cfg(target_arch = "x86_64")]
+  fn avx512_bucket_span_matches_scalar_with_bounds_tails_and_collisions() {
+    if !std::arch::is_x86_feature_detected!("avx512f")
+      || !std::arch::is_x86_feature_detected!("avx512dq")
+    {
+      return;
+    }
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5350_414e);
+    let mut inputs = [0; 129];
+    for value in &mut inputs {
+      *value = rng.next_u64();
+    }
+    inputs[..8].copy_from_slice(&[
+      0,
+      1,
+      u64::MAX,
+      u64::MAX - 1,
+      1 << 31,
+      1 << 32,
+      1 << 63,
+      42,
+    ]);
+    for seed in [0, 42, u64::MAX] {
+      // Repeated tokens force colliding coordinates even with wide sketches.
+      for input in [&inputs, &[u64::MAX; 129]] {
+        let boundary = u32::try_from(scalar(input[0], seed) >> 34).unwrap();
+        for len in (0..=17).chain([31, 32, 33, 63, 64, 65, 128, 129]) {
+          for width in [0_usize, 1, 2, 3, 4, 8, 128, 129, 512] {
+            for bound in
+              [0, 1, 1 << 25, 1 << 30, u32::MAX, boundary, boundary + 1]
+            {
+              let mut actual: Vec<u32> = (0..width + 2)
+                .map(|index| match (index + len) % 4 {
+                  0 => u32::MAX,
+                  1 => 0,
+                  2 => 1,
+                  _ => rng.next_u32(),
+                })
+                .collect();
+              let mut expected = actual.clone();
+              let consumed = if width.is_power_of_two() {
+                len / 8 * 8
+              } else {
+                0
+              };
+              for &value in &input[..consumed] {
+                let mixed = scalar(value, seed);
+                let rank = u32::try_from(mixed >> 34).unwrap();
+                if rank < bound {
+                  // Product mapping is independent of the kernel's bit shift.
+                  let product = (mixed & u64::from(u32::MAX))
+                    * u64::try_from(width).unwrap();
+                  let bucket = usize::try_from(product >> 32).unwrap();
+                  expected[bucket + 1] = expected[bucket + 1].min(rank);
+                }
+              }
+              // SAFETY: features were checked, input covers len values and the
+              // output sub-slice includes exactly width initialized buckets.
+              let processed = unsafe {
+                crate::simd::x86::apply_buckets_below_avx512(
+                  input.as_ptr(),
+                  len,
+                  seed,
+                  bound,
+                  &mut actual[1..][..width],
+                )
+              };
+              assert_eq!(processed, consumed);
+              assert_eq!(
+                actual, expected,
+                "len={len}, width={width}, bound={bound}"
+              );
+            }
+          }
         }
       }
     }

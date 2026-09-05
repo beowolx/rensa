@@ -11,13 +11,17 @@ on:
   workflow_dispatch:
     inputs:
       performance_only:
-        description: Run only strict performance comparisons against origin/main
+        description: Run only strict performance comparisons
         type: boolean
         default: false
       require_avx512:
         description: Fail before benchmarking if the runner lacks AVX-512F/DQ
         type: boolean
         default: false
+      baseline_sha:
+        description: Optional full ancestor commit SHA for a same-run performance comparison
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -285,11 +289,20 @@ jobs:
         shell: bash
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REQUESTED_BASE_SHA: ${{ inputs.baseline_sha }}
         run: |
           set -euo pipefail
           if [ -n "${PR_BASE_SHA}" ]; then
             BASE_SHA="${PR_BASE_SHA}"
             git fetch --no-tags origin "${BASE_SHA}"
+          elif [ -n "${REQUESTED_BASE_SHA}" ]; then
+            if [[ ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "baseline_sha must be a full 40-character commit SHA." >&2
+              exit 1
+            fi
+            BASE_SHA="${REQUESTED_BASE_SHA}"
+            git fetch --no-tags origin "${BASE_SHA}"
+            git merge-base --is-ancestor "${BASE_SHA}" HEAD
           else
             # Resolve main once, so a manual run compares both builds to one commit.
             git fetch --no-tags origin main

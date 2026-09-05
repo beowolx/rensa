@@ -31,7 +31,7 @@ pub(super) trait HashValue {
   where
     Self: Sized;
 
-  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[cfg(target_arch = "x86")]
   fn mix_chunk_below(
     values: &[Self; 8],
     mixer: crate::simd::dispatch::Avx512Mixer,
@@ -39,6 +39,17 @@ pub(super) trait HashValue {
     bound: u32,
     output: &mut [u64; 8],
   ) -> u8
+  where
+    Self: Sized;
+
+  #[cfg(target_arch = "x86_64")]
+  fn apply_below(
+    values: &[Self],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize
   where
     Self: Sized;
 }
@@ -59,7 +70,7 @@ impl HashValue for u64 {
     mixer.mix(values, seed)
   }
 
-  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[cfg(target_arch = "x86")]
   #[inline]
   fn mix_chunk_below(
     values: &[Self; 8],
@@ -69,6 +80,18 @@ impl HashValue for u64 {
     output: &mut [u64; 8],
   ) -> u8 {
     mixer.mix_below::<{ 32 + RANK_BITS }>(values, seed, bound, output)
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[inline]
+  fn apply_below(
+    values: &[Self],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    mixer.apply_below(values, seed, bound, hash_values)
   }
 }
 
@@ -88,7 +111,7 @@ impl HashValue for ReadOnlyCell<u64> {
     mixer.mix_cells(values, seed)
   }
 
-  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[cfg(target_arch = "x86")]
   #[inline]
   fn mix_chunk_below(
     values: &[Self; 8],
@@ -98,6 +121,18 @@ impl HashValue for ReadOnlyCell<u64> {
     output: &mut [u64; 8],
   ) -> u8 {
     mixer.mix_cells_below::<{ 32 + RANK_BITS }>(values, seed, bound, output)
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[inline]
+  fn apply_below(
+    values: &[Self],
+    mixer: crate::simd::dispatch::Avx512Mixer,
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    mixer.apply_cells_below(values, seed, bound, hash_values)
   }
 }
 
@@ -142,7 +177,7 @@ fn for_each_mixed_below<H: HashValue>(
   bound: u32,
   mut visit: impl FnMut(u64),
 ) {
-  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  #[cfg(target_arch = "x86")]
   if hashes.len() >= 8 {
     if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
       let mut chunks = hashes.chunks_exact(8);
@@ -243,6 +278,14 @@ pub(super) fn apply<H: HashValue>(
         let shift = 32 - count.trailing_zeros();
         // Minima only decrease, so this stale maximum remains an upper bound
         // on every coordinate throughout the remaining input.
+        #[cfg(target_arch = "x86_64")]
+        let remaining = {
+          let consumed =
+            crate::simd::dispatch::Avx512Mixer::detect().map_or(0, |mixer| {
+              H::apply_below(remaining, mixer, seed, upper_bound, hash_values)
+            });
+          &remaining[consumed..]
+        };
         for_each_mixed_below(remaining, seed, upper_bound, |mixed| {
           #[allow(clippy::cast_possible_truncation)]
           let rank = (mixed >> (32 + RANK_BITS)) as u32;

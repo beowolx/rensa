@@ -51,6 +51,7 @@ impl Avx512Mixer {
 
   #[inline]
   #[allow(clippy::unused_self)]
+  #[cfg(target_arch = "x86")]
   pub fn mix_below<const RANK_SHIFT: u32>(
     self,
     values: &[u64; 8],
@@ -71,6 +72,7 @@ impl Avx512Mixer {
 
   #[inline]
   #[allow(clippy::unused_self)]
+  #[cfg(target_arch = "x86")]
   pub fn mix_cells_below<const RANK_SHIFT: u32>(
     self,
     values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
@@ -85,6 +87,51 @@ impl Avx512Mixer {
         seed,
         bound,
         output,
+      )
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[allow(clippy::unused_self)]
+  pub fn apply_below(
+    self,
+    input: &[u64],
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    // SAFETY: this capability proves F/DQ and the whole slice proves the
+    // readable input extent. The kernel checks coordinate dimensions.
+    unsafe {
+      crate::simd::x86::apply_buckets_below_avx512(
+        input.as_ptr(),
+        input.len(),
+        seed,
+        bound,
+        hash_values,
+      )
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[allow(clippy::unused_self)]
+  pub fn apply_cells_below(
+    self,
+    input: &[pyo3::buffer::ReadOnlyCell<u64>],
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    // SAFETY: F/DQ is established. This pointer is derived from the whole
+    // transparent-layout cell slice, without creating shared u64 references.
+    // The kernel checks coordinate dimensions before accessing any bucket.
+    unsafe {
+      crate::simd::x86::apply_buckets_below_avx512(
+        input.as_ptr().cast::<u64>(),
+        input.len(),
+        seed,
+        bound,
+        hash_values,
       )
     }
   }
@@ -622,17 +669,30 @@ mod tests {
       let buffer = PyBuffer::<u64>::get(&object).unwrap();
       let cells = buffer.as_slice(py).unwrap();
       let chunk = cells[1..].first_chunk::<8>().unwrap();
-      let mut raw_output = [17; 8];
-      let mut cell_output = raw_output;
       for seed in [0, 42, u64::MAX] {
+        #[cfg(target_arch = "x86")]
+        let mut raw_output = [17; 8];
+        #[cfg(target_arch = "x86_64")]
+        let mut raw_output = [u32::MAX; 8];
+        let mut cell_output = raw_output;
         let expected = mixer.mix(&values, seed);
         assert_eq!(mixer.mix_cells(chunk, seed), expected);
         for bound in [0, 1, 1 << 25, 1 << 30] {
+          #[cfg(target_arch = "x86")]
           assert_eq!(
             mixer.mix_below::<34>(&values, seed, bound, &mut raw_output),
             mixer.mix_cells_below::<34>(chunk, seed, bound, &mut cell_output),
           );
+          #[cfg(target_arch = "x86_64")]
+          assert_eq!(
+            mixer.apply_below(&values, seed, bound, &mut raw_output),
+            mixer.apply_cells_below(chunk, seed, bound, &mut cell_output),
+          );
           assert_eq!(raw_output, cell_output);
+          #[cfg(target_arch = "x86_64")]
+          if bound == 1 << 30 {
+            assert!(raw_output.iter().any(|&value| value != u32::MAX));
+          }
         }
       }
       assert_eq!(
