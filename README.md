@@ -266,7 +266,7 @@ uv run python benchmarks/full_benchmark.py
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
 - `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for token hashing, classic and rho sketching, streaming C-MinHash insertion, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
 
-Kernel measurements default to 200 ms of untimed warmup and at least 100 ms per sample. For noisy multi-thread measurements, run individual cases in fresh processes using `--cases`, `--sizes`, and `--num-perm`, increase `--min-sample-seconds`, and alternate the order of the builds. Keep all samples; large timing dispersion makes a comparison inconclusive.
+Kernel measurements run each case, input size, and permutation count in a fresh subprocess by default, with 200 ms of untimed warmup and at least 100 ms per sample. Use `--in-process` only for diagnosis. For noisy multi-thread measurements, increase `--min-sample-seconds` and alternate the order of the builds. Keep all samples; large timing dispersion makes a comparison inconclusive.
 
 `simple_benchmark.py` times `rensa_c`, but excludes it from accuracy comparisons because `CMinHashDeduplicator.add_pairs` uses streaming add-if-unique semantics rather than batch query-all semantics.
 

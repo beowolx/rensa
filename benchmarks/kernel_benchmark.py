@@ -14,6 +14,8 @@ import os
 import platform
 import statistics
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -133,6 +135,25 @@ def measure(run, extract, repetitions, min_sample_seconds, warmup_seconds):
     return {"seconds": samples, "iterations": iterations, "median_seconds": statistics.median(samples), "sha256": expected}
 
 
+def isolated_case(args, case, size, num_perm):
+    with tempfile.TemporaryDirectory(prefix="rensa-kernel-") as directory:
+        output = Path(directory) / "result.json"
+        command = [
+            sys.executable, str(Path(__file__).resolve()), "--in-process",
+            "--output-json", str(output), "--cases", case, "--sizes", str(size),
+            "--num-perm", str(num_perm),
+        ]
+        for name in ("rows", "repetitions", "min_sample_seconds", "warmup_seconds", "seed"):
+            command.extend(["--" + name.replace("_", "-"), str(getattr(args, name))])
+        completed = subprocess.run(command, text=True, capture_output=True)
+        if completed.returncode:
+            raise RuntimeError(
+                f"Kernel subprocess failed ({case}, tokens={size}, perm={num_perm}):\n"
+                f"{completed.stderr}\n{completed.stdout}"
+            )
+        return json.loads(output.read_text())["results"][0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-json", type=Path, required=True)
@@ -144,6 +165,8 @@ def main():
     parser.add_argument("--num-perm", type=int, nargs="+", default=[128, 512])
     parser.add_argument("--cases", choices=CASES, nargs="+", default=list(CASES))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--in-process", action="store_true",
+                        help="Run cases together for internal execution or diagnosis.")
     args = parser.parse_args()
     if min(args.rows, args.repetitions, *args.sizes, *args.num_perm) <= 0:
         parser.error("rows, repetitions, sizes, and num-perm must be positive")
@@ -167,13 +190,17 @@ def main():
         "results": [],
     }
     for size in args.sizes:
-        docs = documents(args.rows, size)
-        hashes = RMinHash.hash_token_sets(docs)
+        if args.in_process:
+            docs = documents(args.rows, size)
+            hashes = RMinHash.hash_token_sets(docs)
         for num_perm in args.num_perm:
             checksums = {}
             for case in args.cases:
-                run, extract = operation(case, docs, hashes, num_perm, args.seed)
-                result = measure(run, extract, args.repetitions, args.min_sample_seconds, args.warmup_seconds)
+                if args.in_process:
+                    run, extract = operation(case, docs, hashes, num_perm, args.seed)
+                    result = measure(run, extract, args.repetitions, args.min_sample_seconds, args.warmup_seconds)
+                else:
+                    result = isolated_case(args, case, size, num_perm)
                 checksums[case] = result["sha256"]
                 result.update(case=case, tokens_per_row=size, num_perm=num_perm)
                 report["results"].append(result)
