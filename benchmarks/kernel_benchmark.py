@@ -183,6 +183,7 @@ def main():
             "platform": platform.platform(), "machine": platform.machine(),
             "cpu": cpu_name(), "logical_cpus": os.cpu_count(),
             "python": platform.python_version(), "rensa": importlib.metadata.version("rensa"),
+            "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", 1),
             "flags": {key: value for key, value in sorted(os.environ.items())
                       if key.startswith(("RENSA_", "RAYON_")) or key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")},
         },

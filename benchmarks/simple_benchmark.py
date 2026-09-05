@@ -406,6 +406,7 @@ def main(args: argparse.Namespace) -> None:
             global_max_rows = None
 
     thread_env = pin_single_thread_env()
+    from rensa import CMinHash
 
     spec = DATASET_PRESETS[args.dataset]
     effective_max_rows = resolve_max_rows(spec, global_max_rows=global_max_rows, dataset_max_rows={})
@@ -466,6 +467,7 @@ def main(args: argparse.Namespace) -> None:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
+            "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", 1),
             "library_versions": {
                 "datasketch": resolve_package_version("datasketch"),
                 "datasets": resolve_package_version("datasets"),

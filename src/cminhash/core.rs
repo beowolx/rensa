@@ -1,4 +1,4 @@
-use crate::cminhash::{CMinHash, HASH_BATCH_SIZE};
+use crate::cminhash::{CMinHash, HASH_BATCH_SIZE, STATE_VERSION};
 use crate::utils::{calculate_hash_fast, ratio_usize};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -35,16 +35,6 @@ impl SigmaBatch {
 }
 
 impl CMinHash {
-  pub(in crate::cminhash) fn build_pi_precomputed(
-    num_perm: usize,
-    pi_c: u64,
-    pi_d: u64,
-  ) -> Vec<u64> {
-    (0..num_perm)
-      .map(|k| pi_c.wrapping_mul(k as u64).wrapping_add(pi_d))
-      .collect()
-  }
-
   #[inline]
   pub(crate) const fn num_perm(&self) -> usize {
     self.num_perm
@@ -78,15 +68,6 @@ impl CMinHash {
         self.num_perm
       )));
     }
-    if !self.pi_precomputed.is_empty()
-      && self.pi_precomputed.len() != self.num_perm
-    {
-      return Err(PyValueError::new_err(format!(
-        "invalid CMinHash state: pi_precomputed length {} does not match num_perm {} (or be compacted to 0)",
-        self.pi_precomputed.len(),
-        self.num_perm
-      )));
-    }
     Ok(())
   }
 
@@ -111,16 +92,18 @@ impl CMinHash {
     Ok(())
   }
 
+  // SplitMix64's bijective finalizer, by Sebastiano Vigna:
+  // https://prng.di.unimi.it/splitmix64.c
   #[inline]
-  const fn sigma_transform(&self, hash: u64) -> u64 {
-    self.sigma_a.wrapping_mul(hash).wrapping_add(self.sigma_b)
+  const fn mix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
   }
 
-  fn ensure_pi_precomputed(&mut self) {
-    if self.pi_precomputed.len() != self.num_perm {
-      self.pi_precomputed =
-        Self::build_pi_precomputed(self.num_perm, self.pi_c, self.pi_d);
-    }
+  #[inline]
+  const fn sigma_transform(&self, hash: u64) -> u64 {
+    Self::mix64(hash.wrapping_add(self.sigma_key))
   }
 
   #[inline]
@@ -172,41 +155,30 @@ impl CMinHash {
 
   fn apply_sigma_batch_to_values(
     hash_values: &mut [u64],
-    pi_precomputed: &[u64],
-    pi_c: u64,
+    pi_key: u64,
     sigma_batch: &[u64],
   ) {
-    debug_assert_eq!(hash_values.len(), pi_precomputed.len());
-
+    let remainder_start = hash_values.len() / 16 * 16;
     let mut hash_chunks = hash_values.chunks_exact_mut(16);
-    let mut pi_chunks = pi_precomputed.chunks_exact(16);
-
-    for (hash_chunk, pi_chunk) in hash_chunks.by_ref().zip(pi_chunks.by_ref()) {
+    for (block, hash_chunk) in hash_chunks.by_ref().enumerate() {
       let mut current = [0u64; 16];
       current.copy_from_slice(hash_chunk);
-
-      for &sigma_h in sigma_batch {
-        let base = pi_c.wrapping_mul(sigma_h);
-
-        for i in 0..16 {
-          let pi_value = base.wrapping_add(pi_chunk[i]);
-          current[i] = current[i].min(pi_value);
+      let shift = (block as u64).wrapping_mul(16).wrapping_add(1);
+      for &sigma in sigma_batch {
+        let base = sigma.wrapping_add(pi_key).wrapping_sub(shift);
+        for (lane, value) in current.iter_mut().enumerate() {
+          *value = (*value).min(Self::mix64(base.wrapping_sub(lane as u64)));
         }
       }
-
       hash_chunk.copy_from_slice(&current);
     }
 
-    let hash_remainder = hash_chunks.into_remainder();
-    let pi_remainder = pi_chunks.remainder();
-    debug_assert_eq!(hash_remainder.len(), pi_remainder.len());
-
-    for &sigma_h in sigma_batch {
-      let base = pi_c.wrapping_mul(sigma_h);
-
-      for (hash_val, &pi_val) in hash_remainder.iter_mut().zip(pi_remainder) {
-        let pi_value = base.wrapping_add(pi_val);
-        *hash_val = (*hash_val).min(pi_value);
+    let remainder = hash_chunks.into_remainder();
+    let shift = (remainder_start as u64).wrapping_add(1);
+    for &sigma in sigma_batch {
+      let base = sigma.wrapping_add(pi_key).wrapping_sub(shift);
+      for (lane, value) in remainder.iter_mut().enumerate() {
+        *value = (*value).min(Self::mix64(base.wrapping_sub(lane as u64)));
       }
     }
   }
@@ -214,8 +186,7 @@ impl CMinHash {
   fn apply_sigma_batch(&mut self, sigma_batch: &[u64]) {
     Self::apply_sigma_batch_to_values(
       &mut self.hash_values,
-      &self.pi_precomputed,
-      self.pi_c,
+      self.pi_key,
       sigma_batch,
     );
   }
@@ -223,38 +194,16 @@ impl CMinHash {
   pub(in crate::cminhash) fn apply_token_hashes_to_values(
     hash_values: &mut [u64],
     token_hashes: &[u64],
-    sigma_a: u64,
-    sigma_b: u64,
-    pi_c: u64,
-    pi_precomputed: &[u64],
+    sigma_key: u64,
+    pi_key: u64,
   ) {
-    if token_hashes.len() >= 128 && hash_values.len() >= 128 {
-      let a = pi_c.wrapping_mul(sigma_a);
-      let b = pi_c.wrapping_mul(sigma_b);
-      let mut bases: Vec<u64> = token_hashes
-        .iter()
-        .map(|&hash| a.wrapping_mul(hash).wrapping_add(b))
-        .collect();
-      bases.sort_unstable();
-
-      for (value, &pi) in hash_values.iter_mut().zip(pi_precomputed) {
-        // Wrapping addition is smallest at the first base that wraps, or
-        // the smallest base when none wraps. Equal bases wrap exactly to zero.
-        let index = bases.partition_point(|&base| base < pi.wrapping_neg());
-        let base = bases.get(index).copied().unwrap_or(bases[0]);
-        *value = (*value).min(base.wrapping_add(pi));
-      }
-      return;
-    }
-
     let mut sigma_batch = SigmaBatch::default();
     for &token_hash in token_hashes {
-      let sigma_h = sigma_a.wrapping_mul(token_hash).wrapping_add(sigma_b);
-      if sigma_batch.push(sigma_h) {
+      let sigma = Self::mix64(token_hash.wrapping_add(sigma_key));
+      if sigma_batch.push(sigma) {
         Self::apply_sigma_batch_to_values(
           hash_values,
-          pi_precomputed,
-          pi_c,
+          pi_key,
           sigma_batch.as_slice(),
         );
         sigma_batch.clear();
@@ -263,8 +212,7 @@ impl CMinHash {
     if !sigma_batch.is_empty() {
       Self::apply_sigma_batch_to_values(
         hash_values,
-        pi_precomputed,
-        pi_c,
+        pi_key,
         sigma_batch.as_slice(),
       );
     }
@@ -272,14 +220,12 @@ impl CMinHash {
 
   pub(crate) fn compact_from_template(template: &Self) -> Self {
     Self {
+      version: STATE_VERSION,
       num_perm: template.num_perm,
       seed: template.seed,
       hash_values: vec![u64::MAX; template.num_perm],
-      sigma_a: template.sigma_a,
-      sigma_b: template.sigma_b,
-      pi_c: template.pi_c,
-      pi_d: template.pi_d,
-      pi_precomputed: Vec::new(),
+      sigma_key: template.sigma_key,
+      pi_key: template.pi_key,
     }
   }
 
@@ -292,10 +238,8 @@ impl CMinHash {
     Self::apply_token_hashes_to_values(
       &mut self.hash_values,
       token_hashes,
-      template.sigma_a,
-      template.sigma_b,
-      template.pi_c,
-      &template.pi_precomputed,
+      template.sigma_key,
+      template.pi_key,
     );
   }
 
@@ -304,7 +248,6 @@ impl CMinHash {
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
   {
-    self.ensure_pi_precomputed();
     let mut sigma_batch = SigmaBatch::default();
 
     for item in items {
@@ -324,14 +267,11 @@ impl CMinHash {
     &mut self,
     token_hashes: &[u64],
   ) {
-    self.ensure_pi_precomputed();
     Self::apply_token_hashes_to_values(
       &mut self.hash_values,
       token_hashes,
-      self.sigma_a,
-      self.sigma_b,
-      self.pi_c,
-      &self.pi_precomputed,
+      self.sigma_key,
+      self.pi_key,
     );
   }
 
@@ -356,17 +296,35 @@ mod tests {
   use rand_core::{RngCore, SeedableRng};
   use rand_xoshiro::Xoshiro256PlusPlus;
 
+  fn reference_permutation(value: u64, key: u64) -> u64 {
+    let mut value = value.wrapping_add(key);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+  }
+
   #[test]
-  fn token_hash_updates_match_naive_wrapping_permutations() {
+  fn token_hash_updates_match_scalar_circulant_reference() {
     for seed in [0, 1, 42, u64::MAX] {
       let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
       for num_perm in [1, 16, 128, 129, 512] {
-        let params = CMinHashParams::new(num_perm, seed);
+        let params = CMinHashParams::new(seed);
         for token_len in [0, 1, 31, 32, 127, 128, 1024] {
           let mut hashes: Vec<u64> =
             (0..token_len).map(|_| rng.next_u64()).collect();
-          for (index, hash) in hashes.iter_mut().take(4).enumerate() {
-            *hash = if index % 2 == 0 { 0 } else { u64::MAX };
+          for (hash, boundary) in hashes.iter_mut().zip([
+            0,
+            1,
+            u64::MAX - 1,
+            u64::MAX,
+            1 << 63,
+            u64::from(u32::MAX),
+            1 << 32,
+            params.sigma_key.wrapping_neg(),
+          ]) {
+            *hash = boundary;
           }
           for populated in [false, true] {
             let initial: Vec<u64> = (0..num_perm)
@@ -374,15 +332,10 @@ mod tests {
               .collect();
             let mut expected = initial.clone();
             for &hash in &hashes {
-              let sigma = params
-                .sigma_a
-                .wrapping_mul(hash)
-                .wrapping_add(params.sigma_b);
+              let sigma = reference_permutation(hash, params.sigma_key);
               for (k, value) in expected.iter_mut().enumerate() {
-                let permuted = params
-                  .pi_c
-                  .wrapping_mul(sigma.wrapping_add(k as u64))
-                  .wrapping_add(params.pi_d);
+                let shifted = sigma.wrapping_sub(k as u64 + 1);
+                let permuted = reference_permutation(shifted, params.pi_key);
                 *value = (*value).min(permuted);
               }
             }
@@ -390,10 +343,8 @@ mod tests {
             CMinHash::apply_token_hashes_to_values(
               &mut actual,
               &hashes,
-              params.sigma_a,
-              params.sigma_b,
-              params.pi_c,
-              &params.pi_precomputed,
+              params.sigma_key,
+              params.pi_key,
             );
             assert_eq!(actual, expected);
 
@@ -402,10 +353,8 @@ mod tests {
               CMinHash::apply_token_hashes_to_values(
                 &mut incremental,
                 chunk,
-                params.sigma_a,
-                params.sigma_b,
-                params.pi_c,
-                &params.pi_precomputed,
+                params.sigma_key,
+                params.pi_key,
               );
             }
             assert_eq!(incremental, expected);
@@ -415,18 +364,6 @@ mod tests {
     }
   }
 
-  #[test]
-  fn sorted_successors_handle_exact_wrap_and_zero_offset() {
-    let hashes = [0, u64::MAX].repeat(64);
-    let pi: Vec<u64> = [0, 1, u64::MAX, 2].repeat(32);
-    let mut actual = vec![u64::MAX; pi.len()];
-    CMinHash::apply_token_hashes_to_values(&mut actual, &hashes, 1, 0, 1, &pi);
-    let expected: Vec<u64> = pi
-      .iter()
-      .map(|&offset| offset.min(u64::MAX.wrapping_add(offset)))
-      .collect();
-    assert_eq!(actual, expected);
-  }
   #[test]
   fn threshold_predicate_matches_full_jaccard_at_float_boundaries(
   ) -> pyo3::PyResult<()> {

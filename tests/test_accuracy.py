@@ -1,5 +1,8 @@
 """Accuracy against exact sets and signature invariants across kernel tails."""
 
+import math
+import statistics
+
 import pytest
 
 from rensa import CMinHash, RMinHash
@@ -49,6 +52,32 @@ def test_mean_jaccard_tracks_exact_set_similarity(minhash_type, overlap):
         right.update(right_tokens)
         estimates.append(left.jaccard(right))
     assert abs(sum(estimates) / len(estimates) - exact) < 0.06
+
+
+@pytest.mark.parametrize("prehashed", [False, True])
+def test_cminhash_jaccard_error_reduces_with_more_permutations(prehashed):
+    # Two-element sets expose correlated permutation lanes that a mean-only
+    # check on larger sets misses. Sequential hashes also exercise structured
+    # input without relying on the string hash to supply the initial shuffle.
+    rows = [[0, 1], [1, 2]] if prehashed else [["left", "shared"], ["shared", "right"]]
+    digest = (
+        CMinHash.digests64_from_token_hash_sets
+        if prehashed
+        else CMinHash.digests64_from_token_sets
+    )
+    exact = 1 / 3
+    errors_by_width = {}
+    for num_perm in (128, 512):
+        errors = []
+        for seed in range(96):
+            left, right = digest(rows, num_perm=num_perm, seed=seed)
+            estimate = sum(a == b for a, b in zip(left, right)) / num_perm
+            errors.append(estimate - exact)
+        assert abs(statistics.mean(errors)) < 0.02
+        errors_by_width[num_perm] = math.sqrt(statistics.mean(error**2 for error in errors))
+    assert errors_by_width[128] < 0.07
+    assert errors_by_width[512] < 0.04
+    assert errors_by_width[512] < 0.75 * errors_by_width[128]
 
 
 @pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])

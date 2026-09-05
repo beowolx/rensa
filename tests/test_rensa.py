@@ -85,6 +85,29 @@ def test_rminhash_serialization_roundtrip():
     assert m2.digest() == digest_before, "Deserialized RMinHash should have the same digest"
 
 
+def test_cminhash_serialization_roundtrip_and_legacy_rejection():
+    import pickle
+
+    sketch = CMinHash(num_perm=129, seed=42)
+    sketch.update(["first", "second"])
+    restored = pickle.loads(pickle.dumps(sketch))
+    assert restored.digest_u64() == sketch.digest_u64()
+    restored.update(["third"])
+    sketch.update(["third"])
+    assert restored.digest_u64() == sketch.digest_u64()
+    assert CMinHash.ALGORITHM_VERSION == 2
+
+    # Actual state emitted by the affine implementation for k=2, seed=42, {a,b}.
+    legacy = bytes.fromhex(
+        "022a02e180a0e5fca1bea5a001eedbb3c6adc1dd959c019fd1d9a3f4a993bbd001"
+        "91efbcbbc5ae90cf518ddb93e1b09f9ff0fb01b8ebe0e680ece7beb301"
+    )
+    before = sketch.digest_u64()
+    with pytest.raises(ValueError, match="rebuild"):
+        sketch.__setstate__(legacy)
+    assert sketch.digest_u64() == before
+
+
 def test_rminhash_update_accepts_iterable_bytes_like_tokens():
     m = RMinHash(num_perm=32, seed=77)
     initial_digest = m.digest()

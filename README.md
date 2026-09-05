@@ -8,8 +8,10 @@ Rensa (Swedish for "clean") computes MinHash signatures for similarity estimatio
 
 It ships two MinHash variants:
 
-- **R-MinHash**: Rensa's own variant. Very close to datasketch output, fastest option.
-- **C-MinHash**: Based on the [C-MinHash paper](https://arxiv.org/abs/2109.03337). Slightly different results, backed by formal variance proofs.
+- **R-MinHash**: Full-set MinHash with SIMD multiply-shift permutations and 32-bit signature slots.
+- **C-MinHash**: A practical approximation of [circulant MinHash](https://proceedings.mlr.press/v162/li22m.html), with 64-bit signature slots and nonlinear permutations.
+
+The separate **rho batch path** samples token positions to accelerate duplicate detection. Its recall depends on document length and token order, so its speed should be evaluated together with retrieval accuracy. Use the classic full-set APIs when you need order-invariant Jaccard estimates.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1o1nzwXWAa8kdkEJljbJFW1VuI-3VZLUn?usp=sharing) &nbsp; Thanks [mlabonne](https://github.com/mlabonne) for the Colab notebook!
 
@@ -63,9 +65,11 @@ The global allocator is MiMalloc, which handles the batch-allocate-then-free pat
 
 ### C-MinHash
 
-Rensa also includes C-MinHash, based on the [C-MinHash paper](https://arxiv.org/abs/2109.03337). It uses a two-stage scheme (sigma then pi) that reduces the need for k independent permutations by deriving the k slots from a small parameter set. In this implementation, that means `sigma_a/sigma_b` and `pi_c/pi_d`, with precomputed pi terms for speed. The paper proves tighter variance bounds than standard MinHash. In practice, both variants produce similar results and R-MinHash is usually a bit faster. Use R-MinHash unless you have a specific reason not to.
+Rensa follows the input rotation in Algorithm 3 of Xiaoyun Li and Ping Li's [C-MinHash paper](https://proceedings.mlr.press/v162/li22m/li22m.pdf): `h[k] = min(pi(sigma(x) - (k + 1)))`, with subtraction modulo 2^64. Two separately seeded [SplitMix64 finalizers](https://prng.di.unimi.it/splitmix64.c) provide nonlinear bijections over token hashes. These are compact pseudorandom approximations; the paper's unbiasedness and lower-variance proofs assume uniformly random permutation vectors and do not establish those guarantees for this implementation. Accuracy is checked empirically against exact Jaccard.
 
-For batches with at least 128 tokens and 128 permutations, C-MinHash sorts the transformed token values and finds the minimum for each wrapping offset by binary search. This produces the same signature with O(n log n + k log n) work instead of O(nk), using an additional 8-byte temporary value per token. Streaming duplicate checks stop comparing a pair once its remaining signature slots cannot meet the threshold.
+`CMinHash.ALGORITHM_VERSION` is **2**. Version 1 used affine maps that produced biased estimates on structured hashes and highly correlated signature slots. Its sorted-successor optimization depended on that faulty construction and has been removed. Version 2 performs O(nk) work, with bounded token batches. **Rebuild existing C-MinHash signatures and indexes from their original tokens:** legacy serialized C-MinHash states are rejected, and old digest arrays must not be mixed with version 2 arrays. R-MinHash signatures are unchanged.
+
+Streaming duplicate checks stop comparing a pair once its remaining signature slots cannot meet the threshold.
 
 `CMinHashDeduplicator` builds an exact candidate index after 128 stored entries. If the threshold permits `d` mismatching signature slots, it partitions the signature into `d + 1` disjoint bands: every accepted duplicate must match at least one complete band. Candidates still pass the same signature comparison, so hash collisions only cause extra checks. This accelerates insertion and boolean duplicate checks at the cost of additional memory proportional to stored entries times band count. Singleton buckets stay inline. Collections initially use a scan, and thresholds requiring at most one matching slot always use a scan. `get_duplicates()` retains its full scan.
 
@@ -265,6 +269,8 @@ uv run python benchmarks/full_benchmark.py
 - `benchmarks/simple_benchmark.py`: single-thread quick comparison across Datasketch, FastSketch, R-MinHash, and C-MinHash.
 - `benchmarks/full_benchmark.py`: fair per-run process-isolated benchmark (all engines per subprocess, randomized order) across Datasketch, FastSketch, and Rensa on the full dataset preset suite.
 - `benchmarks/kernel_benchmark.py`: deterministic Rensa-only timings for token hashing, classic and rho sketching, streaming C-MinHash insertion, and duplicate queries, with exact output hashes for comparing builds. For example: `RAYON_NUM_THREADS=1 uv run python benchmarks/kernel_benchmark.py --output-json .bench/kernels.json`.
+- `benchmarks/sketch_benchmark.py`: batch sketch construction on identical byte tokens across classic R-MinHash, C-MinHash, rho, Datasketch and FastSketch. Input preparation and digest normalization are outside timing.
+- `benchmarks/accuracy_benchmark.py`: bias, RMSE and threshold classification against exact Jaccard, plus separate query-all retrieval precision/recall on aligned and reordered pairs. For example: `uv run python benchmarks/accuracy_benchmark.py --output-json .bench/accuracy.json`.
 
 Kernel measurements run each case, input size, and permutation count in a fresh subprocess by default, with 200 ms of untimed warmup and at least 100 ms per sample. Use `--in-process` only for diagnosis. For noisy multi-thread measurements, increase `--min-sample-seconds` and alternate the order of the builds. Keep all samples; large timing dispersion makes a comparison inconclusive.
 

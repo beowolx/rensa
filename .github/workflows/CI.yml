@@ -283,6 +283,10 @@ jobs:
             VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release
             popd >/dev/null
 
+            if [ "${label}" = "head" ]; then
+              "${BENCH_PY}" -m pytest -q "${GITHUB_WORKSPACE}/tests/test_accuracy.py"
+            fi
+
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
               --dataset "${BENCH_DATASET_KEY}" \
               --max-rows "${BENCH_MAX_ROWS}" \
@@ -298,6 +302,11 @@ jobs:
               --rows 256 --repetitions 5 --sizes 1 8 32 128 4096 --num-perm 128 512 \
               --output-json "${output_json%.json}_kernels.json" \
               | tee "${output_log%.txt}_kernels.txt"
+
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/accuracy_benchmark.py" \
+              --seeds 8 --skip-retrieval \
+              --output-json "${output_json%.json}_accuracy.json" \
+              | tee "${output_log%.txt}_accuracy.txt"
 
             echo "Completed ${label} benchmark."
           }
@@ -343,14 +352,25 @@ jobs:
               if head["config"][key] != base["config"][key]:
                   raise SystemExit(f"benchmark input/config mismatch: {key}")
 
+          c_versions = (base["metadata"]["cminhash_algorithm_version"],
+                        head["metadata"]["cminhash_algorithm_version"])
+          # The bias correction changes C signatures once, from version 1 to 2.
+          # Same-version comparisons retain every output check.
+          c_migration = c_versions == (1, 2)
+          if c_versions[0] != c_versions[1] and not c_migration:
+              raise SystemExit(f"unsupported C-MinHash algorithm transition: {c_versions}")
+          if c_migration:
+              print("C-MinHash 1->2 correction: compare accuracy artifacts; require per-build determinism")
+
           for engine in required_engines:
-              flag_hashes = {
-                  run["duplicate_flags_sha256"][engine]
-                  for payload in (head, base)
-                  for run in payload["runs"]
-              }
-              if len(flag_hashes) != 1:
-                  raise SystemExit(f"duplicate decisions changed or are nondeterministic: {engine}")
+              flag_hashes = []
+              for payload in (head, base):
+                  hashes = {run["duplicate_flags_sha256"][engine] for run in payload["runs"]}
+                  if len(hashes) != 1:
+                      raise SystemExit(f"duplicate decisions are nondeterministic or missing: {engine}")
+                  flag_hashes.append(hashes.pop())
+              if flag_hashes[0] != flag_hashes[1] and not (c_migration and engine == "rensa_c"):
+                  raise SystemExit(f"duplicate decisions changed: {engine}")
 
           for engine in ("rensa_r", "rensa_c"):
               head_total = float(head["summary"]["engine_medians"][engine]["median_total"])
@@ -363,9 +383,13 @@ jobs:
                       f"{engine} slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
                       f"slowdown={slowdown_fraction:.2%}"
                   )
+              decision_check = (
+                  "C-MinHash 1->2 correction; per-build decisions deterministic"
+                  if c_migration and engine == "rensa_c" else "duplicate decisions unchanged"
+              )
               print(
                   f"PASS: {engine} median_total head={head_total:.6f}s "
-                  f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}; duplicate decisions unchanged"
+                  f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}; {decision_check}"
               )
           with open(".bench/head_kernels.json", "r", encoding="utf-8") as handle:
               head_kernels = json.load(handle)
@@ -375,6 +399,10 @@ jobs:
               raise SystemExit("kernel benchmark config mismatch")
           if head_kernels["environment"]["flags"] != base_kernels["environment"]["flags"]:
               raise SystemExit("kernel benchmark environment flags mismatch")
+          kernel_c_versions = (base_kernels["environment"]["cminhash_algorithm_version"],
+                               head_kernels["environment"]["cminhash_algorithm_version"])
+          if kernel_c_versions != c_versions:
+              raise SystemExit("C-MinHash algorithm versions differ between benchmark suites")
           def keyed_results(payload):
               return {
                   (result["case"], result["tokens_per_row"], result["num_perm"]): result
@@ -386,12 +414,14 @@ jobs:
               raise SystemExit("kernel benchmark cases mismatch or empty")
           for key, result in head_cases.items():
               baseline = base_cases[key]
-              if result["sha256"] != baseline["sha256"]:
+              c_signature_migration = c_migration and key[0] in ("c_update", "c_prehashed")
+              if result["sha256"] != baseline["sha256"] and not c_signature_migration:
                   raise SystemExit(f"kernel output changed: {key}")
               head_time, base_time = result["median_seconds"], baseline["median_seconds"]
               if not (0 < head_time < float("inf") and 0 < base_time < float("inf")):
                   raise SystemExit(f"invalid kernel timings: {key}")
-              print(f"Kernel {key}: {base_time / head_time:.3f}x speedup; output unchanged")
+              output_check = "C-MinHash 1->2 signature correction" if c_signature_migration else "output unchanged"
+              print(f"Kernel {key}: {base_time / head_time:.3f}x speedup; {output_check}")
           PY
 
       - name: Run full benchmark smoke
@@ -430,6 +460,12 @@ jobs:
             "FastSketchLSH==1.0.1"
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
+
+          .venv/bin/python -m pytest -q tests/test_accuracy.py
+          .venv/bin/python benchmarks/accuracy_benchmark.py \
+            --seeds 8 --skip-retrieval \
+            --output-json .bench/head_accuracy.json \
+            | tee .bench/head_accuracy.txt
 
           .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET_KEY}" \
