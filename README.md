@@ -144,6 +144,11 @@ deduplicator considered a duplicate.
 uv add rensa
 ```
 
+**Upgrading from 0.4.x or earlier:** Rensa 0.5.0 uses algorithm version 2 for
+R-MinHash and C-MinHash. Rebuild saved signatures, digest matrices and LSH indexes
+from the original tokens. Old serialized sketches and indexes are rejected;
+do not compare or combine raw digests from different algorithm versions.
+
 ## Usage
 
 ### Estimate similarity
