@@ -5,13 +5,13 @@ use crate::py_input::{
 use crate::rminhash::matrix::RhoDigestSidecar;
 use crate::rminhash::rho::{
   checked_len_mul, effective_rho_probes, rho_adaptive_token_budget_for_row,
-  saturating_u16, MidpointSampler, RhoSketchConfig,
+  saturating_u16, RhoSketchConfig,
 };
 use crate::rminhash::{
   DigestBuildConfig, RMinHash, RMinHashDigestMatrix, SharedPermutations,
   EMPTY_BUCKET,
 };
-use crate::utils::calculate_hash_fast;
+use crate::utils::{calculate_hash_fast, MidpointSampler};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use rayon::prelude::*;

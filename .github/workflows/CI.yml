@@ -177,6 +177,14 @@ jobs:
         with:
           python-version: 3.x
           architecture: ${{ matrix.platform.target }}
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        if: matrix.platform.target == 'x86'
+        with:
+          toolchain: stable
+          targets: i686-pc-windows-msvc
+      - name: Run 32-bit Rust tests
+        if: matrix.platform.target == 'x86'
+        run: cargo test --locked --target i686-pc-windows-msvc
       - name: Build wheels
         uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021
         with:
@@ -241,8 +249,8 @@ jobs:
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.performance_only) }}
-      BENCH_PAIRED: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_only && inputs.baseline_sha != '' }}
+      BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.performance_only || inputs.baseline_sha != '')) }}
+      BENCH_PAIRED: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_sha != '' }}
       BENCH_DATASET_KEY: ag_news
       BENCH_MAX_ROWS: "10000"
       BENCH_FULL_SMOKE_MAX_ROWS: "2000"
@@ -366,9 +374,7 @@ jobs:
               fi
               PYO3_PYTHON="${BENCH_PY}" cargo test --locked --lib simd:: -- --nocapture \
                 2>&1 | tee .bench/simd_tests.txt
-              "${BENCH_PY}" -m pytest -q \
-                "${GITHUB_WORKSPACE}/tests/test_accuracy.py" \
-                "${GITHUB_WORKSPACE}/tests/test_rensa.py"
+              "${BENCH_PY}" -m pytest -q "${GITHUB_WORKSPACE}/tests/"
             fi
 
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
@@ -816,7 +822,7 @@ jobs:
           fi
           PYO3_PYTHON="${GITHUB_WORKSPACE}/.venv/bin/python" cargo test --locked --lib simd:: -- --nocapture \
             2>&1 | tee .bench/simd_tests.txt
-          .venv/bin/python -m pytest -q tests/test_accuracy.py tests/test_rensa.py
+          .venv/bin/python -m pytest -q tests/
           .venv/bin/python benchmarks/accuracy_benchmark.py \
             --seeds 8 --skip-retrieval \
             --output-json .bench/head_accuracy.json \

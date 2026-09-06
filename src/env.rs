@@ -19,5 +19,6 @@ pub fn read_env_f64_clamped(
   std::env::var(key)
     .ok()
     .and_then(|value| value.parse::<f64>().ok())
+    .filter(|parsed| !parsed.is_nan())
     .map_or(default, |parsed| parsed.clamp(min, max))
 }

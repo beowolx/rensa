@@ -223,7 +223,8 @@ impl CMinHash {
     self.update_hashed_tokens(token_hashes);
   }
 
-  fn update_internal<I, S>(&mut self, items: I)
+  /// Updates the `CMinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
   where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -253,15 +254,6 @@ impl CMinHash {
       self.sigma_key,
       self.pi_key,
     );
-  }
-
-  /// Updates the `CMinHash` with items from any iterable of string-like values.
-  pub fn update_iter<I, S>(&mut self, items: I)
-  where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-  {
-    self.update_internal(items);
   }
 
   /// Updates the `CMinHash` with a new set of items from a vector of strings.

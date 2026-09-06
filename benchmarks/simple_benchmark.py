@@ -6,9 +6,9 @@ import json
 import os
 import pickle
 import platform
-import statistics
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from time import perf_counter
 from typing import Any
 
@@ -30,6 +30,7 @@ from full_benchmark import (
     run_datasketch,
     run_fastsketch,
     run_rensa,
+    summarize_mismatch_stats,
 )
 
 ENGINE_KEYS = ("datasketch", "fastsketch", "rensa_r", "rensa_c")
@@ -120,7 +121,7 @@ def run_rensa_c(
         inserted_flags = [bool(value) for value in deduper.add_pairs(entries)]
     else:
         # Compatibility fallback for older branch checkouts in CI perf comparisons.
-        from rensa import CMinHash  # type: ignore
+        from rensa import CMinHash
 
         inserted_flags = []
         for index, tokens in enumerate(token_sets):
@@ -255,10 +256,6 @@ def run_once(
     return payload
 
 
-def median(values: list[float]) -> float:
-    return statistics.median(values)
-
-
 def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     if not runs:
         raise ValueError("No measured runs to summarize")
@@ -302,41 +299,9 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
                 key: median([run["accuracy"]["jaccard"][key] for run in runs]) for key in jaccard_keys
             },
             "mismatch_vs_datasketch": {
-                engine: {
-                    "median_count": int(
-                        round(
-                            median(
-                                [
-                                    run["accuracy"]["mismatch_vs_datasketch"][engine]["count"]
-                                    for run in runs
-                                ]
-                            )
-                        )
-                    ),
-                    "median_rate": median(
-                        [run["accuracy"]["mismatch_vs_datasketch"][engine]["rate"] for run in runs]
-                    ),
-                    "median_false_positive": int(
-                        round(
-                            median(
-                                [
-                                    run["accuracy"]["mismatch_vs_datasketch"][engine]["false_positive"]
-                                    for run in runs
-                                ]
-                            )
-                        )
-                    ),
-                    "median_false_negative": int(
-                        round(
-                            median(
-                                [
-                                    run["accuracy"]["mismatch_vs_datasketch"][engine]["false_negative"]
-                                    for run in runs
-                                ]
-                            )
-                        )
-                    ),
-                }
+                engine: summarize_mismatch_stats(
+                    [run["accuracy"]["mismatch_vs_datasketch"][engine] for run in runs]
+                )
                 for engine in mismatch_keys
             },
         },
@@ -383,14 +348,18 @@ def print_summary(summary: dict[str, Any]) -> None:
 def main(args: argparse.Namespace) -> None:
     if args.num_perm <= 0:
         raise ValueError("--num-perm must be > 0")
-    if args.num_bands <= 0:
-        raise ValueError("--num-bands must be > 0")
+    if args.num_perm & (args.num_perm - 1) or args.num_perm > 4096:
+        raise ValueError("FastSketch requires power-of-two --num-perm no greater than 4096")
+    if args.num_bands < 2:
+        raise ValueError("Datasketch requires at least two bands")
     if args.num_bands > args.num_perm:
         raise ValueError("--num-bands must be <= --num-perm")
     if args.num_perm % args.num_bands != 0:
         raise ValueError("--num-bands must divide --num-perm")
     if not 0.0 <= args.threshold <= 1.0:
         raise ValueError("--threshold must be in [0, 1]")
+    if not 0 <= args.seed <= 2**32 - 1:
+        raise ValueError("--seed must fit the shared unsigned 32-bit seed range")
     if args.warmup_runs < 0:
         raise ValueError("--warmup-runs must be >= 0")
     if args.measured_runs <= 0:

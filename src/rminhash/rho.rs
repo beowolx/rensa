@@ -23,7 +23,7 @@ use crate::rminhash::{
   MIN_RHO_SPARSE_OCCUPANCY_THRESHOLD_BASE, MIN_RHO_SPARSE_VERIFY_PERM,
 };
 use crate::simd::dispatch::{apply_hash_batch_to_values, PermutationSoA};
-use crate::utils::calculate_hash_fast;
+use crate::utils::{calculate_hash_fast, MidpointSampler};
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -277,17 +277,10 @@ const fn low_u32_from_usize(value: usize) -> u32 {
 }
 
 #[inline]
+#[allow(clippy::cast_possible_truncation)]
 const fn u64_to_usize_wrapping(value: u64) -> usize {
-  #[cfg(target_pointer_width = "64")]
-  {
-    usize::from_ne_bytes(value.to_ne_bytes())
-  }
-  #[cfg(target_pointer_width = "32")]
-  {
-    let bytes = value.to_ne_bytes();
-    let low = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    usize::from_ne_bytes(low.to_ne_bytes())
-  }
+  // Integer truncation keeps the low bits on both little- and big-endian hosts.
+  value as usize
 }
 
 struct RhoWorkChunk {
@@ -318,52 +311,6 @@ impl RhoChunkBuffers {
     self.token_refs.clear();
     self.row_token_offsets.clear();
     self.source_token_counts.clear();
-  }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct MidpointSampler {
-  q: usize,
-  r: usize,
-  step_div: usize,
-  step_mod: usize,
-  denom: usize,
-}
-
-impl MidpointSampler {
-  #[inline]
-  pub(super) const fn new(total: usize, limit: usize) -> Self {
-    let denom = limit * 2;
-    let total_div = total / limit;
-    let total_rem = total - total_div * limit;
-    let q = total_div / 2;
-    let r = if (total_div & 1) == 0 {
-      total_rem
-    } else {
-      limit + total_rem
-    };
-    let step_div = total_div;
-    let step_mod = total_rem * 2;
-
-    Self {
-      q,
-      r,
-      step_div,
-      step_mod,
-      denom,
-    }
-  }
-
-  #[inline]
-  pub(super) const fn next(&mut self) -> usize {
-    let index = self.q;
-    self.r += self.step_mod;
-    self.q += self.step_div;
-    if self.r >= self.denom {
-      self.r -= self.denom;
-      self.q += 1;
-    }
-    index
   }
 }
 
@@ -1414,9 +1361,25 @@ impl RMinHash {
 
 #[cfg(test)]
 mod tests {
+  use crate::rminhash::rho::u64_to_usize_wrapping;
   use crate::rminhash::RMinHash;
   use rand_core::{RngCore, SeedableRng};
   use rand_xoshiro::Xoshiro256PlusPlus;
+
+  #[test]
+  fn wrapping_bucket_indices_keep_low_bits() {
+    for value in [
+      0,
+      1,
+      u64::from(u32::MAX),
+      1 << 32,
+      0x0123_4567_89ab_cdef,
+      u64::MAX,
+    ] {
+      let expected = usize::try_from(value & usize::MAX as u64).unwrap();
+      assert_eq!(u64_to_usize_wrapping(value), expected);
+    }
+  }
 
   #[test]
   fn sparse_verification_matches_independent_wrapping_oracle() {

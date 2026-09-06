@@ -11,6 +11,119 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("max_rows", [None, 2, 20])
+def test_token_cache_reports_actual_rows_on_fresh_and_cached_loads(
+    monkeypatch, tmp_path, max_rows
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module("full_benchmark")
+    tokens = [["first"], ["second"]]
+    monkeypatch.setattr(benchmark, "load_token_sets_from_hf", lambda *args: tokens)
+    spec = benchmark.DATASET_PRESETS["ag_news"]
+    prepared = benchmark.load_or_prepare_token_cache(tmp_path, spec, max_rows, 3)
+
+    def unexpected_download(*args):
+        pytest.fail("An existing token cache must be reused")
+
+    monkeypatch.setattr(benchmark, "load_token_sets_from_hf", unexpected_download)
+    reused = benchmark.load_or_prepare_token_cache(tmp_path, spec, max_rows, 3)
+    assert prepared == reused
+    assert reused[1] == len(tokens)
+    assert reused[2] == hashlib.sha256(reused[0].read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("module_name", ["simple_benchmark", "full_benchmark"])
+def test_benchmark_summary_preserves_mismatch_rounding(module_name, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module(module_name)
+    engines = benchmark.ENGINE_KEYS
+    rensa = "rensa" if module_name == "full_benchmark" else "rensa_r"
+    comparisons = {"mismatch_vs_datasketch": (rensa, "fastsketch")}
+    if module_name == "full_benchmark":
+        comparisons["mismatch_vs_fastsketch"] = (rensa, "datasketch")
+    runs = [
+        {
+            "token_cache_sha256": "same-cache", "thread_env_assertions": {"threads": True},
+            "engines": {engine: {"total": 4.0, "sketch": 1.0, "build": 1.0, "query": 2.0,
+                                "rows_removed": 3, "rows_remaining": 7,
+                                "avg_candidates_per_row": None} for engine in engines},
+            "accuracy": {
+                "jaccard": {f"datasketch_vs_{rensa}": 0.5, "datasketch_vs_fastsketch": 0.5,
+                            f"{rensa}_vs_fastsketch": 0.5},
+                **{comparison: {engine: stats for engine in compared}
+                   for comparison, compared in comparisons.items()},
+            },
+        }
+        for stats in (
+            {"count": 1, "rate": 0.1, "false_positive": 0, "false_negative": 1},
+            {"count": 4, "rate": 0.4, "false_positive": 1, "false_negative": 3},
+        )
+    ]
+    summary = benchmark.summarize_runs(runs)
+    for comparison, compared in comparisons.items():
+        assert summary["accuracy"][comparison] == {
+            engine: {"median_count": 2, "median_rate": 0.25,
+                     "median_false_positive": 0, "median_false_negative": 2}
+            for engine in compared
+        }
+
+
+def test_full_benchmark_rejects_empty_datasets_and_repeated_engines(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module("full_benchmark")
+    with pytest.raises(ValueError, match="at least one dataset"):
+        benchmark.parse_dataset_keys(" , ")
+    with pytest.raises(ValueError, match="exactly these engines"):
+        benchmark.run_once(argparse.Namespace(
+            token_cache=Path("unused.pkl"), order="datasketch,fastsketch,rensa,rensa",
+        ))
+
+
+@pytest.mark.parametrize("module_name", ["simple_benchmark", "full_benchmark"])
+@pytest.mark.parametrize("arguments, message", [
+    (["--num-perm", "24"], "power-of-two"),
+    (["--num-perm", "8192"], "4096"),
+    (["--num-bands", "1"], "at least two bands"),
+    (["--seed", "-1"], "unsigned 32-bit"),
+    (["--seed", "4294967296"], "unsigned 32-bit"),
+])
+def test_dataset_benchmarks_reject_unsupported_engine_parameters(
+    module_name, arguments, message, monkeypatch
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module(module_name)
+    monkeypatch.setattr(sys, "argv", [module_name, *arguments])
+    monkeypatch.setattr(benchmark, "load_or_prepare_token_cache", lambda **kwargs: pytest.fail(
+        "Invalid engine parameters must be rejected before loading a dataset"
+    ))
+    with pytest.raises(ValueError, match=message):
+        benchmark.main(benchmark.parse_args())
+
+
+@pytest.mark.parametrize("module_name, arguments, message", [
+    ("accuracy_benchmark", ["--perms", "3"], "power-of-two"),
+    ("accuracy_benchmark", ["--perms", "8192"], "4096"),
+    ("kernel_benchmark", ["--seed", "-1"], "unsigned 64-bit"),
+    ("kernel_benchmark", ["--seed", "18446744073709551616"], "unsigned 64-bit"),
+])
+def test_synthetic_benchmarks_reject_unsupported_engine_parameters(
+    module_name, arguments, message, monkeypatch, capsys
+):
+    if module_name == "accuracy_benchmark":
+        pytest.importorskip("FastSketchLSH")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module(module_name)
+    monkeypatch.setattr(sys, "argv", [module_name, "--output-json", "unused.json", *arguments])
+    monkeypatch.setattr(
+        benchmark, "accuracy" if module_name == "accuracy_benchmark" else "isolated_case",
+        lambda *args: pytest.fail("Invalid engine parameters must be rejected before a run"),
+    )
+    with pytest.raises(SystemExit) as error:
+        benchmark.main()
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 @pytest.mark.skipif(
     sys.implementation.name != "cpython", reason="Requires CPython reference counting"
 )
@@ -105,7 +218,9 @@ def paired_benchmark(monkeypatch):
 
 @pytest.mark.parametrize("mode", [[], ["--prehashed"], ["--prehashed", "--repeat-cardinality", "2"]])
 def test_paired_native_cli_uses_frozen_extensions(paired_benchmark, tmp_path, mode):
-    installed = Path(importlib.import_module("rensa.rensa").__file__)
+    module_path = importlib.import_module("rensa.rensa").__file__
+    assert module_path is not None
+    installed = Path(module_path)
     paths = []
     for label in ("base", "head"):
         path = tmp_path / label / installed.name

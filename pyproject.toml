@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "rensa"
 requires-python = ">=3.8"
-description = "High-performance MinHash implementation in Rust with Python bindings - 40x faster than datasketch"
+description = "High-performance MinHash implementation in Rust with Python bindings for similarity estimation and deduplication"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Luis Cardoso", email = "luis@luiscardoso.dev" }]
