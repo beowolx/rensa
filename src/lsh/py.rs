@@ -287,9 +287,13 @@ impl RMinHashLSH {
 
   /// Returns duplicate flags for matrix rows without mutating this index.
   ///
-  /// A row is flagged when it shares at least one band hash with either:
+  /// For ordinary `MinHash` matrices, a row is flagged when it shares at least
+  /// one band hash with either:
   /// - an existing key already present in this index, or
   /// - another row in the provided matrix.
+  ///
+  /// Rho matrices additionally apply band folding, sparse verification,
+  /// and recall rescue.
   ///
   /// This is useful for one-shot batch deduplication workflows where inserting
   /// all rows into the index is unnecessary.

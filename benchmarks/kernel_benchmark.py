@@ -190,6 +190,8 @@ def main():
     args = parser.parse_args()
     if min(args.rows, args.repetitions, *args.sizes, *args.num_perm) <= 0:
         parser.error("rows, repetitions, sizes, and num-perm must be positive")
+    if not 0 <= args.seed <= 2**64 - 1:
+        parser.error("seed must fit the unsigned 64-bit seed range")
     if not 0 <= args.warmup_seconds < float("inf"):
         parser.error("warmup-seconds must be finite and nonnegative")
     if not 0 <= args.min_sample_seconds < float("inf"):
@@ -197,6 +199,7 @@ def main():
     if any(n % 16 for n in args.num_perm) and any(case in args.cases for case in ("query", "rho_dedup")):
         parser.error("num-perm must divide evenly into the fixed 16-band LSH")
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, object]] = []
     report = {
         "schema_version": 1,
         "environment": {
@@ -211,7 +214,7 @@ def main():
                       if key.startswith(("RENSA_", "RAYON_")) or key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")},
         },
         "config": {key: value for key, value in vars(args).items() if key != "output_json"},
-        "results": [],
+        "results": results,
     }
     for size in args.sizes:
         if args.in_process:
@@ -227,7 +230,7 @@ def main():
                     result = isolated_case(args, case, size, num_perm)
                 checksums[case] = result["sha256"]
                 result.update(case=case, tokens_per_row=size, num_perm=num_perm)
-                report["results"].append(result)
+                results.append(result)
                 print(f"{case:12s} tokens={size:4d} perm={num_perm:3d}: {result['median_seconds']:.6f}s", flush=True)
             for equivalent in (("r_update", "r_batch", "r_prehashed"), ("c_update", "c_prehashed")):
                 if len({checksums[name] for name in equivalent if name in checksums}) > 1:

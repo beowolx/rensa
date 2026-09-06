@@ -214,6 +214,23 @@ def main():
         parser.error("seed must fit the shared unsigned 32-bit seed range")
     if not all(0 <= value < float("inf") for value in (args.min_sample_seconds, args.warmup_seconds)):
         parser.error("sample and warmup durations must be finite and nonnegative")
+    results: list[dict[str, object]] = []
+    methodology = {
+        "input": "Identical UTF-8 bytes, same row/token order, no deduplication or sorting",
+        "timed": "Parameter construction, batch sketching, native output allocation",
+        "excluded": "Input preparation, output normalization/checksums, returned-object destruction",
+        "isolation": "fresh process per engine/input/k" if not args.in_process else "single process",
+        "engine_order": "deterministic shuffle per size/k" if args.prehashed else "configured order",
+        "accuracy": "Reported separately; rho uses position sampling and is not a classic MinHash estimator",
+        "validation": "Normalized SHA256 checked after warmup and every measured repetition",
+        "apis": {
+            "rensa_classic": "RMinHash.digest_matrix_from_token_sets",
+            "rensa_rho": "RMinHash.digest_matrix_from_token_sets_rho",
+            "rensa_c": "CMinHash.from_token_sets",
+            "datasketch": "MinHash.generator (fully consumed)",
+            "fastsketch": "FastSimilaritySketch(...).batch(..., num_threads=1)",
+        },
+    }
     report = {
         "schema_version": 1,
         "environment": {
@@ -229,28 +246,13 @@ def main():
             "flags": {key: value for key, value in sorted(os.environ.items())
                       if key in THREAD_ENV or key.startswith("RENSA_")},
         },
-        "methodology": {
-            "input": "Identical UTF-8 bytes, same row/token order, no deduplication or sorting",
-            "timed": "Parameter construction, batch sketching, native output allocation",
-            "excluded": "Input preparation, output normalization/checksums, returned-object destruction",
-            "isolation": "fresh process per engine/input/k" if not args.in_process else "single process",
-            "engine_order": "deterministic shuffle per size/k" if args.prehashed else "configured order",
-            "accuracy": "Reported separately; rho uses position sampling and is not a classic MinHash estimator",
-            "validation": "Normalized SHA256 checked after warmup and every measured repetition",
-            "apis": {
-                "rensa_classic": "RMinHash.digest_matrix_from_token_sets",
-                "rensa_rho": "RMinHash.digest_matrix_from_token_sets_rho",
-                "rensa_c": "CMinHash.from_token_sets",
-                "datasketch": "MinHash.generator (fully consumed)",
-                "fastsketch": "FastSimilaritySketch(...).batch(..., num_threads=1)",
-            },
-        },
+        "methodology": methodology,
         "config": {key: str(value) if isinstance(value, Path) else value
                    for key, value in vars(args).items() if key != "output_json"},
-        "results": [],
+        "results": results,
     }
     if args.prehashed:
-        report["methodology"].update(
+        methodology.update(
             input="Identical readonly contiguous uint64 values and CSR offsets; SplitMix64 sequence seeded with 12345",
             timed="Native batch call, internal per-call setup/copies, native output allocation",
             excluded="Input preparation, reusable FastSketch constructor, output normalization/checksums, returned-object destruction",
@@ -275,7 +277,7 @@ def main():
                     result = isolated_case(args, engine, size, num_perm)
                 checksums.add(result["input_sha256"])
                 result.update(engine=engine, num_perm=num_perm)
-                report["results"].append(result)
+                results.append(result)
                 print(f"{engine:14s} rows={result['rows']:5d} tokens={size} perm={num_perm}: "
                       f"{result['median_seconds']:.6f}s", flush=True)
             if len(checksums) != 1:

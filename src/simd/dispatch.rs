@@ -611,9 +611,9 @@ fn scalar_apply_hash_batch_to_values(
 #[cfg(test)]
 mod tests {
   use crate::simd::dispatch::{
-    forced_kernel_supported, kernel_kind, kernel_kind_name,
-    parse_forced_kernel, scalar_apply_hash_batch_to_values, KernelKind,
-    PermutationSoA,
+    apply_bucket_fallback, forced_kernel_supported, kernel_kind,
+    kernel_kind_name, parse_forced_kernel, scalar_apply_hash_batch_to_values,
+    KernelKind, PermutationSoA,
   };
   use crate::utils::permute_hash;
   use rand_core::{RngCore, SeedableRng};
@@ -869,6 +869,48 @@ mod tests {
         &permutations,
         &[hash],
       );
+    }
+  }
+
+  #[test]
+  fn bucket_fallback_matches_naive_across_packed_lane_boundaries() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5041_434b);
+    for count in (0..=9).chain([127, 128, 129, 255, 256, 257]) {
+      let permutations: Vec<_> = (0..2 * count)
+        .map(|_| (rng.next_u64(), rng.next_u64()))
+        .collect();
+      for hash_len in [0, 1, 7, 8, 9, 31, 32, 33] {
+        let hashes: Vec<_> = (0..hash_len).map(|_| rng.next_u64()).collect();
+        for rank_bits in [1, 2, 8, 31] {
+          let fallback = u32::MAX << (32 - rank_bits);
+          let mut actual = vec![17];
+          for lane in 0..count {
+            actual.push(fallback - 1);
+            actual.push([fallback, fallback + 1, u32::MAX][lane % 3]);
+          }
+          // Leave lanes without coefficients and an outer sentinel untouched.
+          actual.extend([u32::MAX, fallback, 23]);
+          let mut expected = actual.clone();
+          for (value, &(a, b)) in expected[1..].iter_mut().zip(&permutations) {
+            for &hash in &hashes {
+              let product = u128::from(a) * u128::from(hash) + u128::from(b);
+              let rank =
+                u32::try_from((product >> 32) & u128::from(u32::MAX)).unwrap();
+              *value = (*value).min(fallback | (rank >> rank_bits));
+            }
+          }
+          apply_bucket_fallback(
+            &mut actual[1..],
+            &permutations,
+            &hashes,
+            rank_bits,
+          );
+          assert_eq!(
+            actual, expected,
+            "fallback lanes={count}, hashes={hash_len}, rank_bits={rank_bits}"
+          );
+        }
+      }
     }
   }
 }

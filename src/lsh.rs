@@ -189,8 +189,15 @@ impl RMinHashLSH {
   #[inline]
   const fn fx_poly_steps(len_u32: usize) -> usize {
     // `calculate_band_hash` packs 4x u32 into 2x u64 writes, then writes any
-    // remainder u32 values. The polynomial state multiplies by K per write.
-    (len_u32 / 4) * 2 + (len_u32 % 4)
+    // remainder u32 values. On 32-bit targets each u64 write takes two steps.
+    #[cfg(target_pointer_width = "64")]
+    {
+      (len_u32 / 4) * 2 + (len_u32 % 4)
+    }
+    #[cfg(target_pointer_width = "32")]
+    {
+      len_u32
+    }
   }
 
   #[inline]

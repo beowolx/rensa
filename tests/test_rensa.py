@@ -136,32 +136,20 @@ def test_cminhash_serialization_roundtrip_and_legacy_rejection():
     assert sketch.digest_u64() == before
 
 
-def test_rminhash_update_accepts_iterable_bytes_like_tokens():
-    m = RMinHash(num_perm=32, seed=77)
-    initial_digest = m.digest()
-
-    m.update([
+@pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])
+@pytest.mark.parametrize("container", [list, tuple, iter])
+def test_minhash_update_accepts_iterable_bytes_like_tokens(minhash_type, container):
+    expected = minhash_type(num_perm=32, seed=77)
+    expected.update(["alpha", "beta", "gamma", "def"])
+    actual = minhash_type(num_perm=32, seed=77)
+    actual.update(container([
         b"alpha",
         bytearray(b"beta"),
         memoryview(b"gamma"),
         array("B", [100, 101, 102]),
-    ])
-
-    assert m.digest() != initial_digest
-
-
-def test_cminhash_update_accepts_iterable_bytes_like_tokens():
-    m = CMinHash(num_perm=32, seed=77)
-    initial_digest = m.digest()
-
-    m.update([
-        b"alpha",
-        bytearray(b"beta"),
-        memoryview(b"gamma"),
-        array("B", [100, 101, 102]),
-    ])
-
-    assert m.digest() != initial_digest
+    ]))
+    digest = "digest_u64" if minhash_type is CMinHash else "digest"
+    assert getattr(actual, digest)() == getattr(expected, digest)()
 
 
 def test_rminhash_top_level_bytes_and_memoryview_are_single_tokens():
@@ -650,6 +638,10 @@ print(json.dumps(flags))
     phase2_flags = run_with_verifier(enabled=0, threshold=0.75)
     verifier_noop_flags = run_with_verifier(enabled=1, threshold=0.0)
     assert phase2_flags == verifier_noop_flags
+
+    default_flags = run_with_verifier(enabled=1, threshold=0.75)
+    assert any(default_flags)
+    assert run_with_verifier(enabled=1, threshold=float("nan")) == default_flags
 
 
 def test_rminhashlsh_recall_rescue_window_only_relaxes_when_enabled():

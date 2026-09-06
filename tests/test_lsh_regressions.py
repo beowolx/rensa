@@ -48,3 +48,22 @@ def test_duplicate_flags_count_distinct_keys_across_bands():
         assert lsh.query_duplicate_flags([minhash]) == [expected]
         assert lsh.query_duplicate_flags_matrix(matrix) == [expected]
         assert (len(lsh.query(minhash)) > 1) is expected
+
+
+def test_replacing_and_removing_key_updates_every_band():
+    first, second = RMinHash.from_token_sets(
+        [["alpha"], ["unrelated"]], num_perm=16, seed=42
+    )
+    lsh = RMinHashLSH(threshold=0.8, num_perm=16, num_bands=4)
+    lsh.insert(7, first)
+    lsh.insert(9, first)
+    for _ in range(2):
+        lsh.insert(7, second)
+        assert lsh.query(first) == [9]
+        assert lsh.query(second) == [7]
+    assert lsh.remove(7)
+    assert not lsh.remove(7)
+    assert lsh.query(second) == []
+    assert lsh.query(first) == [9]
+    assert lsh.remove(9)
+    assert lsh.query(first) == []

@@ -374,7 +374,8 @@ impl RMinHash {
     Ok(())
   }
 
-  fn update_internal<I, S>(&mut self, items: I)
+  /// Updates the `MinHash` with items from any iterable of string-like values.
+  pub fn update_iter<I, S>(&mut self, items: I)
   where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -393,15 +394,6 @@ impl RMinHash {
     if !hash_batch.is_empty() {
       self.apply_hash_batch(&hash_batch);
     }
-  }
-
-  /// Updates the `MinHash` with items from any iterable of string-like values.
-  pub fn update_iter<I, S>(&mut self, items: I)
-  where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-  {
-    self.update_internal(items);
   }
 
   /// Updates the `MinHash` with a new set of items from a vector of strings.

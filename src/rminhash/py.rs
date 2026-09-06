@@ -162,7 +162,7 @@ impl RMinHash {
       seed,
       extend_token_hashes_from_document,
     )?;
-    Ok(Self::digest_rows_from_matrix(&matrix))
+    Ok(matrix.to_rows())
   }
 
   /// Hashes token documents into `u64` token hashes.

@@ -7,13 +7,13 @@ import os
 import pickle
 import platform
 import random
-import statistics
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+from statistics import median
 from time import perf_counter
 from typing import Any, Mapping
 
@@ -172,6 +172,8 @@ def sanitized_fragment(value: str) -> str:
 
 def parse_dataset_keys(value: str) -> list[str]:
     keys = [item.strip().lower() for item in value.split(",") if item.strip()]
+    if not keys:
+        raise ValueError("--datasets must include at least one dataset")
     unknown = [item for item in keys if item not in DATASET_PRESETS]
     if unknown:
         valid = ", ".join(sorted(DATASET_PRESETS))
@@ -246,18 +248,6 @@ def dataset_cache_path(
         f"__rev_{revision_suffix}__rows_{row_suffix}.pkl"
     )
     return cache_dir / filename
-
-
-def cached_row_count_from_cache_path(cache_path: Path) -> int | None:
-    suffix_marker = "__rows_"
-    name = cache_path.name
-    marker_index = name.rfind(suffix_marker)
-    if marker_index == -1:
-        return None
-    suffix = name[marker_index + len(suffix_marker) :]
-    if suffix.endswith(".pkl"):
-        suffix = suffix[: -len(".pkl")]
-    return int(suffix) if suffix.isdigit() else None
 
 
 def sha256_file(path: Path) -> str:
@@ -356,12 +346,9 @@ def load_or_prepare_token_cache(
     cache_path = dataset_cache_path(cache_dir, spec, max_rows, ngram_size)
 
     if cache_path.exists():
-        row_count = cached_row_count_from_cache_path(cache_path)
-        if row_count is None:
-            with cache_path.open("rb") as handle:
-                token_sets = pickle.load(handle)
-            row_count = len(token_sets)
-        return cache_path, row_count, sha256_file(cache_path)
+        with cache_path.open("rb") as handle:
+            token_sets = pickle.load(handle)
+        return cache_path, len(token_sets), sha256_file(cache_path)
 
     token_sets = load_token_sets_from_hf(spec, max_rows, ngram_size)
     with cache_path.open("wb") as handle:
@@ -679,7 +666,7 @@ def run_once(args: argparse.Namespace) -> None:
         raise ValueError("--order is required in --_run-once mode")
 
     ordered_engines = [item.strip().lower() for item in args.order.split(",") if item.strip()]
-    if set(ordered_engines) != set(ENGINE_KEYS):
+    if sorted(ordered_engines) != sorted(ENGINE_KEYS):
         raise ValueError(
             f"--order must contain exactly these engines: {ENGINE_KEYS}, got {ordered_engines}"
         )
@@ -808,8 +795,12 @@ def run_once_subprocess(
     return json.loads(completed.stdout)
 
 
-def median(values: list[float]) -> float:
-    return statistics.median(values)
+def summarize_mismatch_stats(stats: list[dict[str, Any]]) -> dict[str, int | float]:
+    summary: dict[str, int | float] = {}
+    for key in ("count", "rate", "false_positive", "false_negative"):
+        value = median(stat[key] for stat in stats)
+        summary[f"median_{key}"] = value if key == "rate" else int(round(value))
+    return summary
 
 
 def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -865,81 +856,18 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         )
     }
 
-    mismatch_summary: dict[str, Any] = {}
-    for engine in ("rensa", "fastsketch"):
-        mismatch_summary[engine] = {
-            "median_count": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_datasketch"][engine]["count"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-            "median_rate": median(
-                [run["accuracy"]["mismatch_vs_datasketch"][engine]["rate"] for run in runs]
-            ),
-            "median_false_positive": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_datasketch"][engine]["false_positive"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-            "median_false_negative": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_datasketch"][engine]["false_negative"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-        }
-
-    mismatch_vs_fastsketch_summary: dict[str, Any] = {}
-    for engine in ("rensa", "datasketch"):
-        mismatch_vs_fastsketch_summary[engine] = {
-            "median_count": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_fastsketch"][engine]["count"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-            "median_rate": median(
-                [run["accuracy"]["mismatch_vs_fastsketch"][engine]["rate"] for run in runs]
-            ),
-            "median_false_positive": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_fastsketch"][engine]["false_positive"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-            "median_false_negative": int(
-                round(
-                    median(
-                        [
-                            run["accuracy"]["mismatch_vs_fastsketch"][engine]["false_negative"]
-                            for run in runs
-                        ]
-                    )
-                )
-            ),
-        }
+    mismatch_summary = {
+        engine: summarize_mismatch_stats(
+            [run["accuracy"]["mismatch_vs_datasketch"][engine] for run in runs]
+        )
+        for engine in ("rensa", "fastsketch")
+    }
+    mismatch_vs_fastsketch_summary = {
+        engine: summarize_mismatch_stats(
+            [run["accuracy"]["mismatch_vs_fastsketch"][engine] for run in runs]
+        )
+        for engine in ("rensa", "datasketch")
+    }
 
     return {
         "engine_medians": engine_summary,
@@ -1028,14 +956,18 @@ def main(args: argparse.Namespace) -> None:
 
     if args.num_perm <= 0:
         raise ValueError("--num-perm must be > 0")
-    if args.num_bands <= 0:
-        raise ValueError("--num-bands must be > 0")
+    if args.num_perm & (args.num_perm - 1) or args.num_perm > 4096:
+        raise ValueError("FastSketch requires power-of-two --num-perm no greater than 4096")
+    if args.num_bands < 2:
+        raise ValueError("Datasketch requires at least two bands")
     if args.num_bands > args.num_perm:
         raise ValueError("--num-bands must be <= --num-perm")
     if args.num_perm % args.num_bands != 0:
         raise ValueError("--num-bands must divide --num-perm")
     if not 0.0 <= args.threshold <= 1.0:
         raise ValueError("--threshold must be in [0, 1]")
+    if not 0 <= args.seed <= 2**32 - 1:
+        raise ValueError("--seed must fit the shared unsigned 32-bit seed range")
     if args.warmup_runs < 0:
         raise ValueError("--warmup-runs must be >= 0")
     if args.repetitions <= 0:

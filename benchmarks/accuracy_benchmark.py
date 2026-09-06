@@ -22,7 +22,8 @@ from rensa import CMinHash, RMinHash, RMinHashLSH
 
 
 def pairs(sizes, targets, repeats, orders):
-    rows, cases = [], []
+    rows = []
+    cases: list[dict[str, int | float | str]] = []
     rng = random.Random(20260905)
     for size in sizes:
         seen_overlaps = set()
@@ -93,7 +94,7 @@ def accuracy(args):
     for k in args.perms:
         for engine in args.engines:
             all_estimates, exacts = [], []
-            grouped = defaultdict(lambda: ([], []))
+            grouped: defaultdict[str, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
             for seed in range(args.seeds):
                 matrix, _ = sketch(engine, rows, k, seed)
                 estimates = np.mean(matrix[0::2] == matrix[1::2], axis=1)
@@ -131,7 +132,7 @@ def retrieval(args):
     k = 128
     for engine in ["rensa_classic", "rensa_rho", "datasketch", "fastsketch"]:
         actual, all_truth = [], []
-        grouped = defaultdict(lambda: ([], []))
+        grouped: defaultdict[str, tuple[list[bool], list[bool]]] = defaultdict(lambda: ([], []))
         for seed in range(args.retrieval_seeds):
             matrix, native = sketch(engine, rows, k, seed)
             if engine in ("rensa_classic", "rensa_rho"):
@@ -174,6 +175,8 @@ def main():
     args = parser.parse_args()
     if min(*args.sizes, *args.perms, args.seeds, args.repeats, args.retrieval_seeds) < 1:
         parser.error("sizes, permutations, seeds and repeats must be positive")
+    if "fastsketch" in args.engines and any(k & (k - 1) or k > 4096 for k in args.perms):
+        parser.error("FastSketch requires power-of-two permutations no greater than 4096")
     if not 0 <= args.threshold <= 1:
         parser.error("threshold must be between zero and one")
     payload = {"config": {key: str(value) if isinstance(value, Path) else value

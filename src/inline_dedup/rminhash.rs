@@ -8,9 +8,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyTuple};
 use rustc_hash::FxHashMap;
 
-const TOKEN_SET_TEMPLATE_ERROR: &str =
-  "internal error: token-set template initialization failed";
-
 fn default_lsh_bands(threshold: f64, num_perm: usize) -> usize {
   if threshold >= 0.9 {
     4
@@ -48,8 +45,7 @@ fn select_lsh_bands(
 
 #[derive(Default)]
 struct RMinHashTokenScratch {
-  permutations: Option<SharedPermutations>,
-  scratch: Option<RMinHash>,
+  state: Option<(SharedPermutations, RMinHash)>,
 }
 
 impl RMinHashTokenScratch {
@@ -60,26 +56,23 @@ impl RMinHashTokenScratch {
     seed: u64,
     token_hashes: &mut Vec<u64>,
   ) -> PyResult<&RMinHash> {
-    if self.permutations.is_none() {
-      self.permutations = Some(shared_permutations(num_perm, seed));
-      self.scratch = Some(RMinHash::new_compact(num_perm, seed)?);
-    }
+    let (permutations, scratch) = match &mut self.state {
+      Some(state) => state,
+      empty => empty.insert((
+        shared_permutations(num_perm, seed),
+        RMinHash::new_compact(num_perm, seed)?,
+      )),
+    };
 
     token_hashes.clear();
     extend_token_hashes_from_document(document, token_hashes)?;
 
-    let Some(permutations_ref) = self.permutations.as_ref() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    let Some(scratch_ref) = self.scratch.as_mut() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    scratch_ref.reset_from_token_hashes_with_permutations(
+    scratch.reset_from_token_hashes_with_permutations(
       token_hashes,
-      &permutations_ref.pairs,
-      &permutations_ref.soa,
+      &permutations.pairs,
+      &permutations.soa,
     );
-    Ok(scratch_ref)
+    Ok(scratch)
   }
 }
 

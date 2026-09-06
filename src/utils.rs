@@ -195,9 +195,60 @@ pub fn calculate_band_hash(band: &[u32]) -> u64 {
   hash.rotate_left(ROTATE) as u64
 }
 
+#[derive(Clone, Copy)]
+pub struct MidpointSampler {
+  q: usize,
+  r: usize,
+  step_div: usize,
+  step_mod: usize,
+  denom: usize,
+}
+
+impl MidpointSampler {
+  #[inline]
+  pub const fn new(total: usize, limit: usize) -> Self {
+    debug_assert!(limit > 0);
+    debug_assert!(total >= limit);
+
+    let denom = limit * 2;
+    let total_div = total / limit;
+    let total_rem = total - total_div * limit;
+    let q = total_div / 2;
+    let r = if (total_div & 1) == 0 {
+      total_rem
+    } else {
+      limit + total_rem
+    };
+    let step_div = total_div;
+    let step_mod = total_rem * 2;
+
+    Self {
+      q,
+      r,
+      step_div,
+      step_mod,
+      denom,
+    }
+  }
+
+  #[inline]
+  pub const fn next(&mut self) -> usize {
+    let index = self.q;
+    self.r += self.step_mod;
+    self.q += self.step_div;
+    if self.r >= self.denom {
+      self.r -= self.denom;
+      self.q += 1;
+    }
+    index
+  }
+}
+
 #[cfg(test)]
 mod tests {
-  use crate::utils::{calculate_band_hash, calculate_hash_fast, permute_hash};
+  use crate::utils::{
+    calculate_band_hash, calculate_hash_fast, permute_hash, MidpointSampler,
+  };
   use rustc_hash::FxHasher;
   use std::hash::Hasher;
 
@@ -225,6 +276,21 @@ mod tests {
     }
 
     hasher.finish()
+  }
+
+  #[test]
+  fn midpoint_sampler_matches_integer_midpoints() {
+    let totals = (1..=128).chain([isize::MAX as usize]);
+    for total in totals {
+      for limit in 1..=total.min(128) {
+        let mut sampler = MidpointSampler::new(total, limit);
+        for sample in 0..limit {
+          let expected =
+            ((2 * sample + 1) as u128 * total as u128) / (2 * limit) as u128;
+          assert_eq!(sampler.next() as u128, expected);
+        }
+      }
+    }
   }
 
   #[test]

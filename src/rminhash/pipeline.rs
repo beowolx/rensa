@@ -55,21 +55,6 @@ struct DigestComputeContext<'a> {
 }
 
 impl RMinHash {
-  fn compute_digest_from_token_hashes_into(
-    digest_row: &mut [u32],
-    token_hashes: &[u64],
-    permutations: &[(u64, u64)],
-    permutations_soa: &PermutationSoA,
-  ) {
-    // Callers pre-initialize matrix rows to u32::MAX.
-    Self::apply_token_hashes_to_values(
-      digest_row,
-      permutations,
-      permutations_soa,
-      token_hashes,
-    );
-  }
-
   fn compute_digest_chunk(
     job: &DigestChunkJob,
     num_perm: usize,
@@ -89,11 +74,11 @@ impl RMinHash {
         .par_chunks_mut(num_perm)
         .zip(job.ranges.par_iter())
         .for_each(|(row, &(start, end))| {
-          Self::compute_digest_from_token_hashes_into(
+          Self::apply_token_hashes_to_values(
             row,
-            &job.flat[start..end],
             permutations,
             permutations_soa,
+            &job.flat[start..end],
           );
         });
     } else if let Some(cache) = permutation_cache {
@@ -114,11 +99,11 @@ impl RMinHash {
       for (row, &(start, end)) in
         data.chunks_exact_mut(num_perm).zip(job.ranges.iter())
       {
-        Self::compute_digest_from_token_hashes_into(
+        Self::apply_token_hashes_to_values(
           row,
-          &job.flat[start..end],
           permutations,
           permutations_soa,
+          &job.flat[start..end],
         );
       }
     }
@@ -388,11 +373,11 @@ impl RMinHash {
             |(row_index, row)| {
               let start = row_offsets[row_index];
               let end = row_offsets[row_index + 1];
-              Self::compute_digest_from_token_hashes_into(
+              Self::apply_token_hashes_to_values(
                 row,
-                &token_hashes[start..end],
                 &permutations,
                 &permutations_soa,
+                &token_hashes[start..end],
               );
             },
           );
@@ -420,11 +405,11 @@ impl RMinHash {
             {
               let start = row_offsets[row_index];
               let end = row_offsets[row_index + 1];
-              Self::compute_digest_from_token_hashes_into(
+              Self::apply_token_hashes_to_values(
                 row,
-                &token_hashes[start..end],
                 &permutations,
                 &permutations_soa,
+                &token_hashes[start..end],
               );
             }
           }
@@ -725,16 +710,6 @@ impl RMinHash {
       &permutations_soa,
       document_hasher,
     )
-  }
-
-  pub(in crate::rminhash) fn digest_rows_from_matrix(
-    matrix: &RMinHashDigestMatrix,
-  ) -> Vec<Vec<u32>> {
-    matrix
-      .data
-      .chunks_exact(matrix.num_perm)
-      .map(std::borrow::ToOwned::to_owned)
-      .collect()
   }
 
   pub(in crate::rminhash) fn from_matrix(

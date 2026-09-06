@@ -722,35 +722,10 @@ impl RMinHashLSH {
       return None;
     }
 
-    let num_bands = self.num_bands;
-    let band_size = self.band_size;
-
-    let total_hashes = rows.checked_mul(num_bands)?;
-    let mut hashes = vec![0u64; total_hashes];
-    let fill_row = |row_index: usize, row_hashes: &mut [u64]| {
-      let row = digest_matrix.row(row_index);
-      for (band_idx, hash) in row_hashes.iter_mut().enumerate() {
-        let start = band_idx * band_size;
-        let end = start + band_size;
-        *hash = calculate_band_hash(&row[start..end]);
-      }
-    };
-    if use_parallel_bands(2, rows) {
-      hashes
-        .par_chunks_exact_mut(num_bands)
-        .enumerate()
-        .for_each(|(row_index, row_hashes)| fill_row(row_index, row_hashes));
-    } else {
-      for (row_index, row_hashes) in
-        hashes.chunks_exact_mut(num_bands).enumerate()
-      {
-        fill_row(row_index, row_hashes);
-      }
-    }
-
-    let steps = Self::fx_poly_steps(band_size);
+    let raw = self.compute_raw_band_hashes(digest_matrix, rows)?;
+    let steps = Self::fx_poly_steps(self.band_size);
     Some(PrecomputedBandHashes {
-      hashes,
+      hashes: raw.hashes,
       fold_k_pow: Self::fx_poly_k_pow(steps),
     })
   }
@@ -830,6 +805,7 @@ impl RMinHashLSH {
         && table.is_some_and(|band_table| band_table.contains_key(&band_hash))
       {
         band_match_count.fetch_add(1, Ordering::Relaxed);
+        continue;
       }
 
       #[allow(clippy::cast_possible_truncation)]
@@ -1142,12 +1118,104 @@ impl RMinHashLSH {
 mod tests {
   use crate::lsh::one_shot::{
     atomic_counters, count_scan_band, window_rest_key, BandFoldingConfig,
-    GroupVerifyContext, RawBandHashes, RecallRescueConfig, SparseVerifyConfig,
+    BandScanContext, BandScanScratch, GroupVerifyContext, RawBandHashes,
+    RecallRescueConfig, SparseVerifyConfig,
   };
   use crate::lsh::RMinHashLSH;
   use crate::rminhash::RMinHashDigestMatrix;
+  use crate::utils::calculate_band_hash;
   use rustc_hash::FxHashMap;
   use std::sync::atomic::Ordering;
+
+  #[test]
+  fn precomputed_hashes_match_direct_bands_and_folded_windows() {
+    for rows in [2, 2048] {
+      for band_size in [4, 8, 12] {
+        let num_perm = band_size * 12;
+        let data = (0..rows * num_perm)
+          .map(|index| u32::try_from(index).unwrap().wrapping_mul(0x9e37_79b9))
+          .collect();
+        let matrix = RMinHashDigestMatrix::test_matrix(
+          num_perm,
+          data,
+          Vec::new(),
+          Vec::new(),
+        );
+        let lsh = RMinHashLSH::from_validated(0.5, num_perm, 12);
+        assert!(lsh.precomputed_band_hashes(&matrix, rows, false).is_none());
+        let precomputed =
+          lsh.precomputed_band_hashes(&matrix, rows, true).unwrap();
+        for row_index in 0..rows {
+          let row = matrix.row(row_index);
+          for (band, values) in row.chunks_exact(band_size).enumerate() {
+            assert_eq!(
+              precomputed.hashes[row_index * 12 + band],
+              calculate_band_hash(values)
+            );
+          }
+          for fold in [2, 3, 4, 6, 12] {
+            for (band, values) in row.chunks_exact(band_size * fold).enumerate()
+            {
+              assert_eq!(
+                lsh.effective_band_hash(
+                  &matrix,
+                  row_index,
+                  band,
+                  band_size * fold,
+                  fold,
+                  Some(&precomputed)
+                ),
+                calculate_band_hash(values),
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn existing_and_batch_hits_count_each_band_once() {
+    let matrix = RMinHashDigestMatrix::test_matrix(
+      2,
+      vec![10, 20, 10, 30, 50, 40, 50, 60],
+      vec![7; 4],
+      vec![1; 4],
+    );
+    let mut lsh = RMinHashLSH::from_validated(0.5, 2, 2);
+    lsh.insert_digest(7, &[10, 40]).unwrap();
+    for enabled in [false, true] {
+      let verify = SparseVerifyConfig {
+        enabled,
+        threshold: 0.75,
+        max_candidates: 1,
+      };
+      let context = BandScanContext {
+        digest_matrix: &matrix,
+        effective_band_size: 1,
+        rho_band_fold: 1,
+        precomputed: None,
+        has_existing_entries: true,
+        required_band_matches: &[2; 4],
+        sparse_verify: &verify,
+      };
+      let counters = atomic_counters(4);
+      let mut scratch = BandScanScratch::with_row_capacity(4);
+      let mut statistics = (0, 0);
+      for band in 0..2 {
+        let (checks, passes) =
+          lsh.scan_effective_band(&context, band, &counters, &mut scratch);
+        statistics.0 += checks;
+        statistics.1 += passes;
+      }
+      let counts: Vec<_> = counters
+        .iter()
+        .map(|count| count.load(Ordering::Relaxed))
+        .collect();
+      assert_eq!(counts, vec![1, 1, 2, 1]);
+      assert_eq!(statistics, if enabled { (2, 2) } else { (0, 0) });
+    }
+  }
 
   #[test]
   fn two_member_verification_preserves_counts_and_statistics() {
