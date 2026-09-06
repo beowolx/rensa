@@ -142,10 +142,10 @@ fn for_each_mixed<H: HashValue>(
   seed: u64,
   mut visit: impl FnMut(u64),
 ) {
-  let mut chunks = hashes.chunks_exact(8);
   #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
   if hashes.len() >= 8 {
     if let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() {
+      let mut chunks = hashes.chunks_exact(8);
       for chunk in chunks.by_ref() {
         if let Some(values) = chunk.first_chunk::<8>() {
           for mixed in H::mix_chunk(values, mixer, seed) {
@@ -159,6 +159,16 @@ fn for_each_mixed<H: HashValue>(
       return;
     }
   }
+  for_each_mixed_scalar(hashes, seed, &mut visit);
+}
+
+#[inline]
+fn for_each_mixed_scalar<H: HashValue>(
+  hashes: &[H],
+  seed: u64,
+  mut visit: impl FnMut(u64),
+) {
+  let mut chunks = hashes.chunks_exact(8);
   for chunk in chunks.by_ref() {
     let values: [u64; 8] = std::array::from_fn(|i| chunk[i].value());
     for hash in values {
@@ -375,7 +385,18 @@ fn apply_unfiltered<H: HashValue>(
         let prefix_len = hashes.len().min(len.saturating_mul(8).max(1024));
         let (initial, remaining) = hashes.split_at(prefix_len);
         for_each_mixed(initial, stage_seed, |mixed| update(mixed, false));
-        for_each_mixed(remaining, stage_seed, |mixed| update(mixed, true));
+        // Long conditional spans favor scalar mixing over transferring each
+        // vector batch back to scalar bucket updates. Keep dense fills and
+        // rank-filtered spans on their existing paths.
+        if cfg!(any(target_arch = "x86", target_arch = "x86_64"))
+          && remaining.len() >= 16_384
+        {
+          for_each_mixed_scalar(remaining, stage_seed, |mixed| {
+            update(mixed, true);
+          });
+        } else {
+          for_each_mixed(remaining, stage_seed, |mixed| update(mixed, true));
+        }
       } else {
         for_each_mixed(hashes, stage_seed, |mixed| {
           let bucket = bucket_index(mixed, count);
@@ -674,7 +695,10 @@ mod tests {
       reference(&mut initial, &permutations, &hashes);
       assert!(initial.iter().all(|&value| value < 1 << FRACTION_BITS));
 
-      hashes.extend((0..block_len * 3 + 3).map(|_| rng.next_u64()));
+      // The complete row crosses the scalar conditional-span threshold;
+      // incremental calls below also exercise shorter vector spans on x86.
+      hashes
+        .extend((0..(block_len * 3).max(16_384) + 3).map(|_| rng.next_u64()));
       hashes.extend_from_within(..count);
       let mut expected = vec![u32::MAX; count];
       reference(&mut expected, &permutations, &hashes);
