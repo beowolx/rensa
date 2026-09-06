@@ -1,16 +1,17 @@
 use crate::utils::permute_hash;
 
+const SPLITMIX_CONSTANTS: [u64; 3] = [
+  0x9e37_79b9_7f4a_7c15,
+  0xbf58_476d_1ce4_e5b9,
+  0x94d0_49bb_1331_11eb,
+];
+
 /// Mixes eight independent token values; coordinate updates remain scalar.
 #[inline]
 pub(super) unsafe fn splitmix64x8_avx512(
   values: *const u64,
   seed: u64,
 ) -> [u64; 8] {
-  const CONSTANTS: [u64; 3] = [
-    0x9e37_79b9_7f4a_7c15,
-    0xbf58_476d_1ce4_e5b9,
-    0x94d0_49bb_1331_11eb,
-  ];
   let mut output = std::mem::MaybeUninit::<[u64; 8]>::uninit();
   // SAFETY: the caller proves AVX-512F/DQ support and that values points to
   // eight readable u64 values. The unaligned store initializes exactly the
@@ -40,7 +41,7 @@ pub(super) unsafe fn splitmix64x8_avx512(
       values = in(reg) values,
       output = in(reg) output.as_mut_ptr(),
       seed = in(reg) &raw const seed,
-      constants = in(reg) CONSTANTS.as_ptr(),
+      constants = in(reg) SPLITMIX_CONSTANTS.as_ptr(),
       out("zmm0") _,
       out("zmm1") _,
       out("zmm2") _,
@@ -60,11 +61,6 @@ pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
   bound: u32,
   output: &mut [u64; 8],
 ) -> u8 {
-  const CONSTANTS: [u64; 3] = [
-    0x9e37_79b9_7f4a_7c15,
-    0xbf58_476d_1ce4_e5b9,
-    0x94d0_49bb_1331_11eb,
-  ];
   const {
     assert!(RANK_SHIFT >= 33 && RANK_SHIFT < 64);
   }
@@ -102,7 +98,7 @@ pub(super) unsafe fn splitmix64x8_below_avx512<const RANK_SHIFT: u32>(
       "2:",
       values = in(reg) values,
       state = in(reg) state.as_ptr(),
-      constants = in(reg) CONSTANTS.as_ptr(),
+      constants = in(reg) SPLITMIX_CONSTANTS.as_ptr(),
       output = inout(reg) output.as_mut_ptr() => _,
       mask = lateout(reg) mask,
       rank_shift = const RANK_SHIFT,
@@ -132,11 +128,6 @@ pub(super) unsafe fn apply_buckets_below_avx512(
   bound: u32,
   hash_values: &mut [u32],
 ) -> usize {
-  const CONSTANTS: [u64; 3] = [
-    0x9e37_79b9_7f4a_7c15,
-    0xbf58_476d_1ce4_e5b9,
-    0x94d0_49bb_1331_11eb,
-  ];
   let Ok(width) = u32::try_from(hash_values.len()) else {
     return 0;
   };
@@ -198,7 +189,7 @@ pub(super) unsafe fn apply_buckets_below_avx512(
       "dec {count}",
       "jnz 2b",
       state = in(reg) state.as_ptr(),
-      constants = in(reg) CONSTANTS.as_ptr(),
+      constants = in(reg) SPLITMIX_CONSTANTS.as_ptr(),
       scratch = inout(reg) scratch.as_mut_ptr() => _,
       values = inout(reg) hash_values.as_mut_ptr() => _,
       cursor = inout(reg) input => _,

@@ -191,7 +191,6 @@ impl CMinHash {
         "failed to deserialize CMinHash state: {err}"
       ))
     })?;
-    decoded.validate_state()?;
     *self = decoded;
     Ok(())
   }

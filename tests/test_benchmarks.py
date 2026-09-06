@@ -11,6 +11,36 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.skipif(
+    sys.implementation.name != "cpython", reason="Requires CPython reference counting"
+)
+def test_kernel_measure_destroys_results_outside_timed_intervals(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    benchmark = importlib.import_module("kernel_benchmark")
+    events = []
+    ticks = iter(range(8))
+
+    class Result:
+        def __init__(self):
+            events.append("create")
+
+        def __del__(self):
+            events.append("destroy")
+
+    def clock():
+        tick = next(ticks)
+        events.append("start" if tick % 2 == 0 else "stop")
+        return tick * 1_000_000_000
+
+    monkeypatch.setattr(benchmark.time, "perf_counter", lambda: 0)
+    monkeypatch.setattr(benchmark.time, "perf_counter_ns", clock)
+    result = benchmark.measure(Result, lambda result: [1], 2, 2, 0)
+
+    assert result["iterations"] == [2, 2]
+    assert result["seconds"] == [1.0, 1.0]
+    assert events == ["create", "destroy"] + ["start", "create", "stop", "destroy"] * 4
+
+
 @pytest.mark.parametrize("module_name", ["simple_benchmark", "full_benchmark"])
 def test_benchmark_records_order_sensitive_duplicate_decisions(
     module_name, monkeypatch, tmp_path, capsys

@@ -142,8 +142,7 @@ def measure(run, extract, repetitions, min_sample_seconds, warmup_seconds):
         elapsed = 0.0
         count = 0
         while elapsed < min_sample_seconds or count == 0:
-            if count:
-                del result
+            result = None
             start = time.perf_counter_ns()
             result = run()
             elapsed += (time.perf_counter_ns() - start) / 1e9

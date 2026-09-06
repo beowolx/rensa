@@ -13,8 +13,6 @@ use std::sync::Arc;
 // Below this size, a linear scan is cheaper than constructing the band index.
 const MIN_INDEX_ENTRIES: usize = 128;
 
-const TOKEN_SET_TEMPLATE_ERROR: &str =
-  "internal error: token-set template initialization failed";
 const NUM_PERM_ADD_TOKEN_ENTRIES_ERROR: &str =
   "num_perm is not configured; initialize CMinHashDeduplicator with num_perm to add token-set entries";
 const NUM_PERM_CHECK_TOKEN_ENTRIES_ERROR: &str =
@@ -24,7 +22,6 @@ const NUM_PERM_QUERY_TOKEN_ENTRIES_ERROR: &str =
 
 #[derive(Default)]
 struct CMinHashTokenScratch {
-  template: Option<CMinHash>,
   scratch: Option<CMinHash>,
 }
 
@@ -36,23 +33,15 @@ impl CMinHashTokenScratch {
     seed: u64,
     token_hashes: &mut Vec<u64>,
   ) -> PyResult<&CMinHash> {
-    if self.template.is_none() {
-      let built = CMinHash::new(num_perm, seed)?;
-      self.scratch = Some(CMinHash::compact_from_template(&built));
-      self.template = Some(built);
-    }
+    let scratch = match &mut self.scratch {
+      Some(scratch) => scratch,
+      empty => empty.insert(CMinHash::new(num_perm, seed)?),
+    };
 
     token_hashes.clear();
     extend_token_hashes_from_document(document, token_hashes)?;
-    let Some(template_ref) = self.template.as_ref() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    let Some(scratch_ref) = self.scratch.as_mut() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    scratch_ref
-      .reset_from_token_hashes_with_template(token_hashes, template_ref);
-    Ok(scratch_ref)
+    scratch.reset_from_token_hashes(token_hashes);
+    Ok(scratch)
   }
 }
 
@@ -192,7 +181,7 @@ fn insert_signature_bands(
 ) {
   let key: Arc<str> = key.into();
   let hashes = signature_band_hashes(signature.signature_values(), index.len());
-  for (band, (_, hash)) in index.iter_mut().zip(hashes) {
+  for (band, hash) in index.iter_mut().zip(hashes) {
     band
       .entry(hash)
       .and_modify(|bucket| bucket.push(Arc::clone(&key)))
@@ -223,7 +212,7 @@ fn exact_band_count(num_perm: usize, threshold: f64) -> usize {
 fn signature_band_hashes(
   values: &[u64],
   band_count: usize,
-) -> impl Iterator<Item = (usize, u64)> + '_ {
+) -> impl Iterator<Item = u64> + '_ {
   let width = values.len() / band_count;
   let extra = values.len() % band_count;
   let mut start = 0;
@@ -232,7 +221,7 @@ fn signature_band_hashes(
     let mut hasher = FxHasher::default();
     values[start..end].hash(&mut hasher);
     start = end;
-    (band, hasher.finish())
+    hasher.finish()
   })
 }
 
@@ -243,7 +232,7 @@ impl CMinHashDeduplicator {
     let mut seen = FxHashSet::default();
     let hashes =
       signature_band_hashes(minhash.signature_values(), self.band_count);
-    for (band, (_, hash)) in self.signature_bands.iter().zip(hashes) {
+    for (band, hash) in self.signature_bands.iter().zip(hashes) {
       let Some(keys) = band.get(&hash) else {
         continue;
       };
@@ -450,7 +439,7 @@ impl CMinHashDeduplicator {
     if !self.signature_bands.is_empty() {
       let hashes =
         signature_band_hashes(removed.signature_values(), self.band_count);
-      for (band, (_, hash)) in self.signature_bands.iter_mut().zip(hashes) {
+      for (band, hash) in self.signature_bands.iter_mut().zip(hashes) {
         if let Some(keys) = band.get_mut(&hash) {
           if keys.remove(key) {
             band.remove(&hash);

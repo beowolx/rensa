@@ -1,4 +1,4 @@
-use crate::cminhash::{CMinHash, HASH_BATCH_SIZE, STATE_VERSION};
+use crate::cminhash::{CMinHash, HASH_BATCH_SIZE};
 use crate::utils::{calculate_hash_fast, ratio_usize};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -218,29 +218,9 @@ impl CMinHash {
     }
   }
 
-  pub(crate) fn compact_from_template(template: &Self) -> Self {
-    Self {
-      version: STATE_VERSION,
-      num_perm: template.num_perm,
-      seed: template.seed,
-      hash_values: vec![u64::MAX; template.num_perm],
-      sigma_key: template.sigma_key,
-      pi_key: template.pi_key,
-    }
-  }
-
-  pub(crate) fn reset_from_token_hashes_with_template(
-    &mut self,
-    token_hashes: &[u64],
-    template: &Self,
-  ) {
+  pub(crate) fn reset_from_token_hashes(&mut self, token_hashes: &[u64]) {
     self.hash_values.fill(u64::MAX);
-    Self::apply_token_hashes_to_values(
-      &mut self.hash_values,
-      token_hashes,
-      template.sigma_key,
-      template.pi_key,
-    );
+    self.update_hashed_tokens(token_hashes);
   }
 
   fn update_internal<I, S>(&mut self, items: I)
