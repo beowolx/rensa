@@ -63,16 +63,77 @@ def test_cminhash_jaccard_rejects_num_perm_mismatch():
         m1.jaccard(m2)
 
 
-def test_rminhash_serialization_roundtrip():
-    m = RMinHash(num_perm=5, seed=2023)
-    m.update(["serialize", "this"])
-    digest_before = m.digest()
+@pytest.mark.parametrize("minhash_type", [RMinHash, CMinHash])
+def test_minhash_jaccard_rejects_seed_mismatch(minhash_type):
+    left = minhash_type(num_perm=128, seed=1)
+    right = minhash_type(num_perm=128, seed=2)
+    left.update(["same", "tokens"])
+    right.update(["same", "tokens"])
+    with pytest.raises(ValueError, match="seed mismatch"):
+        left.jaccard(right)
 
+
+@pytest.mark.parametrize("num_perm", [5, 128, 129])
+def test_rminhash_serialization_roundtrip_and_legacy_rejection(num_perm):
     import pickle
-    data = pickle.dumps(m)
-    m2 = pickle.loads(data)
 
-    assert m2.digest() == digest_before, "Deserialized RMinHash should have the same digest"
+    sketch = RMinHash(num_perm=num_perm, seed=42)
+    sketch.update(["first", "second"])
+    restored = pickle.loads(pickle.dumps(sketch))
+    assert restored.digest() == sketch.digest()
+    restored.update(["third"])
+    sketch.update(["third"])
+    assert restored.digest() == sketch.digest()
+    assert RMinHash.ALGORITHM_VERSION == 2
+
+    # Actual state emitted by version 1 for k=2, seed=42, {a,b}.
+    legacy = bytes.fromhex("022a02b4ecd38e02b9a6aff201")
+    before = sketch.digest()
+    with pytest.raises(ValueError, match="rebuild"):
+        sketch.__setstate__(legacy)
+    assert sketch.digest() == before
+
+
+def test_lsh_serialization_roundtrip_and_legacy_rejection():
+    import pickle
+
+    sketch = RMinHash(num_perm=128, seed=42)
+    sketch.update(["first", "second"])
+    index = RMinHashLSH(threshold=0.8, num_perm=128, num_bands=8)
+    index.insert(0, sketch)
+    restored = pickle.loads(pickle.dumps(index))
+    assert restored.query(sketch) == [0]
+
+    # Actual version 1 index containing key 0 and the {a,b} sketch above.
+    legacy = bytes.fromhex(
+        "9a9999999999e93f020102010194c48cabbca2f1ac1c010001000194c48cabbca2f1ac1c"
+    )
+    with pytest.raises(ValueError, match="rebuild"):
+        restored.__setstate__(legacy)
+    assert restored.query(sketch) == [0]
+
+
+def test_cminhash_serialization_roundtrip_and_legacy_rejection():
+    import pickle
+
+    sketch = CMinHash(num_perm=129, seed=42)
+    sketch.update(["first", "second"])
+    restored = pickle.loads(pickle.dumps(sketch))
+    assert restored.digest_u64() == sketch.digest_u64()
+    restored.update(["third"])
+    sketch.update(["third"])
+    assert restored.digest_u64() == sketch.digest_u64()
+    assert CMinHash.ALGORITHM_VERSION == 2
+
+    # Actual state emitted by the affine implementation for k=2, seed=42, {a,b}.
+    legacy = bytes.fromhex(
+        "022a02e180a0e5fca1bea5a001eedbb3c6adc1dd959c019fd1d9a3f4a993bbd001"
+        "91efbcbbc5ae90cf518ddb93e1b09f9ff0fb01b8ebe0e680ece7beb301"
+    )
+    before = sketch.digest_u64()
+    with pytest.raises(ValueError, match="rebuild"):
+        sketch.__setstate__(legacy)
+    assert sketch.digest_u64() == before
 
 
 def test_rminhash_update_accepts_iterable_bytes_like_tokens():
@@ -260,6 +321,174 @@ def test_rminhash_flat_token_hash_matrix_matches_default_path():
     assert from_flat_buffers == baseline
 
 
+@pytest.mark.parametrize("digest", [
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets(
+        [values], 16, 42).to_rows(), id="r_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes(
+        values, [0, len(values)], 16, 42).to_rows(), id="r_flat"),
+    pytest.param(lambda values: CMinHash.digests64_from_token_hash_sets(
+        [values], 16, 42), id="c_batch"),
+])
+def test_prehashed_requires_integer_values(digest):
+    class IndexValue:
+        def __index__(self):
+            raise AssertionError("prehashed conversion must not invoke __index__")
+
+    class IntegerValue(int):
+        def __index__(self):
+            raise AssertionError("integer subclasses must use their stored value")
+
+    assert digest([1, IntegerValue(2)]) == digest([1, 2])
+    with pytest.raises(TypeError, match="unsigned 64-bit integer"):
+        digest([1, IndexValue()])
+
+
+@pytest.mark.parametrize("digest", [
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets(
+        [values], 16, 42).to_rows(), id="r_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_token_hash_sets_rho(
+        [values], 16, 42).to_rows(), id="rho_batch"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes(
+        values, [0, len(values)], 16, 42).to_rows(), id="r_flat"),
+    pytest.param(lambda values: RMinHash.digest_matrix_from_flat_token_hashes_rho(
+        values, [0, len(values)], 16, 42).to_rows(), id="rho_flat"),
+    pytest.param(lambda values: CMinHash.digests64_from_token_hash_sets(
+        [values], 16, 42), id="c_batch"),
+])
+def test_prehashed_integer_buffers_require_native_byte_order(digest):
+    np = pytest.importorskip("numpy")
+    values = [1, 0x0102030405060708, (1 << 64) - 2]
+    native = np.array(values, dtype=np.uint64)
+    expected = digest(values)
+    assert digest(native) == expected
+    assert digest(memoryview(native).toreadonly()) == expected
+
+    foreign = np.array(values, dtype=np.dtype(np.uint64).newbyteorder("S"))
+    with pytest.raises(TypeError, match="unsigned 64-bit integer"):
+        digest(foreign)
+
+
+@pytest.mark.parametrize("width", [2, 4, 8])
+@pytest.mark.parametrize("digest", [
+    RMinHash.digest_matrix_from_flat_token_hashes,
+    RMinHash.digest_matrix_from_flat_token_hashes_rho,
+])
+def test_row_offset_buffers_do_not_reinterpret_foreign_byte_order(width, digest):
+    np = pytest.importorskip("numpy")
+    values = [1, 2, 3]
+    native = np.array([0, 1, 3], dtype=f"u{width}")
+    expected = digest(values, [0, 1, 3], 16, 42).to_rows()
+    assert digest(values, native, 16, 42).to_rows() == expected
+
+    foreign = native.astype(native.dtype.newbyteorder("S"))
+    try:
+        actual = digest(values, foreign, 16, 42).to_rows()
+    except ValueError as error:
+        assert "row_offsets must be an unsigned integer" in str(error)
+    else:
+        # A rejected typed view may fall back to correct numeric iteration.
+        assert actual == expected
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_rminhash_large_flat_buffer_views_match_owned_inputs(threads):
+    code = """
+from array import array
+import sys
+from rensa import RMinHash
+
+size = 3 * 65536 + 19
+mask = (1 << 64) - 1
+original = array('Q', ((i * 0x9e3779b97f4a7c15) & mask for i in range(size)))
+storage = array('Q', [7]) + original + array('Q', [11])
+view = memoryview(storage)[1:-1]
+readonly = view.toreadonly()
+boundaries = [0, 0, 65535, 65536, 65536, size]
+
+for k in (17, 128):
+    for offsets in (boundaries, [0, size]):
+        expected = RMinHash.digest_matrix_from_flat_token_hashes(
+            list(original), offsets, k, 42).to_rows()
+        offset_view = memoryview(array('Q', offsets)).toreadonly()
+        for source in (original, view, readonly):
+            actual = RMinHash.digest_matrix_from_flat_token_hashes(
+                source, offset_view, k, 42).to_rows()
+            assert actual == expected
+assert storage[0] == 7 and storage[-1] == 11
+assert list(view) == list(original)
+
+# Offset iteration runs before token snapshots for every size/input path.
+before = RMinHash.digest_matrix_from_flat_token_hashes([42], [0, 1], 128, 42).to_rows()
+changed = RMinHash.digest_matrix_from_flat_token_hashes([42, 99], [0, 2], 128, 42).to_rows()
+assert changed != before
+for length in (8, 65537):
+    for values in (array('Q', [42]) * length, [42] * length):
+        sources = [values]
+        if isinstance(values, array):
+            sources.append(memoryview(values).toreadonly())
+        for source in sources:
+            values[-1] = 42
+            iterations = []
+            class ChangingOffsets:
+                def __iter__(self):
+                    iterations.append(True)
+                    values[-1] = 99
+                    return iter([0, length])
+            actual = RMinHash.digest_matrix_from_flat_token_hashes(
+                source, ChangingOffsets(), 128, 42).to_rows()
+            assert actual == changed
+            assert iterations == [True]
+
+# A readonly view still has a writable alias. Later calls must observe writes.
+view[:] = memoryview(array('Q', [99]) * size)
+expected = RMinHash.digest_matrix_from_flat_token_hashes([99], [0, 1], 128, 42)
+actual = RMinHash.digest_matrix_from_flat_token_hashes(readonly, [0, size], 128, 42)
+assert actual.to_rows() == expected.to_rows()
+
+for offsets in ([], [0], [1, size], [0, size - 1], [0, size + 1], [0, 2, 1, size]):
+    try:
+        RMinHash.digest_matrix_from_flat_token_hashes(readonly, offsets, 128, 42)
+    except ValueError as error:
+        assert 'row_offsets must start at 0' in str(error)
+    else:
+        raise AssertionError('invalid row offsets were accepted')
+try:
+    RMinHash.digest_matrix_from_flat_token_hashes(view[::2], [0, (size + 1) // 2], 128, 42)
+except TypeError as error:
+    assert 'unsigned 64-bit integer' in str(error)
+else:
+    raise AssertionError('noncontiguous input was accepted')
+
+if sys.version_info >= (3, 12):
+    class Exporter:
+        def __init__(self, values):
+            self.values = values
+            self.events = []
+        def __buffer__(self, flags):
+            self.events.append('acquire')
+            return memoryview(self.values)
+        def __release_buffer__(self, view):
+            self.events.append('release')
+        def __iter__(self):
+            return iter(self.values)
+    for values in (array('Q', [1, 2]), original, array('B', [1, 2])):
+        exporter = Exporter(values)
+        expected = RMinHash.digest_matrix_from_flat_token_hashes(
+            list(values), [0, len(values)], 17, 42).to_rows()
+        actual = RMinHash.digest_matrix_from_flat_token_hashes(
+            exporter, [0, len(values)], 17, 42).to_rows()
+        assert actual == expected
+        assert exporter.events == ['acquire', 'release']
+print('PASS')
+"""
+    env = dict(os.environ, RAYON_NUM_THREADS=str(threads),
+               RENSA_MAX_PERM_CACHE_HASHES="0")
+    result = subprocess.run([sys.executable, "-c", code], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PASS"
+
+
 def test_rminhash_rho_matrix_apis_are_consistent():
     token_sets = [
         ["alpha", "beta", "gamma"],
@@ -306,25 +535,44 @@ def test_rminhash_rho_source_token_counts_are_reported():
     assert matrix.get_rho_source_token_counts() == [1, 3, 0]
 
 
-def test_rminhash_rho_adaptive_budget_is_deterministic_across_thread_counts():
+@pytest.mark.parametrize("num_perm", [64, 128])
+def test_rminhash_rho_adaptive_budget_is_deterministic_across_thread_counts(num_perm):
     code = """
 import json
-from rensa import RMinHash
-token_sets = [
-    ["tok" + str(i % 5) for i in range(4 + (doc_idx % 40))]
-    for doc_idx in range(96)
-]
+from rensa import RMinHash, RMinHashLSH
+import os
+token_sets = []
+for doc_idx in range(384):
+    size = (0, 1, 7, 8, 31, 64, 97, 256)[doc_idx % 8]
+    tokens = ["tok" + str(i % 37) for i in range(size)]
+    if doc_idx % 6 == 2:
+        tokens = [token + "é" for token in tokens]
+    elif doc_idx % 6 == 3:
+        tokens = [token.encode() for token in tokens]
+    elif doc_idx % 6 == 4:
+        tokens = tuple(tokens)
+    elif doc_idx % 6 == 5:
+        tokens = [bytearray(token.encode()) for token in tokens]
+    token_sets.append(tokens)
+num_perm = int(os.environ["TEST_NUM_PERM"])
 matrix = RMinHash.digest_matrix_from_token_sets_rho(
-    token_sets, num_perm=64, seed=42, probes=4
+    token_sets, num_perm=num_perm, seed=42, probes=4
 )
-print(json.dumps(matrix.to_rows()))
+lsh = RMinHashLSH(0.8, num_perm, 8)
+flags = lsh.query_duplicate_flags_matrix_one_shot(matrix)
+print(json.dumps([matrix.to_rows(), matrix.get_rho_source_token_counts(),
+                 matrix.get_rho_non_empty_counts(), flags,
+                 lsh.get_last_one_shot_sparse_verify_checks(),
+                 lsh.get_last_one_shot_sparse_verify_passes()]))
 """
 
-    def run_with_threads(threads: int) -> list[list[int]]:
+    def run_with_threads(threads: int, raw: bool):
         env = os.environ.copy()
         env["RAYON_NUM_THREADS"] = str(threads)
         env["RENSA_RHO_MEDIUM_TOKEN_BUDGET"] = "20"
         env["RENSA_RHO_MEDIUM_TOKEN_THRESHOLD"] = "96"
+        env["RENSA_RHO_RAW_PARALLEL"] = str(int(raw))
+        env["TEST_NUM_PERM"] = str(num_perm)
         proc = subprocess.run(
             [sys.executable, "-c", code],
             text=True,
@@ -334,7 +582,9 @@ print(json.dumps(matrix.to_rows()))
         )
         return json.loads(proc.stdout)
 
-    assert run_with_threads(1) == run_with_threads(8)
+    expected = run_with_threads(1, False)
+    assert run_with_threads(8, True) == expected
+    assert run_with_threads(8, False) == expected
 
 
 def test_rminhashlsh_sparse_required_band_matches_is_monotonic():

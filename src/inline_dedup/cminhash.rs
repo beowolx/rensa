@@ -2,13 +2,17 @@ use crate::cminhash::CMinHash;
 use crate::inline_dedup::common::{validate_threshold, PAIR_ENTRY_ERROR};
 use crate::inline_dedup::CMinHashDeduplicator;
 use crate::py_input::extend_token_hashes_from_document;
+use crate::utils::ratio_usize;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyTuple};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-const TOKEN_SET_TEMPLATE_ERROR: &str =
-  "internal error: token-set template initialization failed";
+// Below this size, a linear scan is cheaper than constructing the band index.
+const MIN_INDEX_ENTRIES: usize = 128;
+
 const NUM_PERM_ADD_TOKEN_ENTRIES_ERROR: &str =
   "num_perm is not configured; initialize CMinHashDeduplicator with num_perm to add token-set entries";
 const NUM_PERM_CHECK_TOKEN_ENTRIES_ERROR: &str =
@@ -18,7 +22,6 @@ const NUM_PERM_QUERY_TOKEN_ENTRIES_ERROR: &str =
 
 #[derive(Default)]
 struct CMinHashTokenScratch {
-  template: Option<CMinHash>,
   scratch: Option<CMinHash>,
 }
 
@@ -30,23 +33,15 @@ impl CMinHashTokenScratch {
     seed: u64,
     token_hashes: &mut Vec<u64>,
   ) -> PyResult<&CMinHash> {
-    if self.template.is_none() {
-      let built = CMinHash::new(num_perm, seed)?;
-      self.scratch = Some(CMinHash::compact_from_template(&built));
-      self.template = Some(built);
-    }
+    let scratch = match &mut self.scratch {
+      Some(scratch) => scratch,
+      empty => empty.insert(CMinHash::new(num_perm, seed)?),
+    };
 
     token_hashes.clear();
     extend_token_hashes_from_document(document, token_hashes)?;
-    let Some(template_ref) = self.template.as_ref() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    let Some(scratch_ref) = self.scratch.as_mut() else {
-      return Err(PyValueError::new_err(TOKEN_SET_TEMPLATE_ERROR));
-    };
-    scratch_ref
-      .reset_from_token_hashes_with_template(token_hashes, template_ref);
-    Ok(scratch_ref)
+    scratch.reset_from_token_hashes(token_hashes);
+    Ok(scratch)
   }
 }
 
@@ -137,7 +132,126 @@ where
   Ok(outcomes)
 }
 
+// Most bands have one entry, so allocate a vector only when bands collide.
+pub(super) enum SignatureBucket {
+  One(Arc<str>),
+  Many(Vec<Arc<str>>),
+}
+
+impl SignatureBucket {
+  fn push(&mut self, key: Arc<str>) {
+    match self {
+      Self::One(existing) => {
+        *self = Self::Many(vec![Arc::clone(existing), key]);
+      }
+      Self::Many(keys) => keys.push(key),
+    }
+  }
+
+  fn as_slice(&self) -> &[Arc<str>] {
+    match self {
+      Self::One(key) => std::slice::from_ref(key),
+      Self::Many(keys) => keys,
+    }
+  }
+
+  // Return whether the bucket can be removed from the index.
+  fn remove(&mut self, key: &str) -> bool {
+    match self {
+      Self::One(existing) => existing.as_ref() == key,
+      Self::Many(keys) => {
+        keys.retain(|existing| existing.as_ref() != key);
+        match keys.as_slice() {
+          [] => true,
+          [remaining] => {
+            *self = Self::One(Arc::clone(remaining));
+            false
+          }
+          _ => false,
+        }
+      }
+    }
+  }
+}
+
+fn insert_signature_bands(
+  index: &mut [FxHashMap<u64, SignatureBucket>],
+  key: &str,
+  signature: &CMinHash,
+) {
+  let key: Arc<str> = key.into();
+  let hashes = signature_band_hashes(signature.signature_values(), index.len());
+  for (band, hash) in index.iter_mut().zip(hashes) {
+    band
+      .entry(hash)
+      .and_modify(|bucket| bucket.push(Arc::clone(&key)))
+      .or_insert_with(|| SignatureBucket::One(Arc::clone(&key)));
+  }
+}
+
+// Find the first accepted integer match count with the exact comparison used
+// by verification. Multiplying threshold by num_perm can round differently.
+fn exact_band_count(num_perm: usize, threshold: f64) -> usize {
+  let mut low = 0;
+  let mut high = num_perm;
+  while low < high {
+    let middle = low + (high - low) / 2;
+    if ratio_usize(middle, num_perm) >= threshold {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  if low <= 1 {
+    // Zero matches accepts everything; one match offers only single-lane bands.
+    return 0;
+  }
+  num_perm - low + 1
+}
+
+fn signature_band_hashes(
+  values: &[u64],
+  band_count: usize,
+) -> impl Iterator<Item = u64> + '_ {
+  let width = values.len() / band_count;
+  let extra = values.len() % band_count;
+  let mut start = 0;
+  (0..band_count).map(move |band| {
+    let end = start + width + usize::from(band < extra);
+    let mut hasher = FxHasher::default();
+    values[start..end].hash(&mut hasher);
+    start = end;
+    hasher.finish()
+  })
+}
+
 impl CMinHashDeduplicator {
+  fn has_indexed_duplicate(&self, minhash: &CMinHash) -> bool {
+    // With d allowed mismatches, d+1 disjoint bands guarantee at least one
+    // entirely matching band. Hash collisions only add candidates to verify.
+    let mut seen = FxHashSet::default();
+    let hashes =
+      signature_band_hashes(minhash.signature_values(), self.band_count);
+    for (band, hash) in self.signature_bands.iter().zip(hashes) {
+      let Some(keys) = band.get(&hash) else {
+        continue;
+      };
+      for candidate in keys.as_slice() {
+        if !seen.insert(candidate.as_ref()) {
+          continue;
+        }
+        let Some(existing) = self.existing_signatures.get(candidate.as_ref())
+        else {
+          continue;
+        };
+        if minhash.jaccard_at_least_unchecked(existing, self.threshold) {
+          return true;
+        }
+      }
+    }
+    false
+  }
+
   #[inline]
   fn validate_input_minhash(&self, minhash: &CMinHash) -> PyResult<()> {
     if minhash.seed() != self.seed {
@@ -182,7 +296,10 @@ impl CMinHashDeduplicator {
     Ok(Self {
       threshold,
       existing_signatures: FxHashMap::default(),
+      signature_bands: Vec::new(),
+      band_count: 0,
       num_perm,
+      configured_num_perm: num_perm,
       seed,
     })
   }
@@ -191,7 +308,6 @@ impl CMinHashDeduplicator {
   ///
   /// Returns an error when the supplied `CMinHash` has an incompatible configuration.
   pub fn add(&mut self, key: String, minhash: &CMinHash) -> PyResult<bool> {
-    self.validate_input_minhash(minhash)?;
     if self.is_duplicate(&key, minhash)? {
       return Ok(false);
     }
@@ -199,7 +315,23 @@ impl CMinHashDeduplicator {
     if self.num_perm.is_none() {
       self.num_perm = Some(minhash.num_perm());
     }
+    if self.existing_signatures.is_empty() {
+      self.band_count = exact_band_count(minhash.num_perm(), self.threshold);
+    }
+    if !self.signature_bands.is_empty() {
+      insert_signature_bands(&mut self.signature_bands, &key, minhash);
+    }
     self.existing_signatures.insert(key, minhash.clone());
+    if self.band_count > 0
+      && self.signature_bands.is_empty()
+      && self.existing_signatures.len() >= MIN_INDEX_ENTRIES
+    {
+      self.signature_bands =
+        (0..self.band_count).map(|_| FxHashMap::default()).collect();
+      for (key, signature) in &self.existing_signatures {
+        insert_signature_bands(&mut self.signature_bands, key, signature);
+      }
+    }
     Ok(true)
   }
 
@@ -232,8 +364,12 @@ impl CMinHashDeduplicator {
       return Ok(true);
     }
 
+    if !self.signature_bands.is_empty() {
+      return Ok(self.has_indexed_duplicate(minhash));
+    }
+
     for existing_minhash in self.existing_signatures.values() {
-      if minhash.jaccard_unchecked(existing_minhash) >= self.threshold {
+      if minhash.jaccard_at_least_unchecked(existing_minhash, self.threshold) {
         return Ok(true);
       }
     }
@@ -269,7 +405,7 @@ impl CMinHashDeduplicator {
     let mut duplicates = Vec::new();
 
     for (key, existing_minhash) in &self.existing_signatures {
-      if minhash.jaccard_unchecked(existing_minhash) >= self.threshold {
+      if minhash.jaccard_at_least_unchecked(existing_minhash, self.threshold) {
         duplicates.push(key.clone());
       }
     }
@@ -297,11 +433,26 @@ impl CMinHashDeduplicator {
   }
 
   pub fn remove(&mut self, key: &str) -> bool {
-    let removed = self.existing_signatures.remove(key).is_some();
-    if self.existing_signatures.is_empty() {
-      self.num_perm = None;
+    let Some(removed) = self.existing_signatures.remove(key) else {
+      return false;
+    };
+    if !self.signature_bands.is_empty() {
+      let hashes =
+        signature_band_hashes(removed.signature_values(), self.band_count);
+      for (band, hash) in self.signature_bands.iter_mut().zip(hashes) {
+        if let Some(keys) = band.get_mut(&hash) {
+          if keys.remove(key) {
+            band.remove(&hash);
+          }
+        }
+      }
     }
-    removed
+    if self.existing_signatures.is_empty() {
+      self.num_perm = self.configured_num_perm;
+      self.band_count = 0;
+      self.signature_bands.clear();
+    }
+    true
   }
 
   #[must_use]
@@ -316,6 +467,83 @@ impl CMinHashDeduplicator {
 
   pub fn clear(&mut self) {
     self.existing_signatures.clear();
-    self.num_perm = None;
+    self.signature_bands.clear();
+    self.band_count = 0;
+    self.num_perm = self.configured_num_perm;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::inline_dedup::cminhash::{
+    exact_band_count, signature_band_hashes,
+  };
+  use crate::utils::ratio_usize;
+
+  #[test]
+  fn signature_bucket_handles_collisions_and_removal() {
+    use crate::inline_dedup::cminhash::SignatureBucket;
+    use std::sync::Arc;
+
+    let mut bucket = SignatureBucket::One(Arc::from("first"));
+    assert!(!bucket.remove("missing"));
+    bucket.push(Arc::from("second"));
+    bucket.push(Arc::from("third"));
+    assert_eq!(bucket.as_slice().len(), 3);
+    assert!(!bucket.remove("second"));
+    assert_eq!(bucket.as_slice().len(), 2);
+    assert!(!bucket.remove("first"));
+    assert!(matches!(bucket, SignatureBucket::One(_)));
+    assert_eq!(bucket.as_slice()[0].as_ref(), "third");
+    assert!(bucket.remove("third"));
+  }
+
+  #[test]
+  fn exact_bands_never_exclude_an_accepted_binary_signature() {
+    for width in 1..=6 {
+      for matching in 0..=width {
+        let boundary = ratio_usize(matching, width);
+        let below = f64::from_bits(boundary.to_bits().saturating_sub(1));
+        let above = f64::from_bits(boundary.to_bits() + 1);
+        for threshold in [below, boundary, above.min(1.0)] {
+          let band_count = exact_band_count(width, threshold);
+          let required = (0..=width)
+            .find(|&count| ratio_usize(count, width) >= threshold)
+            .unwrap();
+          assert_eq!(
+            band_count,
+            if required <= 1 {
+              0
+            } else {
+              width - required + 1
+            }
+          );
+          if band_count == 0 {
+            continue;
+          }
+          let signatures: Vec<Vec<u64>> = (0..1usize << width)
+            .map(|bits| {
+              (0..width).map(|lane| ((bits >> lane) & 1) as u64).collect()
+            })
+            .collect();
+          let bands: Vec<Vec<_>> = signatures
+            .iter()
+            .map(|values| signature_band_hashes(values, band_count).collect())
+            .collect();
+          for (left_index, left) in signatures.iter().enumerate() {
+            for (right_index, right) in signatures.iter().enumerate() {
+              let matches =
+                left.iter().zip(right).filter(|(a, b)| a == b).count();
+              if ratio_usize(matches, width) >= threshold {
+                assert!(bands[left_index]
+                  .iter()
+                  .zip(&bands[right_index])
+                  .any(|(a, b)| a == b));
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

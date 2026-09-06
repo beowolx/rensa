@@ -224,7 +224,6 @@ impl RMinHashDeduplicator {
   ///
   /// Returns an error when the supplied `RMinHash` has an incompatible configuration.
   pub fn add(&mut self, key: String, minhash: &RMinHash) -> PyResult<bool> {
-    self.validate_input_minhash(minhash)?;
     if self.is_duplicate(&key, minhash)? {
       return Ok(false);
     }

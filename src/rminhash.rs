@@ -1,42 +1,26 @@
-//! Implementation of the R-MinHash algorithm, a novel variant of `MinHash`.
-//! R-MinHash is designed for high-performance similarity estimation and deduplication
-//! of large datasets, forming a core component of the Rensa library.
+//! Seeded `MinHash` sketches for similarity estimation and deduplication.
 //!
-//! This algorithm represents an original approach developed for Rensa. It draws
-//! inspiration from traditional `MinHash` techniques and concepts discussed in
-//! the context of algorithms like C-MinHash, but implements a distinct and
-//! simplified method for generating `MinHash` signatures.
+//! R-MinHash uses Rensa's practical pseudorandom hash family. Its scalar and
+//! batch entry points produce the same signature and support incremental
+//! updates. Rho is a separate bucket sketch used by the fast deduplication
+//! pipeline; its output is not interchangeable with an R-MinHash signature.
 //!
-//! For context on related advanced `MinHash` techniques, see:
-//! - C-MinHash: Rigorously Reducing K Permutations to Two.
-//!   Ping Li, Arnd Christian König. [arXiv:2109.03337](https://arxiv.org/abs/2109.03337)
-//!
-//! Key characteristics of R-MinHash:
-//! - Simulates `num_perm` independent hash functions using unique pairs of random
-//!   numbers (a, b) for each permutation, applied on-the-fly. This avoids
-//!   storing full permutations or complex derivation schemes.
-//! - Optimized for speed using batch processing of input items and leveraging
-//!   efficient hash computations.
-//! - Provides a practical balance between performance and accuracy for large-scale
-//!   similarity tasks.
-//!
-//! Usage:
-//! - Create an instance with `RMinHash::new(num_perm, seed)`.
-//! - Process data items with `rminhash.update(items)`.
-//! - Obtain the signature with `rminhash.digest()`.
-//! - Estimate Jaccard similarity with `rminhash.jaccard(&other_rminhash)`.
+//! Algorithm version 2 changes R-MinHash signatures. Persisted version 1
+//! sketches and indexes must be rebuilt from their source tokens.
 
 use crate::py_input::for_each_token_hash;
-use crate::simd::dispatch::{apply_hash_batch_to_values, PermutationSoA};
+use crate::simd::dispatch::PermutationSoA;
 use crate::utils::{calculate_hash_fast, ratio_usize};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList, PyTuple};
 use rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 
+mod bucket;
 mod config;
 mod matrix;
 mod permutation_cache;
@@ -52,7 +36,10 @@ use config::DigestBuildConfig;
 use matrix::RhoDigestSidecar;
 pub use permutation_cache::{shared_permutations, SharedPermutations};
 
+pub const STATE_VERSION: u32 = 0x524d_4802;
+const PY_STATE_PREFIX: &[u8] = b"Rensa:RMinHash:2\0";
 const HASH_BATCH_SIZE: usize = 32;
+const MAX_HASH_BATCH_SIZE: usize = 4096;
 const DEFAULT_DOC_CHUNK_SIZE: usize = 2048;
 const MIN_DOC_CHUNK_SIZE: usize = 256;
 const MAX_DOC_CHUNK_SIZE: usize = 8192;
@@ -103,23 +90,51 @@ pub struct RMinHashDigestMatrix {
 }
 
 /// `RMinHash` implements the `MinHash` algorithm for efficient similarity estimation.
-#[derive(Serialize, Clone)]
+#[derive(Clone)]
 #[pyclass(module = "rensa", skip_from_py_object)]
 pub struct RMinHash {
   num_perm: usize,
   seed: u64,
   hash_values: Vec<u32>,
-  #[serde(skip, default)]
   permutations: Arc<[(u64, u64)]>,
-  #[serde(skip, default)]
   permutations_soa: Arc<PermutationSoA>,
 }
 
 #[derive(Deserialize)]
 struct RMinHashState {
+  #[serde(rename = "version", deserialize_with = "deserialize_state_version")]
+  _version: (),
   num_perm: usize,
   seed: u64,
   hash_values: Vec<u32>,
+}
+
+pub fn deserialize_state_version<'de, D>(
+  deserializer: D,
+) -> Result<(), D::Error>
+where
+  D: Deserializer<'de>,
+{
+  if u32::deserialize(deserializer)? != STATE_VERSION {
+    return Err(serde::de::Error::custom(
+      "unsupported RMinHash state version; rebuild sketches and indexes from their tokens",
+    ));
+  }
+  Ok(())
+}
+
+impl Serialize for RMinHash {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut state = serializer.serialize_struct("RMinHash", 4)?;
+    state.serialize_field("version", &STATE_VERSION)?;
+    state.serialize_field("num_perm", &self.num_perm)?;
+    state.serialize_field("seed", &self.seed)?;
+    state.serialize_field("hash_values", &self.hash_values)?;
+    state.end()
+  }
 }
 
 impl<'de> Deserialize<'de> for RMinHash {
@@ -128,6 +143,11 @@ impl<'de> Deserialize<'de> for RMinHash {
     D: Deserializer<'de>,
   {
     let state = RMinHashState::deserialize(deserializer)?;
+    if state.num_perm == 0 || state.hash_values.len() != state.num_perm {
+      return Err(serde::de::Error::custom(
+        "invalid RMinHash state: num_perm must equal the nonempty hash_values length",
+      ));
+    }
     Ok(Self {
       num_perm: state.num_perm,
       seed: state.seed,
@@ -239,6 +259,12 @@ impl RMinHash {
         self.num_perm, other.num_perm
       )));
     }
+    if self.seed != other.seed {
+      return Err(PyValueError::new_err(format!(
+        "seed mismatch: left is {}, right is {}",
+        self.seed, other.seed
+      )));
+    }
     Ok(())
   }
 
@@ -298,7 +324,7 @@ impl RMinHash {
   }
 
   fn apply_hash_batch(&mut self, hash_batch: &[u64]) {
-    apply_hash_batch_to_values(
+    Self::apply_token_hashes_to_values(
       &mut self.hash_values,
       &self.permutations,
       &self.permutations_soa,
@@ -312,12 +338,7 @@ impl RMinHash {
     permutations_soa: &PermutationSoA,
     token_hashes: &[u64],
   ) {
-    apply_hash_batch_to_values(
-      hash_values,
-      permutations,
-      permutations_soa,
-      token_hashes,
-    );
+    bucket::apply(hash_values, permutations, permutations_soa, token_hashes);
   }
 
   fn apply_document_to_values(
@@ -330,8 +351,8 @@ impl RMinHash {
     hash_batch.clear();
     for_each_token_hash(document, |token_hash| {
       hash_batch.push(token_hash);
-      if hash_batch.len() == HASH_BATCH_SIZE {
-        apply_hash_batch_to_values(
+      if hash_batch.len() == MAX_HASH_BATCH_SIZE {
+        Self::apply_token_hashes_to_values(
           hash_values,
           permutations,
           permutations_soa,
@@ -342,7 +363,7 @@ impl RMinHash {
       Ok(())
     })?;
     if !hash_batch.is_empty() {
-      apply_hash_batch_to_values(
+      Self::apply_token_hashes_to_values(
         hash_values,
         permutations,
         permutations_soa,
@@ -363,7 +384,7 @@ impl RMinHash {
 
     for item in items {
       hash_batch.push(calculate_hash_fast(item.as_ref().as_bytes()));
-      if hash_batch.len() == HASH_BATCH_SIZE {
+      if hash_batch.len() == MAX_HASH_BATCH_SIZE {
         self.apply_hash_batch(&hash_batch);
         hash_batch.clear();
       }
@@ -399,5 +420,49 @@ impl RMinHash {
     _probes: usize,
   ) -> PyResult<Option<RMinHashDigestMatrix>> {
     Ok(None)
+  }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+  use crate::lsh::RMinHashLSH;
+  use crate::rminhash::{RMinHash, STATE_VERSION};
+
+  #[test]
+  fn postcard_restores_sketch_updates_and_index_queries() -> pyo3::PyResult<()>
+  {
+    let mut original = RMinHash::new(128, 42)?;
+    original.update_iter(["first", "second"]);
+    let bytes = postcard::to_allocvec(&original).unwrap();
+    let mut restored: RMinHash = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(restored.digest(), original.digest());
+    original.update_iter(["third"]);
+    restored.update_iter(["third"]);
+    assert_eq!(restored.digest(), original.digest());
+
+    let mut index = RMinHashLSH::new(0.8, 128, 8)?;
+    index.insert(0, &original)?;
+    let bytes = postcard::to_allocvec(&index).unwrap();
+    let restored_index: RMinHashLSH = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(restored_index.query(&restored)?, vec![0]);
+    Ok(())
+  }
+
+  #[test]
+  fn postcard_rejects_legacy_nested_and_invalid_sketches() {
+    let legacy = (2_usize, 42_u64, vec![1_u32, 2]);
+    let bytes = postcard::to_allocvec(&legacy).unwrap();
+    assert!(postcard::from_bytes::<RMinHash>(&bytes).is_err());
+    let bytes = postcard::to_allocvec(&vec![legacy]).unwrap();
+    assert!(postcard::from_bytes::<Vec<RMinHash>>(&bytes).is_err());
+    for (version, num_perm, values) in [
+      (STATE_VERSION + 1, 1_usize, vec![0_u32]),
+      (STATE_VERSION, 0, vec![]),
+      (STATE_VERSION, 2, vec![0]),
+    ] {
+      let bytes =
+        postcard::to_allocvec(&(version, num_perm, 42_u64, values)).unwrap();
+      assert!(postcard::from_bytes::<RMinHash>(&bytes).is_err());
+    }
   }
 }

@@ -9,6 +9,19 @@ on:
       - "*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      performance_only:
+        description: Run only strict performance comparisons
+        type: boolean
+        default: false
+      require_avx512:
+        description: Fail before benchmarking if the runner lacks AVX-512F/DQ
+        type: boolean
+        default: false
+      baseline_sha:
+        description: Optional full ancestor commit SHA for a same-run performance comparison
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,6 +32,7 @@ permissions:
 
 jobs:
   rust-quality:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     name: Rust Quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -30,10 +44,22 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.9"
+      - name: Run Rust tests
+        run: |
+          lscpu
+          cargo test --locked
+      - name: Check minimum supported Rust version
+        run: |
+          rustup toolchain install 1.83.0 --profile minimal
+          cargo +1.83.0 test --locked --lib simd::
       - name: Lint with clippy
-        run: cargo clippy --all --benches --tests --examples --all-features -- -D clippy::pedantic -D clippy::nursery
+        run: cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings -D clippy::pedantic -D clippy::nursery
 
   cargo-deny:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     name: Cargo Deny
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -64,6 +90,7 @@ jobs:
           fail-on-severity: moderate
 
   linux:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -101,6 +128,7 @@ jobs:
 
 
   musllinux:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -133,6 +161,7 @@ jobs:
           path: dist
 
   windows:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -161,6 +190,7 @@ jobs:
           path: dist
 
   macos:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 45
     strategy:
@@ -188,6 +218,7 @@ jobs:
           path: dist
 
   sdist:
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -209,6 +240,9 @@ jobs:
     timeout-minutes: 30
     env:
       HF_HOME: ${{ github.workspace }}/.hf-cache
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      BENCH_COMPARE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.performance_only) }}
+      BENCH_PAIRED: ${{ github.event_name == 'workflow_dispatch' && inputs.performance_only && inputs.baseline_sha != '' }}
       BENCH_DATASET_KEY: ag_news
       BENCH_MAX_ROWS: "10000"
       BENCH_FULL_SMOKE_MAX_ROWS: "2000"
@@ -224,34 +258,68 @@ jobs:
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.9"
+          python-version: "3.13"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           enable-cache: true
 
-      - name: Create benchmark directories
+      - name: Record benchmark hardware and compilers
         shell: bash
-        run: |
-          mkdir -p .bench
-
-      - name: Prepare PR base checkout
-        if: github.event_name == 'pull_request'
-        shell: bash
+        env:
+          REQUIRE_AVX512: ${{ inputs.require_avx512 || false }}
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          echo "Base SHA: ${BASE_SHA}"
-          git fetch --no-tags origin "${BASE_SHA}"
+          mkdir -p .bench
+          git rev-parse HEAD | tee .bench/head_commit.txt
+          lscpu --json > .bench/cpu.json
+          lscpu | tee .bench/cpu.txt
+          if [ "${REQUIRE_AVX512}" = "true" ] && \
+             { ! grep -qw avx512f /proc/cpuinfo || ! grep -qw avx512dq /proc/cpuinfo; }; then
+            echo "Requested AVX-512F/DQ is unavailable on this runner." >&2
+            exit 1
+          fi
+          {
+            c++ --version
+            rustc -vV
+            cargo --version
+            uv --version
+          } | tee .bench/compilers.txt
+
+      - name: Prepare benchmark base checkout
+        if: env.BENCH_COMPARE == 'true'
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REQUESTED_BASE_SHA: ${{ inputs.baseline_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_BASE_SHA}" ]; then
+            BASE_SHA="${PR_BASE_SHA}"
+            git fetch --no-tags origin "${BASE_SHA}"
+          elif [ -n "${REQUESTED_BASE_SHA}" ]; then
+            if [[ ! "${REQUESTED_BASE_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "baseline_sha must be a full 40-character commit SHA." >&2
+              exit 1
+            fi
+            BASE_SHA="${REQUESTED_BASE_SHA}"
+            git fetch --no-tags origin "${BASE_SHA}"
+            git merge-base --is-ancestor "${BASE_SHA}" HEAD
+          else
+            # Resolve main once, so a manual run compares both builds to one commit.
+            git fetch --no-tags origin main
+            BASE_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
+          printf '%s\n' "${BASE_SHA}" | tee .bench/base_commit.txt
           git worktree add ../rensa-base "${BASE_SHA}"
           echo "BASE_DIR=$(cd ../rensa-base && pwd)" >> "$GITHUB_ENV"
 
-      - name: Run PR base and head benchmarks
-        if: github.event_name == 'pull_request'
+      - name: Run base and head benchmarks
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          uv venv --python 3.9 "${GITHUB_WORKSPACE}/.venv"
+          uv venv --python 3.13 "${GITHUB_WORKSPACE}/.venv"
           uv sync --python "${GITHUB_WORKSPACE}/.venv/bin/python" --group dev --no-install-project
           uv pip install \
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
@@ -259,9 +327,11 @@ jobs:
             "datasketch>=1.9" \
             "tqdm>=4.66"
           uv pip install \
-            --no-cache \
+            --no-cache --no-binary FastSketchLSH --verbose \
             --python "${GITHUB_WORKSPACE}/.venv/bin/python" \
-            "FastSketchLSH"
+            "FastSketchLSH==1.0.1" 2>&1 | tee .bench/fastsketch_build.txt
+          # Upstream chooses AVX-512 at build time; retain its actual selection.
+          grep -F 'Selected SIMD:' .bench/fastsketch_build.txt | tee .bench/fastsketch_simd.txt
           BENCH_VENV="${GITHUB_WORKSPACE}/.venv"
           BENCH_PY="${GITHUB_WORKSPACE}/.venv/bin/python"
           BENCH_MATURIN="${GITHUB_WORKSPACE}/.venv/bin/maturin"
@@ -276,6 +346,31 @@ jobs:
             VIRTUAL_ENV="${BENCH_VENV}" PATH="${BENCH_VENV}/bin:${PATH}" "${BENCH_MATURIN}" develop --release
             popd >/dev/null
 
+            if [ "${BENCH_PAIRED}" = "true" ]; then
+              "${BENCH_PY}" - "${GITHUB_WORKSPACE}/.bench/${label}-native/rensa.so" <<'PY'
+          import importlib
+          from pathlib import Path
+          import shutil
+          import sys
+
+          source = Path(importlib.import_module("rensa.rensa").__file__)
+          destination = Path(sys.argv[1])
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(source, destination)
+          PY
+            fi
+
+            if [ "${label}" = "head" ]; then
+              if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+                export RENSA_REQUIRE_AVX512=1
+              fi
+              PYO3_PYTHON="${BENCH_PY}" cargo test --locked --lib simd:: -- --nocapture \
+                2>&1 | tee .bench/simd_tests.txt
+              "${BENCH_PY}" -m pytest -q \
+                "${GITHUB_WORKSPACE}/tests/test_accuracy.py" \
+                "${GITHUB_WORKSPACE}/tests/test_rensa.py"
+            fi
+
             "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/simple_benchmark.py" \
               --dataset "${BENCH_DATASET_KEY}" \
               --max-rows "${BENCH_MAX_ROWS}" \
@@ -286,6 +381,54 @@ jobs:
               --measured-runs "${BENCH_PR_MEASURED_RUNS}" \
               --output-json "${output_json}" \
               | tee "${output_log}"
+
+            RAYON_NUM_THREADS=1 RENSA_PIPELINE_QUEUE_CAP=0 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/kernel_benchmark.py" \
+              --rows 256 --repetitions 5 --sizes 1 8 32 128 4096 --num-perm 128 512 \
+              --output-json "${output_json%.json}_kernels.json" \
+              | tee "${output_log%.txt}_kernels.txt"
+
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/accuracy_benchmark.py" \
+              --seeds 8 --skip-retrieval \
+              --output-json "${output_json%.json}_accuracy.json" \
+              | tee "${output_log%.txt}_accuracy.txt"
+
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+              --engines rensa_classic fastsketch --rows 256 --repetitions 5 \
+              --min-sample-seconds 0.1 \
+              --sizes 1 8 32 128 1024 4096 16384 --num-perm 128 512 \
+              --output-json "${output_json%.json}_sketches.json" \
+              | tee "${output_log%.txt}_sketches.txt"
+
+            "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+              --prehashed --rows 256 --repetitions 5 --min-sample-seconds 0.05 \
+              --max-input-tokens 8388608 \
+              --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+              --output-json "${output_json%.json}_prehashed.json" \
+              | tee "${output_log%.txt}_prehashed.txt"
+
+            if [ "${label}" = "head" ] && [ "${RENSA_REQUIRE_AVX512:-}" = "1" ]; then
+              # Compare both backends on the same CPU and installed head binary.
+              RENSA_FORCE_KERNEL=avx2 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --rows 256 --repetitions 5 \
+                --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_avx2.json" \
+                | tee "${output_json%.json}_prehashed_avx2.txt"
+
+              "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --repeat-cardinality 4 --rows 8 \
+                --repetitions 5 --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_repeated.json" \
+                | tee "${output_json%.json}_prehashed_repeated.txt"
+
+              RENSA_FORCE_KERNEL=avx2 "${BENCH_PY}" "${GITHUB_WORKSPACE}/benchmarks/sketch_benchmark.py" \
+                --prehashed --engines rensa_classic --repeat-cardinality 4 --rows 8 \
+                --repetitions 5 --min-sample-seconds 0.05 --max-input-tokens 8388608 \
+                --sizes 65536 1048576 --num-perm 128 512 \
+                --output-json "${output_json%.json}_prehashed_repeated_avx2.json" \
+                | tee "${output_json%.json}_prehashed_repeated_avx2.txt"
+            fi
 
             echo "Completed ${label} benchmark."
           }
@@ -302,13 +445,121 @@ jobs:
             "${GITHUB_WORKSPACE}/.bench/base_summary.txt" \
             "base"
 
-      - name: Validate PR benchmark outputs
-        if: github.event_name == 'pull_request'
+      - name: Compare frozen builds in alternating pairs
+        if: env.BENCH_PAIRED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+            export RENSA_REQUIRE_AVX512=1
+          fi
+          PAIRED_FAMILY="$("${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          versions = [json.loads(Path(f".bench/{label}_kernels.json").read_text())
+                      ["environment"]["rminhash_algorithm_version"]
+                      for label in ("base", "head")]
+          print("same" if versions[0] == versions[1] else "migration")
+          PY
+          )"
+          if [ "${PAIRED_FAMILY}" = "migration" ]; then
+            echo "Paired signature-identity diagnostic skipped for algorithm migration." | tee .bench/paired_skip.txt
+            exit 0
+          fi
+          "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/paired_sketch_benchmark.py \
+            --base-extension .bench/base-native/rensa.so \
+            --head-extension .bench/head-native/rensa.so \
+            --prehashed --rows 256 --max-input-tokens 8388608 \
+            --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+            --repetitions 6 --min-sample-seconds 0.1 --warmup-seconds 0.2 \
+            --output-json .bench/paired_prehashed.json | tee .bench/paired_prehashed.txt
+          "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          paired = json.loads(Path(".bench/paired_prehashed.json").read_text())
+          cases = {(row["tokens_per_row"], row["num_perm"]): row for row in paired["results"]}
+          if len(cases) != len(paired["results"]):
+              raise SystemExit("Duplicate paired benchmark cases")
+          for label in ("base", "head"):
+              reference = json.loads(Path(f".bench/{label}_prehashed.json").read_text())
+              environment = reference["environment"]
+              for key in ("cpu_flags", "flags"):
+                  if paired["environment"][key] != environment[key]:
+                      raise SystemExit(f"Paired {label} environment mismatch: {key}")
+              if paired["environment"]["fastsketch_binary_sha256"] != environment["native_binary_sha256"]["FastSketchLSH"]:
+                  raise SystemExit(f"Paired {label} FastSketch binary differs")
+              if paired["extensions"][label]["sha256"] not in environment["native_binary_sha256"]["rensa"].values():
+                  raise SystemExit(f"Frozen {label} binary differs from the measured build")
+              if paired["extensions"][label]["algorithm_version"] != environment["rminhash_algorithm_version"]:
+                  raise SystemExit(f"Frozen {label} algorithm version differs from the measured build")
+              for engine, sample in (("rensa_classic", label), ("fastsketch", "fastsketch")):
+                  expected = {(row["tokens_per_row"], row["num_perm"]): row
+                              for row in reference["results"] if row["engine"] == engine}
+                  if cases.keys() != expected.keys():
+                      raise SystemExit(f"Paired {label}/{engine} case matrix mismatch")
+                  for key, row in cases.items():
+                      if (row["input_sha256"] != expected[key]["input_sha256"]
+                              or row["samples"][sample]["sha256"] != expected[key]["sha256"]):
+                          raise SystemExit(f"Paired {label}/{engine} fingerprint mismatch: {key}")
+          print("Paired diagnostic matches both frozen builds and every reference fingerprint.")
+          PY
+
+      - name: Validate repeated-token backend diagnostics
+        if: env.BENCH_COMPARE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -qw avx512f /proc/cpuinfo || ! grep -qw avx512dq /proc/cpuinfo; then
+            exit 0
+          fi
+          "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY' | tee .bench/validation_repeated.txt
+          import json
+
+          reports = []
+          for suffix, backend in (("", None), ("_avx2", "avx2")):
+              with open(f".bench/head_prehashed_repeated{suffix}.json", encoding="utf-8") as handle:
+                  report = json.load(handle)
+              if report["environment"]["flags"].pop("RENSA_FORCE_KERNEL", None) != backend:
+                  raise SystemExit("repeated-token diagnostic backend mismatch")
+              reports.append(report)
+          default, avx2 = reports
+          if default["config"] != avx2["config"] or default["environment"] != avx2["environment"]:
+              raise SystemExit("repeated-token diagnostic config/environment mismatch")
+          expected_config = {"prehashed": True, "engines": ["rensa_classic"],
+                             "repeat_cardinality": 4, "rows": 8, "repetitions": 5,
+                             "min_sample_seconds": 0.05, "max_input_tokens": 8388608,
+                             "sizes": [65536, 1048576], "num_perm": [128, 512], "in_process": False}
+          if any(default["config"][key] != value for key, value in expected_config.items()):
+              raise SystemExit("repeated-token diagnostic matrix mismatch")
+          expected_cases = {(size, k) for size in (65536, 1048576) for k in (128, 512)}
+          rows = []
+          for report in reports:
+              cases = {(row["tokens_per_row"], row["num_perm"]): row for row in report["results"]}
+              if cases.keys() != expected_cases or len(report["results"]) != len(expected_cases):
+                  raise SystemExit("repeated-token diagnostic cases missing or duplicated")
+              if any(row["engine"] != "rensa_classic" or row["rows"] != 8
+                     or row["distinct_tokens_per_row"] != 4 for row in cases.values()):
+                  raise SystemExit("repeated-token diagnostic inputs mismatch")
+              rows.append(cases)
+          for case, result in rows[0].items():
+              forced = rows[1][case]
+              if any(result[key] != forced[key] for key in ("input_sha256", "sha256")):
+                  raise SystemExit(f"repeated-token diagnostic hash mismatch: {case}")
+              print(f"PASS: repeated tokens n={case[0]}, k={case[1]}: "
+                    f"default={result['median_seconds']:.6f}s, avx2={forced['median_seconds']:.6f}s; "
+                    f"avx2/default={forced['median_seconds'] / result['median_seconds']:.3f}x")
+          PY
+
+      - name: Validate benchmark outputs
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
           "${GITHUB_WORKSPACE}/.venv/bin/python" - <<'PY' | tee .bench/validation_pr.txt
           import json
+          import math
 
           with open(".bench/head.json", "r", encoding="utf-8") as handle:
               head = json.load(handle)
@@ -322,29 +573,212 @@ jobs:
               if engine not in base["summary"]["engine_medians"]:
                   raise SystemExit(f"missing base engine metrics: {engine}")
 
-          head_total = float(head["summary"]["engine_medians"]["rensa_r"]["median_total"])
-          base_total = float(base["summary"]["engine_medians"]["rensa_r"]["median_total"])
-          if base_total <= 0:
-              raise SystemExit("invalid base rensa_r median_total")
-          slowdown_fraction = (head_total / base_total) - 1.0
-
-          if slowdown_fraction > 0.10:
-              raise SystemExit(
-                  f"rensa_r slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
-                  f"slowdown={slowdown_fraction:.2%}"
-              )
-
-          print(
-              f"PASS: rensa_r median_total head={head_total:.6f}s "
-              f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}"
+          config_keys = (
+              "dataset", "dataset_spec", "rows", "effective_max_rows", "num_perm",
+              "num_bands", "rows_per_band", "threshold", "seed", "ngram_size",
+              "warmup_runs", "measured_runs", "thread_env", "rensa_env", "token_cache_sha256",
           )
+          for key in config_keys:
+              if head["config"][key] != base["config"][key]:
+                  raise SystemExit(f"benchmark input/config mismatch: {key}")
+
+          # The reviewed v2 algorithms change signatures once. Same-version
+          # comparisons retain every output check; rho keeps its own algorithm.
+          algorithm_versions = {}
+          for name in ("cminhash", "rminhash"):
+              versions = (base["metadata"][f"{name}_algorithm_version"],
+                          head["metadata"][f"{name}_algorithm_version"])
+              if versions[0] != versions[1] and versions != (1, 2):
+                  raise SystemExit(f"unsupported {name} algorithm transition: {versions}")
+              algorithm_versions[name] = versions
+              if versions == (1, 2):
+                  print(f"{name} 1->2 migration: compare accuracy artifacts; require per-build determinism")
+          c_migration = algorithm_versions["cminhash"] == (1, 2)
+          r_migration = algorithm_versions["rminhash"] == (1, 2)
+
+          for engine in required_engines:
+              flag_hashes = []
+              for payload in (head, base):
+                  hashes = {run["duplicate_flags_sha256"][engine] for run in payload["runs"]}
+                  if len(hashes) != 1:
+                      raise SystemExit(f"duplicate decisions are nondeterministic or missing: {engine}")
+                  flag_hashes.append(hashes.pop())
+              if flag_hashes[0] != flag_hashes[1] and not (c_migration and engine == "rensa_c"):
+                  raise SystemExit(f"duplicate decisions changed: {engine}")
+
+          for engine in ("rensa_r", "rensa_c"):
+              head_total = float(head["summary"]["engine_medians"][engine]["median_total"])
+              base_total = float(base["summary"]["engine_medians"][engine]["median_total"])
+              if not (0 < head_total < float("inf") and 0 < base_total < float("inf")):
+                  raise SystemExit(f"invalid {engine} median_total")
+              slowdown_fraction = (head_total / base_total) - 1.0
+              if slowdown_fraction > 0.10:
+                  raise SystemExit(
+                      f"{engine} slowdown too high: head={head_total:.6f}s base={base_total:.6f}s "
+                      f"slowdown={slowdown_fraction:.2%}"
+                  )
+              decision_check = (
+                  "C-MinHash 1->2 correction; per-build decisions deterministic"
+                  if c_migration and engine == "rensa_c" else "duplicate decisions unchanged"
+              )
+              print(
+                  f"PASS: {engine} median_total head={head_total:.6f}s "
+                  f"base={base_total:.6f}s slowdown={slowdown_fraction:.2%}; {decision_check}"
+              )
+          with open(".bench/head_kernels.json", "r", encoding="utf-8") as handle:
+              head_kernels = json.load(handle)
+          with open(".bench/base_kernels.json", "r", encoding="utf-8") as handle:
+              base_kernels = json.load(handle)
+          if head_kernels["config"] != base_kernels["config"]:
+              raise SystemExit("kernel benchmark config mismatch")
+          if head_kernels["environment"]["flags"] != base_kernels["environment"]["flags"]:
+              raise SystemExit("kernel benchmark environment flags mismatch")
+          for name, versions in algorithm_versions.items():
+              kernel_versions = (base_kernels["environment"][f"{name}_algorithm_version"],
+                                 head_kernels["environment"][f"{name}_algorithm_version"])
+              if kernel_versions != versions:
+                  raise SystemExit(f"{name} algorithm versions differ between benchmark suites")
+          def keyed_results(payload):
+              return {
+                  (result["case"], result["tokens_per_row"], result["num_perm"]): result
+                  for result in payload["results"]
+              }
+          head_cases = keyed_results(head_kernels)
+          base_cases = keyed_results(base_kernels)
+          if not head_cases or head_cases.keys() != base_cases.keys():
+              raise SystemExit("kernel benchmark cases mismatch or empty")
+          for key, result in head_cases.items():
+              baseline = base_cases[key]
+              c_signature_migration = c_migration and key[0] in ("c_update", "c_prehashed")
+              r_signature_migration = r_migration and key[0] in ("r_update", "r_batch", "r_prehashed")
+              if result["sha256"] != baseline["sha256"] and not (c_signature_migration or r_signature_migration):
+                  raise SystemExit(f"kernel output changed: {key}")
+              head_time, base_time = result["median_seconds"], baseline["median_seconds"]
+              if not (0 < head_time < float("inf") and 0 < base_time < float("inf")):
+                  raise SystemExit(f"invalid kernel timings: {key}")
+              output_check = (
+                  "C-MinHash 1->2 signature correction" if c_signature_migration else
+                  "R-MinHash 1->2 signature migration" if r_signature_migration else "output unchanged"
+              )
+              print(f"Kernel {key}: {base_time / head_time:.3f}x speedup; {output_check}")
+
+          with open(".bench/head_accuracy.json", encoding="utf-8") as handle:
+              head_accuracy = json.load(handle)
+          with open(".bench/base_accuracy.json", encoding="utf-8") as handle:
+              base_accuracy = json.load(handle)
+          accuracy_config = lambda payload: {k: v for k, v in payload["config"].items() if k != "output_json"}
+          if accuracy_config(head_accuracy) != accuracy_config(base_accuracy):
+              raise SystemExit("accuracy benchmark config mismatch")
+          if head_accuracy["environment"] != base_accuracy["environment"]:
+              raise SystemExit("accuracy benchmark environment mismatch")
+          for name, versions in algorithm_versions.items():
+              if (base_accuracy[f"{name}_algorithm_version"], head_accuracy[f"{name}_algorithm_version"]) != versions:
+                  raise SystemExit(f"{name} accuracy benchmark algorithm version mismatch")
+
+          def check_rmse(label, head_rmse, base_rmse, factor):
+              if not all(math.isfinite(value) and value >= 0 for value in (head_rmse, base_rmse)):
+                  raise SystemExit(f"invalid RMSE: {label}")
+              # Fixed trials still sample different hash families after migration.
+              # Allow a small absolute margin as well as the relative tolerance.
+              limit = factor * base_rmse + 0.001
+              if head_rmse > limit:
+                  raise SystemExit(f"R-MinHash accuracy regression {label}: head={head_rmse:.6f}, base={base_rmse:.6f}, limit={limit:.6f}")
+              print(f"PASS: R-MinHash RMSE {label}: head={head_rmse:.6f}, base={base_rmse:.6f}, limit={limit:.6f}")
+
+          for k in head_accuracy["config"]["perms"]:
+              # Compare classic R against classic R and exact-set ground truth,
+              # never against the biased legacy C implementation.
+              current = head_accuracy["accuracy"][f"rensa_classic/k={k}"]
+              previous = base_accuracy["accuracy"][f"rensa_classic/k={k}"]
+              if current["count"] != previous["count"] or current["by_case"].keys() != previous["by_case"].keys():
+                  raise SystemExit("R-MinHash accuracy cases differ")
+              check_rmse(f"k={k}", current["rmse"], previous["rmse"], 1.10)
+              if not abs(current["bias"]) <= 0.005 or not 0 <= current["mse_over_ideal_minhash"] <= 1.25:
+                  raise SystemExit(f"R-MinHash bias or MSE exceeds exact-Jaccard guard: k={k}")
+              for size in head_accuracy["config"]["sizes"]:
+                  rmses = []
+                  for result in (current, previous):
+                      cells = [cell for case, cell in result["by_case"].items() if case.startswith(f"n={size},")]
+                      count = sum(cell["count"] for cell in cells)
+                      if not count:
+                          raise SystemExit(f"missing R-MinHash accuracy size: {size}")
+                      rmses.append(math.sqrt(sum(cell["count"] * cell["rmse"] ** 2 for cell in cells) / count))
+                  check_rmse(f"k={k}, n={size}", *rmses, 1.20)
+
+          sketch_regressions = []
+          for suite, sizes, min_sample in (
+              ("sketches", (1, 8, 32, 128, 1024, 4096, 16384), 0.1),
+              ("prehashed", (0, 1, 8, 128, 4096, 65536, 1048576), 0.05),
+          ):
+              print(f"Validating {suite} benchmark")
+              with open(f".bench/head_{suite}.json", encoding="utf-8") as handle:
+                  head_sketches = json.load(handle)
+              with open(f".bench/base_{suite}.json", encoding="utf-8") as handle:
+                  base_sketches = json.load(handle)
+              if head_sketches["config"] != base_sketches["config"] or head_sketches["environment"]["flags"] != base_sketches["environment"]["flags"]:
+                  raise SystemExit("native sketch benchmark config/environment mismatch")
+              if head_sketches["config"]["repetitions"] < 5 or head_sketches["config"]["min_sample_seconds"] < min_sample:
+                  raise SystemExit(f"{suite} gates require at least five {min_sample}-second samples")
+              if head_sketches["config"]["prehashed"] != (suite == "prehashed"):
+                  raise SystemExit(f"{suite} input mode mismatch")
+              sketch_versions = (base_sketches["environment"]["rminhash_algorithm_version"],
+                                 head_sketches["environment"]["rminhash_algorithm_version"])
+              if sketch_versions != algorithm_versions["rminhash"]:
+                  raise SystemExit("native sketch R-MinHash algorithm version mismatch")
+              native_cases = []
+              expected = {(engine, size, k) for engine in ("rensa_classic", "fastsketch")
+                          for size in sizes for k in (128, 512)}
+              for payload in (head_sketches, base_sketches):
+                  cases = {(result["engine"], result["tokens_per_row"], result["num_perm"]): result for result in payload["results"]}
+                  if cases.keys() != expected or len(payload["results"]) != len(expected):
+                      raise SystemExit("native sketch benchmark cases mismatch or duplicates")
+                  native_cases.append(cases)
+              native_log_ratios = []
+              native_regressions = []
+              for key, result in native_cases[0].items():
+                  baseline = native_cases[1][key]
+                  competitor = native_cases[0][("fastsketch", key[1], key[2])]
+                  if len({result["input_sha256"], baseline["input_sha256"], competitor["input_sha256"]}) != 1:
+                      raise SystemExit(f"native sketch input mismatch: {key}")
+                  if result["sha256"] != baseline["sha256"] and not (r_migration and key[0] == "rensa_classic"):
+                      raise SystemExit(f"native sketch output changed: {key}")
+                  if not all(0 < item["median_seconds"] < float("inf") for item in (result, baseline, competitor)):
+                      raise SystemExit(f"invalid native sketch timing: {key}")
+                  if key[0] == "rensa_classic":
+                      native_log_ratios.append(math.log(result["median_seconds"]) - math.log(baseline["median_seconds"]))
+                      print(f"{suite} R-MinHash n={key[1]}, k={key[2]}: head={result['median_seconds']:.6f}s, "
+                            f"base={baseline['median_seconds']:.6f}s, FastSketch={competitor['median_seconds']:.6f}s; "
+                            f"{baseline['median_seconds'] / result['median_seconds']:.3f}x versus base, "
+                            f"{competitor['median_seconds'] / result['median_seconds']:.3f}x versus FastSketch")
+                      if result["median_seconds"] > 1.05 * competitor["median_seconds"]:
+                          regression = f"FAIL: Native R-MinHash exceeds FastSketch by more than 5%: n={key[1]}, k={key[2]}"
+                          print(regression)
+                          native_regressions.append(regression)
+                      else:
+                          print(f"PASS: Native R-MinHash meets FastSketch speed gate (5% tolerance): n={key[1]}, k={key[2]}")
+                      if result["median_seconds"] > 1.20 * baseline["median_seconds"]:
+                          regression = f"Native R-MinHash exceeds 20% per-case slowdown: n={key[1]}, k={key[2]}"
+                          if r_migration:
+                              print(f"{regression}; v1->v2 family migration uses aggregate performance and accuracy gates")
+                          else:
+                              native_regressions.append(regression)
+              # Equal weight per size/width prevents long cases from dominating.
+              native_mean_log_ratio = sum(native_log_ratios) / len(native_log_ratios)
+              if native_mean_log_ratio > math.log(1.10):
+                  native_regressions.append("Native R-MinHash geometric-mean slowdown exceeds 10%")
+              print(f"{suite} R-MinHash geometric-mean slowdown across {len(native_log_ratios)} cases: "
+                    f"{math.expm1(native_mean_log_ratio):.2%}; maximum allowed: 10%")
+              sketch_regressions.extend(f"{suite}: {failure}" for failure in native_regressions)
+          if sketch_regressions:
+              raise SystemExit("\n".join(sketch_regressions))
           PY
 
       - name: Run full benchmark smoke
-        if: github.event_name == 'pull_request'
+        if: env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
           "${GITHUB_WORKSPACE}/.venv/bin/python" benchmarks/full_benchmark.py \
             --datasets "${BENCH_DATASET_KEY}" \
             --threads "1,8" \
@@ -358,11 +792,11 @@ jobs:
             | tee .bench/full_head_smoke_summary.txt
 
       - name: Run push smoke benchmark
-        if: github.event_name != 'pull_request'
+        if: env.BENCH_COMPARE != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          uv venv --python 3.9 .venv
+          uv venv --python 3.13 .venv
           uv sync --python .venv/bin/python --group dev --no-install-project
           uv pip install \
             --python .venv/bin/python \
@@ -370,11 +804,37 @@ jobs:
             "datasketch>=1.9" \
             "tqdm>=4.66"
           uv pip install \
-            --no-cache \
+            --no-cache --no-binary FastSketchLSH --verbose \
             --python .venv/bin/python \
-            "FastSketchLSH"
+            "FastSketchLSH==1.0.1" 2>&1 | tee .bench/fastsketch_build.txt
+          grep -F 'Selected SIMD:' .bench/fastsketch_build.txt | tee .bench/fastsketch_simd.txt
 
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" PATH="${GITHUB_WORKSPACE}/.venv/bin:${PATH}" .venv/bin/maturin develop --release
+
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo; then
+            export RENSA_REQUIRE_AVX512=1
+          fi
+          PYO3_PYTHON="${GITHUB_WORKSPACE}/.venv/bin/python" cargo test --locked --lib simd:: -- --nocapture \
+            2>&1 | tee .bench/simd_tests.txt
+          .venv/bin/python -m pytest -q tests/test_accuracy.py tests/test_rensa.py
+          .venv/bin/python benchmarks/accuracy_benchmark.py \
+            --seeds 8 --skip-retrieval \
+            --output-json .bench/head_accuracy.json \
+            | tee .bench/head_accuracy.txt
+
+          .venv/bin/python benchmarks/sketch_benchmark.py \
+            --engines rensa_classic fastsketch --rows 256 --repetitions 5 \
+            --min-sample-seconds 0.1 \
+            --sizes 1 8 32 128 1024 4096 16384 --num-perm 128 512 \
+            --output-json .bench/head_sketches.json \
+            | tee .bench/head_sketches.txt
+
+          .venv/bin/python benchmarks/sketch_benchmark.py \
+            --prehashed --rows 256 --repetitions 5 --min-sample-seconds 0.05 \
+            --max-input-tokens 8388608 \
+            --sizes 0 1 8 128 4096 65536 1048576 --num-perm 128 512 \
+            --output-json .bench/head_prehashed.json \
+            | tee .bench/head_prehashed.txt
 
           .venv/bin/python benchmarks/simple_benchmark.py \
             --dataset "${BENCH_DATASET_KEY}" \
@@ -400,7 +860,7 @@ jobs:
             | tee .bench/full_head_smoke_summary.txt
 
       - name: Validate push smoke benchmark outputs
-        if: github.event_name != 'pull_request'
+        if: env.BENCH_COMPARE != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -434,12 +894,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: performance-check-artifacts
+          include-hidden-files: true
           path: |
             .bench/*.json
             .bench/*.txt
 
-      - name: Cleanup PR base checkout
-        if: always() && github.event_name == 'pull_request'
+      - name: Cleanup benchmark base checkout
+        if: always() && env.BENCH_COMPARE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -448,21 +909,25 @@ jobs:
           fi
 
   test:
-    name: Run Tests
+    if: github.event_name != 'workflow_dispatch' || !inputs.performance_only
+    name: Run Tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           enable-cache: true
       
       - name: Install dependencies
         run: |
-          uv venv --python 3.9 .venv
+          uv venv --python "${{ matrix.python }}" .venv
           uv sync --python .venv/bin/python --group dev --no-install-project
           
       - name: Build & Install Rensa
@@ -477,7 +942,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: "startsWith(github.ref, 'refs/tags/')"
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || !inputs.performance_only)
     needs: [rust-quality, cargo-deny, linux, musllinux, windows, macos, sdist, performance-check, test]
     permissions:
       contents: read

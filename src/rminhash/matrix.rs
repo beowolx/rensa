@@ -76,3 +76,28 @@ impl crate::rminhash::RMinHashDigestMatrix {
     sidecar.sparse_verify_signatures.get(start..end)
   }
 }
+
+#[cfg(test)]
+impl crate::rminhash::RMinHashDigestMatrix {
+  pub(crate) fn test_matrix(
+    num_perm: usize,
+    data: Vec<u32>,
+    signatures: Vec<u32>,
+    active: Vec<u8>,
+  ) -> Self {
+    let rows = data.len() / num_perm;
+    Self {
+      num_perm,
+      rows,
+      data,
+      rho_sidecar: Some(RhoDigestSidecar {
+        non_empty_counts: vec![1; rows],
+        source_token_counts: vec![1; rows],
+        sparse_occupancy_threshold: 2,
+        sparse_verify_perm: signatures.len() / rows,
+        sparse_verify_signatures: signatures,
+        sparse_verify_active: active,
+      }),
+    }
+  }
+}

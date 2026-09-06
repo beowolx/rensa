@@ -5,7 +5,7 @@ use crate::py_input::{
 };
 use crate::rminhash::{
   RMinHash, RMinHashDigestMatrix, ReduceResult, DEFAULT_RHO_PROBES,
-  HASH_BATCH_SIZE,
+  HASH_BATCH_SIZE, PY_STATE_PREFIX,
 };
 use crate::utils::ratio_usize;
 use pyo3::exceptions::PyValueError;
@@ -89,6 +89,10 @@ impl RMinHashDigestMatrix {
 
 #[pymethods]
 impl RMinHash {
+  /// Signature algorithm version; signatures from different versions are incompatible.
+  #[classattr]
+  const ALGORITHM_VERSION: u32 = 2;
+
   /// Creates a new `RMinHash` instance.
   ///
   /// # Arguments
@@ -294,6 +298,9 @@ impl RMinHash {
 
   /// Computes `RMinHash` digests in a compact row-major matrix from one flat
   /// token-hash buffer and row offsets.
+  /// Row offsets are snapshotted before acquiring or copying token values.
+  /// Large buffers in single-thread mode are read directly while retaining
+  /// the GIL, including when the input view is readonly.
   ///
   /// # Errors
   ///
@@ -309,11 +316,9 @@ impl RMinHash {
     seed: u64,
   ) -> PyResult<RMinHashDigestMatrix> {
     Self::validate_num_perm(num_perm)?;
-    let flat_hashes = Self::parse_flat_token_hashes(token_hashes)?;
-    let offsets = Self::parse_row_offsets(row_offsets)?;
-    Self::build_digest_matrix_from_flat_token_hashes(
-      &flat_hashes,
-      &offsets,
+    Self::build_digest_matrix_from_flat_python_hashes(
+      token_hashes,
+      row_offsets,
       num_perm,
       seed,
     )
@@ -423,12 +428,16 @@ impl RMinHash {
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
-    let decoded: Self =
-      postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize RMinHash state: {err}"
-        ))
-      })?;
+    let payload = state.as_bytes().strip_prefix(PY_STATE_PREFIX).ok_or_else(|| {
+      PyValueError::new_err(
+        "unsupported RMinHash state version; rebuild the sketch from its tokens",
+      )
+    })?;
+    let decoded: Self = postcard::from_bytes(payload).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to deserialize RMinHash state: {err}"
+      ))
+    })?;
     decoded.validate_state()?;
     *self = decoded;
     Ok(())
@@ -438,11 +447,12 @@ impl RMinHash {
     &self,
     py: Python<'py>,
   ) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = postcard::to_allocvec(self).map_err(|err| {
-      PyValueError::new_err(format!(
-        "failed to serialize RMinHash state: {err}"
-      ))
-    })?;
+    let encoded =
+      postcard::to_extend(self, PY_STATE_PREFIX.to_vec()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to serialize RMinHash state: {err}"
+        ))
+      })?;
     Ok(PyBytes::new(py, &encoded))
   }
 

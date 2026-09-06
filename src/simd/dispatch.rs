@@ -8,6 +8,133 @@ enum KernelKind {
   Neon,
   #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
   Avx2,
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  Avx512,
+}
+
+/// A runtime-checked capability for eight-lane AVX-512 token mixing.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[derive(Clone, Copy)]
+pub struct Avx512Mixer(());
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl Avx512Mixer {
+  #[must_use]
+  pub fn detect() -> Option<Self> {
+    matches!(kernel_kind(), KernelKind::Avx512).then_some(Self(()))
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)] // Calling requires this checked CPU capability.
+  pub fn mix(self, values: &[u64; 8], seed: u64) -> [u64; 8] {
+    // SAFETY: this capability can only be constructed after runtime detection
+    // confirms AVX-512F/DQ support, including the operating system's state.
+    unsafe { crate::simd::x86::splitmix64x8_avx512(values.as_ptr(), seed) }
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)] // Calling requires this checked CPU capability.
+  pub fn mix_cells(
+    self,
+    values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
+    seed: u64,
+  ) -> [u64; 8] {
+    // SAFETY: this capability proves AVX-512F/DQ support. ReadOnlyCell is
+    // repr(transparent) around UnsafeCell<u64>, with the layout of u64.
+    // Deriving the raw pointer from the whole array preserves its full range
+    // of eight readable values. No shared u64 reference is created over the
+    // interior-mutable cells.
+    unsafe {
+      crate::simd::x86::splitmix64x8_avx512(values.as_ptr().cast::<u64>(), seed)
+    }
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)]
+  #[cfg(target_arch = "x86")]
+  pub fn mix_below<const RANK_SHIFT: u32>(
+    self,
+    values: &[u64; 8],
+    seed: u64,
+    bound: u32,
+    output: &mut [u64; 8],
+  ) -> u8 {
+    // SAFETY: this capability proves AVX-512F/DQ; the array provides all eight values.
+    unsafe {
+      crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
+        values.as_ptr(),
+        seed,
+        bound,
+        output,
+      )
+    }
+  }
+
+  #[inline]
+  #[allow(clippy::unused_self)]
+  #[cfg(target_arch = "x86")]
+  pub fn mix_cells_below<const RANK_SHIFT: u32>(
+    self,
+    values: &[pyo3::buffer::ReadOnlyCell<u64>; 8],
+    seed: u64,
+    bound: u32,
+    output: &mut [u64; 8],
+  ) -> u8 {
+    // SAFETY: same whole-array, transparent-layout and feature proof as mix_cells.
+    unsafe {
+      crate::simd::x86::splitmix64x8_below_avx512::<RANK_SHIFT>(
+        values.as_ptr().cast::<u64>(),
+        seed,
+        bound,
+        output,
+      )
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[allow(clippy::unused_self)]
+  pub fn apply_below(
+    self,
+    input: &[u64],
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    // SAFETY: this capability proves F/DQ and the whole slice proves the
+    // readable input extent. The kernel checks coordinate dimensions.
+    unsafe {
+      crate::simd::x86::apply_buckets_below_avx512(
+        input.as_ptr(),
+        input.len(),
+        seed,
+        bound,
+        hash_values,
+      )
+    }
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[allow(clippy::unused_self)]
+  pub fn apply_cells_below(
+    self,
+    input: &[pyo3::buffer::ReadOnlyCell<u64>],
+    seed: u64,
+    bound: u32,
+    hash_values: &mut [u32],
+  ) -> usize {
+    // SAFETY: F/DQ is established. This pointer is derived from the whole
+    // transparent-layout cell slice, without creating shared u64 references.
+    // The kernel checks coordinate dimensions before accessing any bucket.
+    unsafe {
+      crate::simd::x86::apply_buckets_below_avx512(
+        input.as_ptr().cast::<u64>(),
+        input.len(),
+        seed,
+        bound,
+        hash_values,
+      )
+    }
+  }
 }
 
 #[derive(Clone, Default)]
@@ -33,7 +160,7 @@ pub(super) const fn split_u64_words(value: u64) -> (u32, u32) {
 impl PermutationSoA {
   #[must_use]
   #[cfg(not(target_arch = "aarch64"))]
-  pub fn from_permutations(permutations: &[(u64, u64)]) -> Self {
+  pub const fn from_permutations(permutations: &[(u64, u64)]) -> Self {
     Self {
       len: permutations.len(),
     }
@@ -123,6 +250,8 @@ const fn kernel_kind_name(kind: KernelKind) -> &'static str {
     KernelKind::Neon => "neon",
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     KernelKind::Avx2 => "avx2",
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => "avx512",
   }
 }
 
@@ -145,6 +274,11 @@ fn forced_kernel_supported(kind: KernelKind) -> bool {
     KernelKind::Neon => std::arch::is_aarch64_feature_detected!("neon"),
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     KernelKind::Avx2 => std::arch::is_x86_feature_detected!("avx2"),
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => {
+      std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512dq")
+    }
   }
 }
 
@@ -164,6 +298,11 @@ fn parse_forced_kernel(value: &str) -> Option<KernelKind> {
     return Some(KernelKind::Avx2);
   }
 
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if value.eq_ignore_ascii_case("avx512") {
+    return Some(KernelKind::Avx512);
+  }
+
   None
 }
 
@@ -178,7 +317,9 @@ fn default_kernel_kind() -> KernelKind {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn default_kernel_kind() -> KernelKind {
-  if std::arch::is_x86_feature_detected!("avx2") {
+  if forced_kernel_supported(KernelKind::Avx512) {
+    KernelKind::Avx512
+  } else if std::arch::is_x86_feature_detected!("avx2") {
     KernelKind::Avx2
   } else {
     KernelKind::Scalar
@@ -228,6 +369,129 @@ pub fn apply_hash_batch_to_values(
         permutations,
         hash_batch,
       );
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    KernelKind::Avx512 => {
+      if hash_batch.len() == 1
+        && hash_values.len() >= 512
+        && forced_kernel_supported(KernelKind::Avx2)
+      {
+        crate::simd::x86::apply_hash_batch_to_values_avx2(
+          hash_values,
+          permutations,
+          hash_batch,
+        );
+        return;
+      }
+      // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+      unsafe {
+        crate::simd::x86_avx512::apply_hash_batch_to_values_avx512(
+          hash_values,
+          permutations,
+          hash_batch,
+        );
+      }
+    }
+  }
+}
+
+pub fn apply_bucket_fallback(
+  hash_values: &mut [u32],
+  permutations: &[(u64, u64)],
+  hashes: &[u64],
+  rank_bits: u32,
+) {
+  const PACKED_LANES: usize = 128;
+  debug_assert!((1..32).contains(&rank_bits));
+  let fallback = u32::MAX << (32 - rank_bits);
+  let discarded = (1 << rank_bits) - 1;
+  let len = hash_values.len().min(permutations.len());
+  let kind = kernel_kind();
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if hashes.len() > 32 && kind == KernelKind::Avx512 {
+    // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+    unsafe {
+      crate::simd::x86_avx512::apply_bucket_fallback_avx512(
+        hash_values,
+        permutations,
+        hashes,
+        rank_bits,
+      );
+    }
+    return;
+  }
+  let mut cursor = 0;
+  while cursor < len {
+    let mut indices = [0; PACKED_LANES];
+    let mut pairs = [(0, 0); PACKED_LANES];
+    let mut values = [u32::MAX; PACKED_LANES];
+    let mut count = 0;
+    while cursor < len && count < PACKED_LANES {
+      if hash_values[cursor] >= fallback {
+        indices[count] = cursor;
+        pairs[count] = permutations[cursor];
+        // Preserve every raw rank represented by the truncated fraction.
+        values[count] = (hash_values[cursor] << rank_bits) | discarded;
+        count += 1;
+      }
+      cursor += 1;
+    }
+    if count == 0 {
+      break;
+    }
+    if count < 4 {
+      for (value, &(a, b)) in values[..count].iter_mut().zip(&pairs) {
+        for &hash in hashes {
+          *value = (*value).min(permute_hash(hash, a, b));
+        }
+      }
+    } else {
+      match kind {
+        KernelKind::Scalar => {
+          scalar_apply_hash_batch_to_values(
+            &mut values[..count],
+            &pairs[..count],
+            hashes,
+          );
+        }
+        #[cfg(target_arch = "aarch64")]
+        KernelKind::Neon => {
+          let lanes = if count == 4 {
+            4
+          } else {
+            count.next_multiple_of(8)
+          };
+          crate::simd::arm64_neon::apply_hash_batch_to_values_neon_compact(
+            &mut values[..lanes],
+            &pairs,
+            hashes,
+          );
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        KernelKind::Avx2 => {
+          let lanes = count.next_multiple_of(8);
+          crate::simd::x86::apply_hash_batch_to_values_avx2(
+            &mut values[..lanes],
+            &pairs[..lanes],
+            hashes,
+          );
+        }
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        KernelKind::Avx512 => {
+          let lanes = count.next_multiple_of(8);
+          // SAFETY: this dispatch variant requires AVX-512F/DQ CPU/OS support.
+          unsafe {
+            crate::simd::x86_avx512::apply_hash_batch_to_values_avx512(
+              &mut values[..lanes],
+              &pairs[..lanes],
+              hashes,
+            );
+          }
+        }
+      }
+    }
+    for (&index, &value) in indices[..count].iter().zip(&values) {
+      hash_values[index] = fallback | (value >> rank_bits);
     }
   }
 }
@@ -347,8 +611,9 @@ fn scalar_apply_hash_batch_to_values(
 #[cfg(test)]
 mod tests {
   use crate::simd::dispatch::{
-    forced_kernel_supported, kernel_kind_name, parse_forced_kernel,
-    scalar_apply_hash_batch_to_values, KernelKind, PermutationSoA,
+    forced_kernel_supported, kernel_kind, kernel_kind_name,
+    parse_forced_kernel, scalar_apply_hash_batch_to_values, KernelKind,
+    PermutationSoA,
   };
   use crate::utils::permute_hash;
   use rand_core::{RngCore, SeedableRng};
@@ -372,12 +637,83 @@ mod tests {
   }
 
   #[test]
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  fn avx512_mixer_reads_python_cells_without_changing_values() {
+    use pyo3::buffer::PyBuffer;
+    use pyo3::prelude::*;
+
+    let Some(mixer) = crate::simd::dispatch::Avx512Mixer::detect() else {
+      return;
+    };
+    let values = [
+      0,
+      1,
+      u64::MAX,
+      u64::MAX - 1,
+      u64::from(u32::MAX),
+      1 << 32,
+      1 << 63,
+      0xaaaa_aaaa_5555_5555,
+    ];
+    Python::initialize();
+    Python::attach(|py| {
+      let array = py.import("array").unwrap();
+      let mut input = vec![17];
+      input.extend(values);
+      input.push(23);
+      let object = array
+        .getattr("array")
+        .unwrap()
+        .call1(("Q", input.clone()))
+        .unwrap();
+      let buffer = PyBuffer::<u64>::get(&object).unwrap();
+      let cells = buffer.as_slice(py).unwrap();
+      let chunk = cells[1..].first_chunk::<8>().unwrap();
+      for seed in [0, 42, u64::MAX] {
+        #[cfg(target_arch = "x86")]
+        let mut raw_output = [17; 8];
+        #[cfg(target_arch = "x86_64")]
+        let mut raw_output = [u32::MAX; 8];
+        let mut cell_output = raw_output;
+        let expected = mixer.mix(&values, seed);
+        assert_eq!(mixer.mix_cells(chunk, seed), expected);
+        for bound in [0, 1, 1 << 25, 1 << 30] {
+          #[cfg(target_arch = "x86")]
+          assert_eq!(
+            mixer.mix_below::<34>(&values, seed, bound, &mut raw_output),
+            mixer.mix_cells_below::<34>(chunk, seed, bound, &mut cell_output),
+          );
+          #[cfg(target_arch = "x86_64")]
+          assert_eq!(
+            mixer.apply_below(&values, seed, bound, &mut raw_output),
+            mixer.apply_cells_below(chunk, seed, bound, &mut cell_output),
+          );
+          assert_eq!(raw_output, cell_output);
+          #[cfg(target_arch = "x86_64")]
+          if bound == 1 << 30 {
+            assert!(raw_output.iter().any(|&value| value != u32::MAX));
+          }
+        }
+      }
+      assert_eq!(
+        cells
+          .iter()
+          .map(pyo3::buffer::ReadOnlyCell::get)
+          .collect::<Vec<_>>(),
+        input
+      );
+    });
+  }
+
+  #[test]
   fn kernel_kind_name_is_stable() {
     assert_eq!(kernel_kind_name(KernelKind::Scalar), "scalar");
     #[cfg(target_arch = "aarch64")]
     assert_eq!(kernel_kind_name(KernelKind::Neon), "neon");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     assert_eq!(kernel_kind_name(KernelKind::Avx2), "avx2");
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(kernel_kind_name(KernelKind::Avx512), "avx512");
   }
 
   #[test]
@@ -388,11 +724,21 @@ mod tests {
     assert_eq!(parse_forced_kernel("neon"), Some(KernelKind::Neon));
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     assert_eq!(parse_forced_kernel("avx2"), Some(KernelKind::Avx2));
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(parse_forced_kernel("AVX512"), Some(KernelKind::Avx512));
     assert_eq!(parse_forced_kernel("unknown"), None);
   }
 
   #[test]
   fn forced_kernel_support_mapping_matches_runtime() {
+    eprintln!(
+      "Rensa selected SIMD backend: {}",
+      kernel_kind_name(kernel_kind())
+    );
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::env::var_os("RENSA_REQUIRE_AVX512").is_some() {
+      assert_eq!(kernel_kind(), KernelKind::Avx512);
+    }
     assert!(forced_kernel_supported(KernelKind::Scalar));
     #[cfg(target_arch = "aarch64")]
     assert_eq!(
@@ -403,6 +749,12 @@ mod tests {
     assert_eq!(
       forced_kernel_supported(KernelKind::Avx2),
       std::arch::is_x86_feature_detected!("avx2")
+    );
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    assert_eq!(
+      forced_kernel_supported(KernelKind::Avx512),
+      std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512dq")
     );
   }
 
@@ -436,6 +788,87 @@ mod tests {
         }
       }
       assert_eq!(soa_values, reference_values);
+    }
+  }
+
+  fn assert_kernels_match_naive(
+    initial: &[u32],
+    permutations: &[(u64, u64)],
+    hashes: &[u64],
+  ) {
+    let mut expected = initial.to_vec();
+    for (value, &(a, b)) in expected.iter_mut().zip(permutations) {
+      for &hash in hashes {
+        // Independent wide-integer oracle: truncation modulo 2^64, then high word.
+        let result = (u128::from(a) * u128::from(hash) + u128::from(b)) >> 32;
+        *value =
+          (*value).min(u32::try_from(result & u128::from(u32::MAX)).unwrap());
+      }
+    }
+    let mut scalar = initial.to_vec();
+    scalar_apply_hash_batch_to_values(&mut scalar, permutations, hashes);
+    assert_eq!(scalar, expected);
+
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+      let mut actual = initial.to_vec();
+      crate::simd::arm64_neon::apply_hash_batch_to_values_neon(
+        &mut actual,
+        &PermutationSoA::from_permutations(permutations),
+        hashes,
+      );
+      assert_eq!(actual, expected, "NEON mismatch");
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+      let mut actual = initial.to_vec();
+      crate::simd::x86::apply_hash_batch_to_values_avx2(
+        &mut actual,
+        permutations,
+        hashes,
+      );
+      assert_eq!(actual, expected, "AVX2 mismatch");
+    }
+  }
+
+  #[test]
+  fn kernels_match_naive_for_all_small_sizes_and_tails() {
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5441_494c);
+    for num_perm in 0..=33 {
+      let permutations: Vec<_> = (0..num_perm)
+        .map(|_| (rng.next_u64(), rng.next_u64()))
+        .collect();
+      for num_hashes in 0..=17 {
+        let hashes: Vec<_> = (0..num_hashes).map(|_| rng.next_u64()).collect();
+        for num_values in [num_perm / 2, num_perm, num_perm + 3] {
+          let initial: Vec<_> =
+            (0..num_values).map(|_| rng.next_u32()).collect();
+          assert_kernels_match_naive(&initial, &permutations, &hashes);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn kernels_match_naive_for_full_width_carries_and_overflow() {
+    let words = [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+    let mut boundaries = Vec::new();
+    for &high in &words {
+      for &low in &words {
+        boundaries.push((high << 32) | low);
+      }
+    }
+    let permutations: Vec<_> = boundaries
+      .iter()
+      .flat_map(|&a| boundaries.iter().map(move |&b| (a, b)))
+      .collect();
+    for hash in boundaries {
+      // Single hashes ensure a smaller minimum cannot hide an incorrect lane.
+      assert_kernels_match_naive(
+        &vec![u32::MAX; permutations.len()],
+        &permutations,
+        &[hash],
+      );
     }
   }
 }

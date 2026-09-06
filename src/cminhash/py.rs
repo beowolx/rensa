@@ -1,5 +1,6 @@
 use crate::cminhash::{
-  CMinHash, CMinHashParams, ReduceResult, HASH_BATCH_SIZE,
+  CMinHash, CMinHashParams, ReduceResult, HASH_BATCH_SIZE, PY_STATE_PREFIX,
+  STATE_VERSION,
 };
 use crate::py_input::extend_token_hashes_from_document;
 use pyo3::exceptions::PyValueError;
@@ -27,6 +28,10 @@ fn update_with_token_hash_buffer(
 
 #[pymethods]
 impl CMinHash {
+  /// Signature algorithm version; signatures from different versions are incompatible.
+  #[classattr]
+  const ALGORITHM_VERSION: u32 = 2;
+
   /// Creates a new `CMinHash` instance.
   ///
   /// # Arguments
@@ -41,17 +46,15 @@ impl CMinHash {
   pub fn new(num_perm: usize, seed: u64) -> PyResult<Self> {
     Self::validate_num_perm(num_perm)?;
 
-    let params = CMinHashParams::new(num_perm, seed);
+    let params = CMinHashParams::new(seed);
 
     Ok(Self {
+      version: STATE_VERSION,
       num_perm,
       seed,
       hash_values: vec![u64::MAX; num_perm],
-      sigma_a: params.sigma_a,
-      sigma_b: params.sigma_b,
-      pi_c: params.pi_c,
-      pi_d: params.pi_d,
-      pi_precomputed: params.pi_precomputed,
+      sigma_key: params.sigma_key,
+      pi_key: params.pi_key,
     })
   }
 
@@ -178,13 +181,16 @@ impl CMinHash {
   }
 
   fn __setstate__(&mut self, state: &Bound<'_, PyBytes>) -> PyResult<()> {
-    let decoded: Self =
-      postcard::from_bytes(state.as_bytes()).map_err(|err| {
-        PyValueError::new_err(format!(
-          "failed to deserialize CMinHash state: {err}"
-        ))
-      })?;
-    decoded.validate_state()?;
+    let payload = state.as_bytes().strip_prefix(PY_STATE_PREFIX).ok_or_else(|| {
+      PyValueError::new_err(
+        "unsupported CMinHash state version; rebuild the sketch from its tokens",
+      )
+    })?;
+    let decoded: Self = postcard::from_bytes(payload).map_err(|err| {
+      PyValueError::new_err(format!(
+        "failed to deserialize CMinHash state: {err}"
+      ))
+    })?;
     *self = decoded;
     Ok(())
   }
@@ -193,11 +199,12 @@ impl CMinHash {
     &self,
     py: Python<'py>,
   ) -> PyResult<Bound<'py, PyBytes>> {
-    let encoded = postcard::to_allocvec(self).map_err(|err| {
-      PyValueError::new_err(format!(
-        "failed to serialize CMinHash state: {err}"
-      ))
-    })?;
+    let encoded =
+      postcard::to_extend(self, PY_STATE_PREFIX.to_vec()).map_err(|err| {
+        PyValueError::new_err(format!(
+          "failed to serialize CMinHash state: {err}"
+        ))
+      })?;
     Ok(PyBytes::new(py, &encoded))
   }
 

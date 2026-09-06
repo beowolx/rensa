@@ -1,4 +1,6 @@
-use crate::cminhash::{CMinHash, CMinHashParams, HASH_BATCH_SIZE};
+use crate::cminhash::{
+  CMinHash, CMinHashParams, HASH_BATCH_SIZE, STATE_VERSION,
+};
 use crate::py_input::{
   extend_prehashed_token_values_from_document,
   extend_token_hashes_from_document,
@@ -22,7 +24,7 @@ impl CMinHash {
     let capacity = Self::token_sets_capacity(token_sets);
     let mut outputs = Vec::with_capacity(capacity);
     let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
-    let params = CMinHashParams::new(num_perm, seed);
+    let params = CMinHashParams::new(seed);
     let mut hash_values = vec![u64::MAX; num_perm];
 
     Self::for_each_document(token_sets, |document| {
@@ -33,10 +35,8 @@ impl CMinHash {
       Self::apply_token_hashes_to_values(
         &mut hash_values,
         &token_hashes,
-        params.sigma_a,
-        params.sigma_b,
-        params.pi_c,
-        &params.pi_precomputed,
+        params.sigma_key,
+        params.pi_key,
       );
 
       outputs.push(map(&hash_values));
@@ -61,7 +61,7 @@ impl CMinHash {
     let capacity = Self::token_sets_capacity(token_sets);
     let mut outputs = Vec::with_capacity(capacity);
     let mut token_hashes = Vec::with_capacity(HASH_BATCH_SIZE);
-    let params = CMinHashParams::new(num_perm, seed);
+    let params = CMinHashParams::new(seed);
 
     Self::for_each_document(token_sets, |document| {
       token_hashes.clear();
@@ -71,10 +71,8 @@ impl CMinHash {
       Self::apply_token_hashes_to_values(
         &mut hash_values,
         &token_hashes,
-        params.sigma_a,
-        params.sigma_b,
-        params.pi_c,
-        &params.pi_precomputed,
+        params.sigma_key,
+        params.pi_key,
       );
 
       outputs.push(map(hash_values, &params));
@@ -135,14 +133,12 @@ impl CMinHash {
       seed,
       extend_token_hashes_from_document,
       |hash_values, params| Self {
+        version: STATE_VERSION,
         num_perm,
         seed,
         hash_values,
-        sigma_a: params.sigma_a,
-        sigma_b: params.sigma_b,
-        pi_c: params.pi_c,
-        pi_d: params.pi_d,
-        pi_precomputed: Vec::new(),
+        sigma_key: params.sigma_key,
+        pi_key: params.pi_key,
       },
     )
   }

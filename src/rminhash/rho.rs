@@ -9,6 +9,7 @@ use crate::rminhash::token::{
   token_bytes_ref_from_bytes_ptr, token_bytes_ref_from_token_ptr,
   token_bytes_ref_from_unicode_ptr, TokenBytesRef,
 };
+use crate::rminhash::SharedPermutations;
 use crate::rminhash::{
   DigestBuildConfig, RMinHash, RMinHashDigestMatrix,
   DEFAULT_RHO_LONG_DOC_FACTOR, DEFAULT_RHO_MEDIUM_TOKEN_BUDGET,
@@ -21,13 +22,14 @@ use crate::rminhash::{
   MIN_RHO_MEDIUM_TOKEN_BUDGET, MIN_RHO_MEDIUM_TOKEN_THRESHOLD, MIN_RHO_PROBES,
   MIN_RHO_SPARSE_OCCUPANCY_THRESHOLD_BASE, MIN_RHO_SPARSE_VERIFY_PERM,
 };
-use crate::utils::{calculate_hash_fast, permute_hash};
+use crate::simd::dispatch::{apply_hash_batch_to_values, PermutationSoA};
+use crate::utils::calculate_hash_fast;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 const _: () = assert!(EMPTY_BUCKET == u32::MAX);
@@ -167,9 +169,7 @@ fn rho_sparse_verify_perm(num_perm: usize) -> usize {
 fn rho_adaptive_probes_enabled() -> bool {
   static ENABLED: OnceLock<bool> = OnceLock::new();
   *ENABLED.get_or_init(|| {
-    std::env::var("RENSA_RHO_ADAPTIVE_PROBES")
-      .ok()
-      .is_some_and(|value| value != "0")
+    std::env::var("RENSA_RHO_ADAPTIVE_PROBES").is_ok_and(|value| value != "0")
   })
 }
 
@@ -209,9 +209,7 @@ pub(super) fn effective_rho_probes(
 fn rho_densify_enabled() -> bool {
   static ENABLED: OnceLock<bool> = OnceLock::new();
   *ENABLED.get_or_init(|| {
-    std::env::var("RENSA_RHO_DENSIFY")
-      .ok()
-      .is_some_and(|value| value != "0")
+    std::env::var("RENSA_RHO_DENSIFY").is_ok_and(|value| value != "0")
   })
 }
 
@@ -497,7 +495,7 @@ fn append_sparse_sidecar_for_row(
   sparse_occupancy_threshold: usize,
   sparse_verify_perm: usize,
   mixed_token_values: &[u64],
-  signature_pairs: &[(u64, u64)],
+  signature_permutations: &SharedPermutations,
   sparse_verify_active: &mut Vec<u8>,
   sparse_verify_signatures: &mut Vec<u32>,
 ) {
@@ -514,7 +512,7 @@ fn append_sparse_sidecar_for_row(
       &mut sparse_verify_signatures
         [signature_start..signature_start + sparse_verify_perm],
       mixed_token_values,
-      signature_pairs,
+      signature_permutations,
     );
   }
 }
@@ -629,32 +627,32 @@ impl RMinHash {
     )
   }
 
-  pub(super) fn sparse_verify_signature_pairs(
+  pub(super) fn sparse_verify_permutations(
     seed: u64,
     sparse_verify_perm: usize,
-  ) -> Vec<(u64, u64)> {
-    (0..sparse_verify_perm)
+  ) -> SharedPermutations {
+    let pairs: Arc<[(u64, u64)]> = (0..sparse_verify_perm)
       .map(|index| {
         let base = Self::sparse_verify_signature_seed(seed, index);
         (base | 1, splitmix64(base ^ 0x1319_8a2e_0370_7344))
       })
-      .collect()
+      .collect();
+    let soa = Arc::new(PermutationSoA::from_permutations(&pairs));
+    SharedPermutations { pairs, soa }
   }
 
   pub(super) fn compute_sparse_verify_signature_into(
     signature_row: &mut [u32],
     mixed_token_values: &[u64],
-    signature_pairs: &[(u64, u64)],
+    signature_permutations: &SharedPermutations,
   ) {
     signature_row.fill(u32::MAX);
-    if mixed_token_values.is_empty() {
-      return;
-    }
-    for &mixed in mixed_token_values {
-      for (value, &(a, b)) in signature_row.iter_mut().zip(signature_pairs) {
-        *value = (*value).min(permute_hash(mixed, a, b));
-      }
-    }
+    apply_hash_batch_to_values(
+      signature_row,
+      &signature_permutations.pairs,
+      &signature_permutations.soa,
+      mixed_token_values,
+    );
   }
 
   pub(super) fn compute_rho_digest_from_token_hashes_into(
@@ -799,8 +797,8 @@ impl RMinHash {
 
     let py = token_sets.py();
 
-    let sig_pairs =
-      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let sig_permutations =
+      Self::sparse_verify_permutations(seed, sparse_verify_perm);
 
     let chunk_size = config.doc_chunk_size.max(1);
     let output_ptrs = RhoOutputs {
@@ -946,7 +944,7 @@ impl RMinHash {
                   Self::compute_sparse_verify_signature_into(
                     signature_row,
                     mixed_values,
-                    &sig_pairs,
+                    &sig_permutations,
                   );
                 }
               },
@@ -1159,8 +1157,8 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
-    let sig_pairs =
-      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let sig_permutations =
+      Self::sparse_verify_permutations(seed, sparse_verify_perm);
     let mut token_hashes = Vec::new();
     let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
@@ -1213,7 +1211,7 @@ impl RMinHash {
         sparse_occupancy_threshold,
         sparse_verify_perm,
         &mixed_values,
-        &sig_pairs,
+        &sig_permutations,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
@@ -1258,8 +1256,8 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
-    let sig_pairs =
-      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let sig_permutations =
+      Self::sparse_verify_permutations(seed, sparse_verify_perm);
     let mut token_hashes = Vec::new();
     let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(capacity);
@@ -1308,7 +1306,7 @@ impl RMinHash {
         sparse_occupancy_threshold,
         sparse_verify_perm,
         &mixed_values,
-        &sig_pairs,
+        &sig_permutations,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
@@ -1353,8 +1351,8 @@ impl RMinHash {
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let densify_enabled = sketch.densify_enabled;
-    let sig_pairs =
-      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let sig_permutations =
+      Self::sparse_verify_permutations(seed, sparse_verify_perm);
     let mut mixed_values = Vec::new();
     let mut non_empty_counts = Vec::with_capacity(rows);
     let mut source_token_counts = Vec::with_capacity(rows);
@@ -1392,7 +1390,7 @@ impl RMinHash {
         sparse_occupancy_threshold,
         sparse_verify_perm,
         &mixed_values,
-        &sig_pairs,
+        &sig_permutations,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
       );
@@ -1411,5 +1409,52 @@ impl RMinHash {
       data: matrix_data,
       rho_sidecar: Some(rho_sidecar),
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::rminhash::RMinHash;
+  use rand_core::{RngCore, SeedableRng};
+  use rand_xoshiro::Xoshiro256PlusPlus;
+
+  #[test]
+  fn sparse_verification_matches_independent_wrapping_oracle() {
+    for seed in [0, 42, u64::MAX] {
+      let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+      for num_perm in [0, 1, 8, 17, 64] {
+        let permutations = RMinHash::sparse_verify_permutations(seed, num_perm);
+        for token_count in [0, 1, 7, 8, 15, 16, 31, 32, 64, 65, 129] {
+          let mixed: Vec<u64> = (0..token_count)
+            .map(|index| match index {
+              0 => 0,
+              1 => u64::MAX,
+              _ => rng.next_u64(),
+            })
+            .collect();
+          let expected: Vec<u32> = permutations
+            .pairs
+            .iter()
+            .map(|&(a, b)| {
+              mixed
+                .iter()
+                .map(|&hash| {
+                  (a.wrapping_mul(hash).wrapping_add(b) >> 32) as u32
+                })
+                .min()
+                .unwrap_or(u32::MAX)
+            })
+            .collect();
+          // Every call resets its output, including when no tokens are present.
+          let mut actual = vec![0; num_perm];
+          RMinHash::compute_sparse_verify_signature_into(
+            &mut actual,
+            &mixed,
+            &permutations,
+          );
+          assert_eq!(actual, expected);
+        }
+      }
+    }
   }
 }

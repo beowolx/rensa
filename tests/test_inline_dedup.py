@@ -397,3 +397,102 @@ class TestInlineDeduplication:
 
         with pytest.raises(ValueError, match="num_perm is not configured"):
             dedup.is_duplicate_pairs([("doc0", ["alpha", "beta"])])
+
+
+@pytest.mark.parametrize("operation", ["clear", "remove_last", "remove_missing"])
+def test_cminhash_deduplicator_preserves_explicit_num_perm(operation):
+    dedup = CMinHashDeduplicator(threshold=0.8, num_perm=64)
+    if operation != "remove_missing":
+        assert dedup.add_pairs([("first", ["alpha"])]) == [True]
+    if operation == "clear":
+        dedup.clear()
+    else:
+        assert dedup.remove("first") is (operation == "remove_last")
+    assert dedup.add_pairs([("second", ["beta"])]) == [True]
+    incompatible = CMinHash(num_perm=32, seed=42)
+    with pytest.raises(ValueError, match="num_perm mismatch"):
+        dedup.add("incompatible", incompatible)
+
+
+@pytest.mark.parametrize("operation", ["clear", "remove"])
+def test_cminhash_deduplicator_resets_inferred_num_perm(operation):
+    dedup = CMinHashDeduplicator(threshold=0.8)
+    assert dedup.add("first", CMinHash(num_perm=64, seed=42))
+    if operation == "clear":
+        dedup.clear()
+    else:
+        assert dedup.remove("first")
+    assert dedup.add("second", CMinHash(num_perm=32, seed=42))
+
+
+@pytest.mark.parametrize("num_perm", [1, 7, 8, 17, 128])
+@pytest.mark.parametrize("threshold", [0.0, 0.1, 0.8, 1.0])
+def test_cminhash_exact_index_matches_full_scan(num_perm, threshold):
+    dedup = CMinHashDeduplicator(threshold, num_perm=num_perm)
+    reference = {}
+
+    def signature(index):
+        value = CMinHash(num_perm=num_perm, seed=42)
+        if index:
+            value.update([f"token-{index}", f"group-{index % 13}"])
+        return value
+
+    def insert(key, value):
+        expected = key not in reference and not any(
+            value.jaccard(existing) >= threshold
+            for existing in reference.values()
+        )
+        assert dedup.add(key, value) == expected
+        if expected:
+            reference[key] = value
+
+    for index in range(200):
+        insert(str(index), signature(index))
+    for index in range(240):
+        value = signature(index)
+        expected = {
+            key for key, existing in reference.items()
+            if value.jaccard(existing) >= threshold
+        }
+        assert dedup.is_duplicate("unknown", value) == bool(expected)
+        assert set(dedup.get_duplicates(value)) == expected
+    for index in range(0, 200, 2):
+        key = str(index)
+        assert dedup.remove(key) == (reference.pop(key, None) is not None)
+        insert(key, signature(index + 300))
+    for key, value in reference.items():
+        assert dedup.is_duplicate(key, value)
+    dedup.clear()
+    assert dedup.is_empty()
+    assert dedup.get_duplicates(signature(0)) == []
+    assert dedup.add("new", signature(0))
+
+
+def test_cminhash_exact_index_keeps_partial_batch_and_key_semantics():
+    dedup = CMinHashDeduplicator(0.8, num_perm=128)
+    entries = [(str(i), [f"unique-{i}"]) for i in range(200)]
+    assert dedup.add_pairs(entries) == [True] * 200
+    with pytest.raises(TypeError):
+        dedup.add_pairs([("accepted", ["new-token"]), ("invalid", [123])])
+    assert dedup.is_duplicate_pairs([("accepted", ["different-token"])]) == [True]
+    assert dedup.remove("accepted")
+    assert dedup.add_pairs([("accepted", ["replacement-token"])]) == [True]
+    incompatible = CMinHash(num_perm=64, seed=42)
+    with pytest.raises(ValueError, match="num_perm mismatch"):
+        dedup.is_duplicate("accepted", incompatible)
+
+
+def test_cminhash_exact_index_shrinks_and_relearns_dimensions():
+    dedup = CMinHashDeduplicator(0.8)
+    for num_perm in [64, 128]:
+        signatures = []
+        for index in range(200):
+            value = CMinHash(num_perm=num_perm, seed=42)
+            value.update([f"unique-{index}"])
+            signatures.append(value)
+            assert dedup.add(str(index), value)
+        for index, value in enumerate(signatures):
+            assert dedup.is_duplicate("unknown", value)
+            assert dedup.remove(str(index))
+            assert not dedup.is_duplicate("unknown", value)
+        assert dedup.is_empty()

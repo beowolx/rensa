@@ -8,7 +8,8 @@ use crate::rminhash::rho::{
   saturating_u16, MidpointSampler, RhoSketchConfig,
 };
 use crate::rminhash::{
-  DigestBuildConfig, RMinHash, RMinHashDigestMatrix, EMPTY_BUCKET,
+  DigestBuildConfig, RMinHash, RMinHashDigestMatrix, SharedPermutations,
+  EMPTY_BUCKET,
 };
 use crate::utils::calculate_hash_fast;
 use pyo3::ffi;
@@ -229,8 +230,8 @@ impl RMinHash {
     let sketch = RhoSketchConfig::from_env(num_perm, probes);
     let sparse_verify_perm = sketch.sparse_verify_perm;
     let sparse_occupancy_threshold = sketch.sparse_occupancy_threshold;
-    let sig_pairs =
-      Self::sparse_verify_signature_pairs(seed, sparse_verify_perm);
+    let sig_permutations =
+      Self::sparse_verify_permutations(seed, sparse_verify_perm);
 
     let matrix_len = checked_len_mul(rows, num_perm, "rho matrix")?;
     let mut matrix_storage: Vec<MaybeUninit<u32>> =
@@ -310,7 +311,7 @@ impl RMinHash {
               Self::compute_sparse_verify_signature_into(
                 signature_row,
                 mixed_values,
-                &sig_pairs,
+                &sig_permutations,
               );
             }
             None
@@ -337,7 +338,7 @@ impl RMinHash {
         &mut source_token_counts,
         &mut sparse_verify_active,
         &mut sparse_verify_signatures,
-        &sig_pairs,
+        &sig_permutations,
       )?;
     }
 
@@ -368,15 +369,27 @@ impl RMinHash {
     source_token_counts: &mut [u16],
     sparse_verify_active: &mut [u8],
     sparse_verify_signatures: &mut [u32],
-    sig_pairs: &[(u64, u64)],
+    sig_permutations: &SharedPermutations,
   ) -> PyResult<()> {
     let sketch = &ctx.sketch;
     let mut token_hashes = Vec::new();
     let mut mixed_values = Vec::new();
     for &row_u32 in fallback_rows {
       let row_index = row_u32 as usize;
-      let document_ptr =
-        unsafe { seq_get_item(ctx.outer.0, ctx.outer_is_list, row_index) };
+      // Row indices were bounded by the original Python sequence length.
+      #[allow(clippy::cast_possible_wrap)]
+      let row_index_ssize = row_index as ffi::Py_ssize_t;
+      // A previous fallback exporter may have resized the outer list.
+      let document_ptr = unsafe {
+        if ctx.outer_is_list {
+          ffi::PyList_GetItem(ctx.outer.0, row_index_ssize)
+        } else {
+          seq_get_item(ctx.outer.0, false, row_index)
+        }
+      };
+      if document_ptr.is_null() {
+        return Err(PyErr::fetch(py));
+      }
       let document =
         unsafe { Bound::<'_, PyAny>::from_borrowed_ptr(py, document_ptr) };
 
@@ -425,7 +438,7 @@ impl RMinHash {
           Self::compute_sparse_verify_signature_into(
             signature_row,
             &mixed_values,
-            sig_pairs,
+            sig_permutations,
           );
         } else {
           signature_row.fill(u32::MAX);

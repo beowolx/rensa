@@ -138,38 +138,12 @@ impl RMinHashLSH {
     ratio_usize(equal, signature_a.len())
   }
 
-  pub(in crate::lsh) fn validate_threshold(threshold: f64) -> PyResult<()> {
-    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-      return Err(PyValueError::new_err(
-        "threshold must be a finite value between 0.0 and 1.0",
-      ));
-    }
-    Ok(())
-  }
-
   pub(in crate::lsh) fn validate_params(
     threshold: f64,
     num_perm: usize,
     num_bands: usize,
   ) -> PyResult<usize> {
-    Self::validate_threshold(threshold)?;
-    if num_perm == 0 {
-      return Err(PyValueError::new_err("num_perm must be greater than 0"));
-    }
-    if num_bands == 0 {
-      return Err(PyValueError::new_err("num_bands must be greater than 0"));
-    }
-    if num_bands > num_perm {
-      return Err(PyValueError::new_err(format!(
-        "num_bands ({num_bands}) must be less than or equal to num_perm ({num_perm})"
-      )));
-    }
-    if num_perm % num_bands != 0 {
-      return Err(PyValueError::new_err(format!(
-        "num_perm ({num_perm}) must be divisible by num_bands ({num_bands})"
-      )));
-    }
-
-    Ok(num_perm / num_bands)
+    Self::validate_params_inner(threshold, num_perm, num_bands)
+      .map_err(PyValueError::new_err)
   }
 }

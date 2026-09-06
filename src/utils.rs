@@ -17,27 +17,17 @@ const SEED2: u64 = 0x1319_8a2e_0370_7344;
 const PREVENT_TRIVIAL_ZERO_COLLAPSE: u64 = 0xa409_3822_299f_31d0;
 
 #[inline]
-const fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
-  u64::from_le_bytes([
-    bytes[offset],
-    bytes[offset + 1],
-    bytes[offset + 2],
-    bytes[offset + 3],
-    bytes[offset + 4],
-    bytes[offset + 5],
-    bytes[offset + 6],
-    bytes[offset + 7],
-  ])
+fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
+  let mut word = [0; 8];
+  word.copy_from_slice(&bytes[offset..offset + 8]);
+  u64::from_le_bytes(word)
 }
 
 #[inline]
-const fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
-  u32::from_le_bytes([
-    bytes[offset],
-    bytes[offset + 1],
-    bytes[offset + 2],
-    bytes[offset + 3],
-  ])
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+  let mut word = [0; 4];
+  word.copy_from_slice(&bytes[offset..offset + 4]);
+  u32::from_le_bytes(word)
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -101,19 +91,9 @@ const fn hash_add_u32(hash: usize, value: u32) -> usize {
 }
 
 #[inline]
-pub fn usize_to_f64(value: usize) -> f64 {
-  #[cfg(target_pointer_width = "64")]
-  {
-    let bytes = value.to_be_bytes();
-    let high = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let low = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
-  }
-
-  #[cfg(target_pointer_width = "32")]
-  {
-    f64::from(u32::from_ne_bytes(value.to_ne_bytes()))
-  }
+#[allow(clippy::cast_precision_loss)]
+pub const fn usize_to_f64(value: usize) -> f64 {
+  value as f64
 }
 
 #[inline]
@@ -212,14 +192,7 @@ pub fn calculate_band_hash(band: &[u32]) -> u64 {
     hash = hash_add_u32(hash, value);
   }
 
-  #[cfg(target_pointer_width = "64")]
-  {
-    hash.rotate_left(ROTATE) as u64
-  }
-  #[cfg(target_pointer_width = "32")]
-  {
-    hash.rotate_left(ROTATE) as u64
-  }
+  hash.rotate_left(ROTATE) as u64
 }
 
 #[cfg(test)]
@@ -268,6 +241,17 @@ mod tests {
 
     for bytes in data {
       assert_eq!(calculate_hash_fast(bytes), reference_hash_fast(bytes));
+    }
+  }
+
+  #[test]
+  fn calculate_hash_fast_matches_reference_for_lengths_and_alignments() {
+    let bytes: Vec<u8> = (0u8..=255).cycle().take(272).collect();
+    for offset in 0..16 {
+      for length in 0..=256 {
+        let input = &bytes[offset..offset + length];
+        assert_eq!(calculate_hash_fast(input), reference_hash_fast(input));
+      }
     }
   }
 

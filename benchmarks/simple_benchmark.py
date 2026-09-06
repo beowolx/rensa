@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pickle
@@ -223,6 +224,10 @@ def run_once(
         "rows": len(token_sets),
         "order": order,
         "engines": results,
+        "duplicate_flags_sha256": {
+            engine: hashlib.sha256(bytes(flags)).hexdigest()
+            for engine, flags in flags_by_engine.items()
+        },
         "accuracy": {
             "jaccard": {
                 "datasketch_vs_fastsketch": jaccard_similarity(
@@ -400,6 +405,9 @@ def main(args: argparse.Namespace) -> None:
         if global_max_rows == 0:
             global_max_rows = None
 
+    thread_env = pin_single_thread_env()
+    from rensa import CMinHash, RMinHash
+
     spec = DATASET_PRESETS[args.dataset]
     effective_max_rows = resolve_max_rows(spec, global_max_rows=global_max_rows, dataset_max_rows={})
 
@@ -411,8 +419,6 @@ def main(args: argparse.Namespace) -> None:
     )
     with token_cache.open("rb") as handle:
         token_sets: list[list[str]] = pickle.load(handle)
-
-    thread_env = pin_single_thread_env()
 
     print(
         f"Prepared dataset '{spec.key}' rows={row_count} "
@@ -461,6 +467,8 @@ def main(args: argparse.Namespace) -> None:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
+            "cminhash_algorithm_version": getattr(CMinHash, "ALGORITHM_VERSION", 1),
+            "rminhash_algorithm_version": getattr(RMinHash, "ALGORITHM_VERSION", 1),
             "library_versions": {
                 "datasketch": resolve_package_version("datasketch"),
                 "datasets": resolve_package_version("datasets"),
