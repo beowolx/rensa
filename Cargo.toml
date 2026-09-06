@@ -1,6 +1,6 @@
 [package]
 name = "rensa"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.83"
 authors = ["Luis Cardoso <luis@luiscardoso.dev>"]
